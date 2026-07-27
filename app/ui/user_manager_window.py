@@ -1,7 +1,9 @@
 """Administrator user-management window."""
 import tkinter as tk
 from tkinter import messagebox, ttk
-from app.security.user_manager import AuthorizationError, UserManager, VALID_ROLES
+from app.security.user_manager import AuthorizationError, UserManager
+from app.ui.password_reset import show_password_reset
+from app.ui.user_form import show_user_form
 from app.ui.styles import PADDING
 
 
@@ -38,26 +40,19 @@ def open_user_manager(parent, auth, session):
                 "Yes" if user["is_active"] else "No", user["created_at"], user["last_login_at"] or "—", user["updated_at"] or "—"))
 
     def user_form(user=None):
-        dialog = tk.Toplevel(window); dialog.title("Edit user" if user else "Add user"); dialog.transient(window); dialog.grab_set()
-        fields = ttk.Frame(dialog, padding=PADDING); fields.pack()
-        username = tk.StringVar(value=user["username"] if user else "")
-        display = tk.StringVar(value=(user["display_name"] or "") if user else "")
-        role = tk.StringVar(value=user["role"] if user else "operator")
-        password = tk.StringVar()
-        entries = (("Username", username), ("Display name", display), ("Password", password))
-        for row, (label, variable) in enumerate(entries):
-            ttk.Label(fields, text=label).grid(row=row, column=0, sticky="w", pady=4)
-            entry = ttk.Entry(fields, textvariable=variable, show="•" if label == "Password" else "", width=30)
-            entry.grid(row=row, column=1, pady=4); entry.configure(state="disabled" if user and label in ("Username", "Password") else "normal")
-        ttk.Label(fields, text="Role").grid(row=3, column=0, sticky="w")
-        ttk.Combobox(fields, textvariable=role, values=sorted(VALID_ROLES), state="readonly").grid(row=3, column=1)
-        def save():
-            try:
-                if user: manager.update_user(user["id"], display_name=display.get(), role=role.get(), actor=session)
-                else: manager.create_user(username.get(), password.get(), role.get(), session, display.get())
-            except (ValueError, LookupError, AuthorizationError) as exc: messagebox.showerror("Unable to save", str(exc), parent=dialog); return
-            dialog.destroy(); refresh()
-        ttk.Button(fields, text="Save", command=save).grid(row=4, column=1, sticky="e", pady=10)
+        values = show_user_form(window, user)
+        if not values: return
+        try:
+            if user:
+                manager.update_user(user["id"], display_name=values["display_name"], role=values["role"], actor=session)
+                if bool(user["is_active"]) != values["is_active"]:
+                    manager.set_active(user["id"], values["is_active"], session)
+            else:
+                manager.create_user(values["username"], values["password"], values["role"], session,
+                                    values["display_name"], values["is_active"])
+        except (ValueError, LookupError, AuthorizationError) as exc:
+            messagebox.showerror("Unable to save", str(exc), parent=window); return
+        refresh()
 
     def edit():
         try: user_form(manager.get_user(selected(), session))
@@ -66,16 +61,11 @@ def open_user_manager(parent, auth, session):
     def reset():
         try: uid = selected()
         except LookupError as exc: messagebox.showwarning("Users", str(exc), parent=window); return
-        dialog = tk.Toplevel(window); dialog.title("Reset password"); dialog.transient(window); dialog.grab_set(); body=ttk.Frame(dialog,padding=PADDING);body.pack()
-        first, second = tk.StringVar(), tk.StringVar()
-        for row,(label,var) in enumerate((("New password",first),("Confirm password",second))):
-            ttk.Label(body,text=label).grid(row=row,column=0,sticky="w");ttk.Entry(body,textvariable=var,show="•").grid(row=row,column=1,pady=4)
-        def save():
-            if first.get()!=second.get(): messagebox.showerror("Password", "Passwords do not match", parent=dialog); return
-            try: manager.reset_password(uid, first.get(), session)
-            except (ValueError, LookupError) as exc: messagebox.showerror("Password",str(exc),parent=dialog);return
-            dialog.destroy();refresh()
-        ttk.Button(body,text="Reset",command=save).grid(row=2,column=1,sticky="e")
+        password = show_password_reset(window)
+        if password is None: return
+        try: manager.reset_password(uid, password, session)
+        except (ValueError, LookupError) as exc: messagebox.showerror("Password",str(exc),parent=window);return
+        refresh()
 
     def toggle():
         try:

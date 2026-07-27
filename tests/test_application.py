@@ -9,6 +9,8 @@ from app.config import PROJECT_ROOT, Settings
 from app.security.auth import AuthService, Session
 from app.security.passwords import hash_password, verify_password
 from app.security.user_manager import AuthorizationError, UserManager
+from app.main import requires_initial_admin
+from app.ui.dialog_utils import validate_confirmation, validate_identity
 
 
 class ApplicationServiceTests(unittest.TestCase):
@@ -25,7 +27,8 @@ class ApplicationServiceTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_application_modules_import(self):
-        for name in ("app.main", "app.ui.styles", "app.ui.dashboard", "app.ui.main_window", "app.ui.user_manager_window"):
+        for name in ("app.main", "app.ui.styles", "app.ui.dashboard", "app.ui.main_window", "app.ui.user_manager_window",
+                     "app.ui.initial_admin", "app.ui.user_form", "app.ui.password_reset"):
             self.assertIsNotNone(importlib.import_module(name))
 
     def test_logout_clears_environment(self):
@@ -51,6 +54,31 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertFalse(self.users.get_user(uid, self.admin)["is_active"])
         self.users.set_active(uid, True, self.admin)
         self.assertTrue(self.users.get_user(uid, self.admin)["is_active"])
+
+    def test_startup_decision_and_initial_administrator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auth = AuthService(Settings(Path(directory) / "fresh.db", password_iterations=100_000))
+            users = UserManager(auth)
+            self.assertTrue(requires_initial_admin(users))
+            uid = users.create_user(" FirstAdmin ", "initial-admin-123", "admin", None, " First Admin ")
+            self.assertFalse(requires_initial_admin(users))
+            row = users.get_user(uid, auth.authenticate("firstadmin", "initial-admin-123"))
+            self.assertEqual((row["role"], row["is_active"], row["display_name"]), ("admin", 1, "First Admin"))
+            with self.assertRaises(AuthorizationError):
+                users.create_user("Second", "second-admin-123", "admin")
+
+    def test_user_form_validation_helpers(self):
+        self.assertEqual(validate_identity(" user ", " User Name "), ("user", "User Name"))
+        self.assertEqual(validate_confirmation("same", "same"), "same")
+        with self.assertRaises(ValueError): validate_identity("", "Name")
+        with self.assertRaises(ValueError): validate_confirmation("one", "two")
+
+    def test_created_password_is_not_plaintext_and_inactive_creation(self):
+        uid = self.users.create_user("Pending", "pending-pass-123", "viewer", self.admin, "Pending User", False)
+        with self.auth.connection() as connection:
+            row = connection.execute("SELECT password_hash,is_active FROM Users WHERE id=?", (uid,)).fetchone()
+        self.assertNotEqual(row[0], "pending-pass-123")
+        self.assertEqual(row[1], 0)
 
     def test_non_admin_roles_cannot_administer(self):
         for role in ("operator", "viewer"):

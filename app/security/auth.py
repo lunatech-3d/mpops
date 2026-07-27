@@ -24,6 +24,7 @@ class Session:
     user_id: int
     username: str
     role: str
+    display_name: str | None = None
 
     def apply_to_environment(self) -> None:
         os.environ["MPOPS_USER_ID"] = str(self.user_id)
@@ -103,7 +104,7 @@ class AuthService:
         normalized = username.strip()
         with self.connection() as connection:
             user = connection.execute(
-                "SELECT id, username, password_hash, role, is_active FROM Users "
+                "SELECT id, username, password_hash, display_name, role, is_active FROM Users "
                 "WHERE username = ? COLLATE NOCASE",
                 (normalized,),
             ).fetchone()
@@ -115,4 +116,4 @@ class AuthService:
                 raise AuthenticationError("Invalid username or password")
             connection.execute("UPDATE Users SET last_login_at = ? WHERE id = ?", (utc_now_iso(), user["id"]))
             record_event(connection, "login_succeeded", actor_user_id=user["id"])
-        return Session(user["id"], user["username"], user["role"])
+        return Session(user["id"], user["username"], user["role"], user["display_name"])

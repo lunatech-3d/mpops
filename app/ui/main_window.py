@@ -13,7 +13,7 @@ class MainWindow:
         self.secondary_windows = []
         header=ttk.Frame(root,padding=PADDING);header.pack(fill="x")
         ttk.Label(header,text="Matterport Ops",style="Header.TLabel").pack(side="left")
-        ttk.Label(header,text=f"Signed in as {session.username} | {session.role.title()}").pack(side="right")
+        ttk.Label(header,text=f"Signed in as: {session.display_name or session.username} | Role: {session.role.title()}").pack(side="right")
         body=ttk.Frame(root);body.pack(fill="both",expand=True)
         nav=ttk.Frame(body,padding=PADDING);nav.pack(side="left",fill="y")
         self.content=ttk.Frame(body,style="App.TFrame");self.content.pack(side="left",fill="both",expand=True)
@@ -21,7 +21,8 @@ class MainWindow:
             command=self.show_dashboard if name=="Dashboard" else lambda n=name:self.show_placeholder(n)
             ttk.Button(nav,text=name,style="Nav.TButton",command=command,width=18).pack(fill="x",pady=2)
         ttk.Separator(nav).pack(fill="x",pady=8)
-        ttk.Button(nav,text="Administration → Users",command=self.open_users).pack(fill="x",pady=2)
+        if session.role == "admin":
+            ttk.Button(nav,text="Administration → Users",command=self.open_users).pack(fill="x",pady=2)
         ttk.Button(nav,text="Log Out",command=self.logout).pack(fill="x",pady=(20,2))
         ttk.Button(nav,text="Exit",command=root.destroy).pack(fill="x",pady=2)
         self.show_dashboard()

@@ -18,34 +18,48 @@ class UserManager:
     def __init__(self, auth: AuthService):
         self.auth = auth
 
+    def count_users(self) -> int:
+        """Return the account count without exposing a connection to the UI."""
+        with self.auth.connection() as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM Users").fetchone()[0])
+
     @staticmethod
     def _require_admin(actor: Session) -> None:
         if actor.role != "admin":
             raise AuthorizationError("Administrator role required")
 
     def create_user(self, username: str, password: str, role: str = "operator",
-                    actor: Session | None = None, display_name: str | None = None) -> int:
+                    actor: Session | None = None, display_name: str | None = None,
+                    is_active: bool = True) -> int:
         clean = username.strip()
         if not clean or len(clean) > 100:
             raise ValueError("Username must contain between 1 and 100 characters")
         if role not in VALID_ROLES:
             raise ValueError(f"Role must be one of: {', '.join(sorted(VALID_ROLES))}")
+        name = (display_name or "").strip()
+        if not name:
+            name = clean
+        if len(name) > 100:
+            raise ValueError("Display name must contain between 1 and 100 characters")
+        if not isinstance(is_active, bool):
+            raise ValueError("Active must be a Boolean value")
         encoded = hash_password(password, self.auth.settings.password_iterations)
         try:
             with self.auth.connection() as connection:
                 if actor is None:
                     if connection.execute("SELECT COUNT(*) FROM Users").fetchone()[0] or role != "admin":
                         raise AuthorizationError("Only the initial administrator can be created without a session")
+                    is_active = True
                 else:
                     self._require_admin(actor)
                 cursor = connection.execute(
                     """INSERT INTO Users (username, password_hash, display_name, role,
-                       is_active, created_at, created_by) VALUES (?, ?, ?, ?, 1, ?, ?)""",
-                    (clean, encoded, (display_name or clean).strip(), role,
+                       is_active, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (clean, encoded, name, role, int(is_active),
                      utc_now_iso(), actor.user_id if actor else None))
                 user_id = int(cursor.lastrowid)
                 record_event(connection, "user_created", actor_user_id=actor.user_id if actor else user_id,
-                             subject_user_id=user_id, details={"role": role})
+                             subject_user_id=user_id, details={"role": role, "initial_administrator": actor is None})
                 return user_id
         except sqlite3.IntegrityError as exc:
             raise ValueError("A user with that username already exists") from exc

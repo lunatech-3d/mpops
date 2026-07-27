@@ -3,12 +3,13 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 from app.security.auth import AuthenticationError, AuthService, Session
 from app.ui.styles import PADDING
+from app.ui.dialog_utils import center_window
 
 
 def show_login(root: tk.Tk, auth: AuthService | None = None) -> Session | None:
     auth = auth or AuthService()
     result = None
-    dialog = tk.Toplevel(root); dialog.title("Matterport Ops — Sign in"); dialog.resizable(False, False); dialog.transient(root); dialog.grab_set()
+    dialog = tk.Toplevel(root); dialog.title("Matterport Ops Login"); dialog.resizable(False, False); dialog.transient(root); dialog.grab_set()
     frame=ttk.Frame(dialog,padding=PADDING*2);frame.pack()
     username,password=tk.StringVar(),tk.StringVar()
     ttk.Label(frame,text="Matterport Ops",style="Header.TLabel").grid(row=0,column=0,sticky="w",pady=(0,12))
@@ -17,10 +18,11 @@ def show_login(root: tk.Tk, auth: AuthService | None = None) -> Session | None:
     def submit():
         nonlocal result
         try: result=auth.authenticate(username.get(),password.get())
-        except AuthenticationError as exc: messagebox.showerror("Sign in failed",str(exc),parent=dialog);password.set("");return
+        except AuthenticationError: messagebox.showerror("Sign in failed","Invalid username or password.",parent=dialog);password.set("");return
         result.apply_to_environment();dialog.destroy()
-    ttk.Button(frame,text="Sign in",command=submit).grid(row=5,column=0,sticky="e")
-    dialog.protocol("WM_DELETE_WINDOW",dialog.destroy);dialog.bind("<Return>",lambda _e:submit());user_entry.focus_set();root.wait_window(dialog)
+    buttons=ttk.Frame(frame);buttons.grid(row=5,column=0,sticky="e")
+    ttk.Button(buttons,text="Login",command=submit).pack(side="left",padx=3);ttk.Button(buttons,text="Cancel",command=dialog.destroy).pack(side="left",padx=3)
+    dialog.protocol("WM_DELETE_WINDOW",dialog.destroy);dialog.bind("<Return>",lambda _e:submit());dialog.bind("<Escape>",lambda _e:dialog.destroy());user_entry.focus_set();center_window(dialog);root.wait_window(dialog)
     return result
 
 
