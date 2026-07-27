@@ -18,9 +18,8 @@ def record_event(
     details: dict[str, Any] | None = None,
 ) -> None:
     connection.execute(
-        """INSERT INTO audit_log
+        """INSERT INTO AuditLog
            (occurred_at, actor_user_id, subject_user_id, action, details_json)
            VALUES (?, ?, ?, ?, ?)""",
         (utc_now_iso(), actor_user_id, subject_user_id, action, json.dumps(details or {}, sort_keys=True)),
     )
-

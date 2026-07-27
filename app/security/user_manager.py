@@ -34,14 +34,14 @@ class UserManager:
         try:
             with self.auth.connect() as connection:
                 if actor is None:
-                    if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] or role != "admin":
+                    if connection.execute("SELECT COUNT(*) FROM Users").fetchone()[0] or role != "admin":
                         raise AuthorizationError("Only the initial administrator can be created without a session")
                 else:
                     self._require_admin(actor)
                 cursor = connection.execute(
-                    """INSERT INTO users (username, username_key, password_hash, display_name, role,
-                       is_active, created_at, created_by) VALUES (?, ?, ?, ?, ?, 1, ?, ?)""",
-                    (clean, clean.casefold(), encoded, (display_name or clean).strip(), role,
+                    """INSERT INTO Users (username, password_hash, display_name, role,
+                       is_active, created_at, created_by) VALUES (?, ?, ?, ?, 1, ?, ?)""",
+                    (clean, encoded, (display_name or clean).strip(), role,
                      utc_now_iso(), actor.user_id if actor else None))
                 user_id = int(cursor.lastrowid)
                 record_event(connection, "user_created", actor_user_id=actor.user_id if actor else user_id,
@@ -54,7 +54,7 @@ class UserManager:
         self._require_admin(actor)
         clauses, values = [], []
         if search.strip():
-            clauses.append("(username_key LIKE ? OR lower(coalesce(display_name, '')) LIKE ?)")
+            clauses.append("(username LIKE ? COLLATE NOCASE OR lower(coalesce(display_name, '')) LIKE ?)")
             term = f"%{search.strip().casefold()}%"
             values.extend((term, term))
         if active is not None:
@@ -64,7 +64,7 @@ class UserManager:
         with self.auth.connect() as connection:
             rows = connection.execute(
                 "SELECT id, username, display_name, role, is_active, created_at, last_login_at, updated_at "
-                f"FROM users{where} ORDER BY username_key", values)
+                f"FROM Users{where} ORDER BY username COLLATE NOCASE", values)
             return [dict(row) for row in rows]
 
     def get_user(self, user_id: int, actor: Session) -> dict:
@@ -72,7 +72,7 @@ class UserManager:
         with self.auth.connect() as connection:
             row = connection.execute(
                 "SELECT id, username, display_name, role, is_active, created_at, last_login_at, updated_at "
-                "FROM users WHERE id = ?", (user_id,)).fetchone()
+                "FROM Users WHERE id = ?", (user_id,)).fetchone()
         if row is None:
             raise LookupError("User not found")
         return dict(row)
@@ -86,7 +86,7 @@ class UserManager:
             raise ValueError(f"Role must be one of: {', '.join(sorted(VALID_ROLES))}")
         with self.auth.connect() as connection:
             cursor = connection.execute(
-                "UPDATE users SET display_name=?, role=?, updated_at=?, updated_by=? WHERE id=?",
+                "UPDATE Users SET display_name=?, role=?, updated_at=?, updated_by=? WHERE id=?",
                 (name, role, utc_now_iso(), actor.user_id, user_id))
             if cursor.rowcount != 1:
                 raise LookupError("User not found")
@@ -98,7 +98,7 @@ class UserManager:
         encoded = hash_password(password, self.auth.settings.password_iterations)
         with self.auth.connect() as connection:
             cursor = connection.execute(
-                "UPDATE users SET password_hash=?, updated_at=?, updated_by=? WHERE id=?",
+                "UPDATE Users SET password_hash=?, updated_at=?, updated_by=? WHERE id=?",
                 (encoded, utc_now_iso(), actor.user_id, user_id))
             if cursor.rowcount != 1:
                 raise LookupError("User not found")
@@ -110,7 +110,7 @@ class UserManager:
             raise ValueError("Administrators cannot deactivate their own account")
         with self.auth.connect() as connection:
             cursor = connection.execute(
-                "UPDATE users SET is_active=?, updated_at=?, updated_by=? WHERE id=?",
+                "UPDATE Users SET is_active=?, updated_at=?, updated_by=? WHERE id=?",
                 (int(active), utc_now_iso(), actor.user_id, user_id))
             if cursor.rowcount != 1:
                 raise LookupError("User not found")

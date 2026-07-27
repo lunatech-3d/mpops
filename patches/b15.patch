@@ -1,0 +1,68 @@
+diff --git a/tests/test_auth.py b/tests/test_auth.py
+index 6a5e333a1642a9eb84eb7ca43b5f9a412e1727ed..ead29dcda2bf90639615e14cb72ad00b7133ad55 100644
+--- a/tests/test_auth.py
++++ b/tests/test_auth.py
+@@ -5,58 +5,61 @@ import unittest
+ from pathlib import Path
+ 
+ from app.config import PROJECT_ROOT, Settings
+ from app.security.auth import AuthenticationError, AuthService
+ from app.security.user_manager import AuthorizationError, UserManager
+ 
+ 
+ class AuthTests(unittest.TestCase):
+     def setUp(self):
+         self.tempdir = tempfile.TemporaryDirectory()
+         settings = Settings(
+             database_path=Path(self.tempdir.name) / "mpops.db",
+             schema_path=PROJECT_ROOT / "database" / "schema" / "001_initial.sql",
+             password_iterations=100_000,
+         )
+         self.auth = AuthService(settings)
+         self.users = UserManager(self.auth)
+         self.admin_id = self.users.create_user("Admin", "correct-horse-123", "admin")
+ 
+     def tearDown(self):
+         self.tempdir.cleanup()
+ 
+     def test_authentication_and_session_environment(self):
+         session = self.auth.authenticate("admin", "correct-horse-123")
+         self.assertEqual((session.user_id, session.username, session.role), (self.admin_id, "Admin", "admin"))
++        with self.auth.connect() as connection:
++            self.assertEqual(connection.execute("SELECT action FROM AuditLog ORDER BY id DESC").fetchone()[0],
++                             "login_succeeded")
+         session.apply_to_environment()
+         self.assertEqual(os.environ["MPOPS_USERNAME"], "Admin")
+ 
+     def test_bad_password_is_generic_and_audited(self):
+         with self.assertRaisesRegex(AuthenticationError, "Invalid username or password"):
+             self.auth.authenticate("Admin", "not-the-password")
+         with self.auth.connect() as connection:
+-            action = connection.execute("SELECT action FROM audit_log ORDER BY id DESC").fetchone()[0]
++            action = connection.execute("SELECT action FROM AuditLog ORDER BY id DESC").fetchone()[0]
+         self.assertEqual(action, "login_failed")
+ 
+     def test_only_first_admin_can_be_created_without_session(self):
+         with self.assertRaises(AuthorizationError):
+             self.users.create_user("Operator", "another-secure-123", "operator")
+         admin = self.auth.authenticate("Admin", "correct-horse-123")
+         new_id = self.users.create_user("Operator", "another-secure-123", "operator", admin)
+         self.assertGreater(new_id, self.admin_id)
+ 
+     def test_inactive_user_cannot_authenticate(self):
+         admin = self.auth.authenticate("Admin", "correct-horse-123")
+         user_id = self.users.create_user("Viewer", "viewer-secure-123", "viewer", admin)
+         self.users.set_active(user_id, False, admin)
+         with self.assertRaises(AuthenticationError):
+             self.auth.authenticate("Viewer", "viewer-secure-123")
+ 
+     def test_schema_is_independent(self):
+         self.assertEqual(self.auth.settings.database_path.name, "mpops.db")
+         with sqlite3.connect(self.auth.settings.database_path) as connection:
+             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+-        self.assertTrue({"users", "audit_log"}.issubset(tables))
++        self.assertTrue({"Users", "AuditLog", "Techs", "TechAddresses", "SchemaMigrations"}.issubset(tables))
+ 
+ 
+ if __name__ == "__main__":
+     unittest.main()

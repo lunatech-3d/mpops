@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import importlib.util
 from dataclasses import dataclass
 
 from app.config import Settings, get_settings
@@ -46,27 +47,53 @@ class AuthService:
         return connection
 
     def initialize_database(self) -> None:
-        schema = self.settings.schema_path.read_text(encoding="utf-8")
         with self.connect() as connection:
-            connection.executescript(schema)
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS schema_migrations "
-                "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
-            )
-            applied = {row[0] for row in connection.execute("SELECT name FROM schema_migrations")}
-            for migration in sorted(self.settings.migrations_path.glob("[0-9]*.sql")):
-                if migration.name not in applied:
-                    connection.executescript(migration.read_text(encoding="utf-8"))
-                    connection.execute(
-                        "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
-                        (migration.name, utc_now_iso()),
-                    )
+            has_tables = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
+            ).fetchone()
+            if not has_tables:
+                connection.executescript(self.settings.schema_path.read_text(encoding="utf-8"))
+                return
+            connection.execute("CREATE TABLE IF NOT EXISTS SchemaMigrations "
+                               "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
+            connection.commit()
+            applied = {row[0] for row in connection.execute("SELECT name FROM SchemaMigrations")}
+            migrations = sorted((*self.settings.migrations_path.glob("[0-9]*.sql"),
+                                 *self.settings.migrations_path.glob("[0-9]*.py")))
+            for migration in migrations:
+                if migration.name in applied:
+                    continue
+                try:
+                    connection.execute("PRAGMA foreign_keys = OFF")
+                    connection.execute("BEGIN")
+                    if migration.suffix == ".sql":
+                        for statement in migration.read_text(encoding="utf-8").split(";"):
+                            if statement.strip():
+                                connection.execute(statement)
+                    else:
+                        spec = importlib.util.spec_from_file_location("mpops_migration", migration)
+                        module = importlib.util.module_from_spec(spec)
+                        assert spec and spec.loader
+                        spec.loader.exec_module(module)
+                        module.migrate(connection)
+                    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+                    if violations:
+                        raise RuntimeError(f"foreign-key check failed: {violations}")
+                    connection.execute("INSERT INTO SchemaMigrations(name, applied_at) VALUES (?, ?)",
+                                       (migration.name, utc_now_iso()))
+                    connection.commit()
+                except Exception:
+                    connection.rollback()
+                    raise
+                finally:
+                    connection.execute("PRAGMA foreign_keys = ON")
 
     def authenticate(self, username: str, password: str) -> Session:
-        normalized = username.strip().casefold()
+        normalized = username.strip()
         with self.connect() as connection:
             user = connection.execute(
-                "SELECT id, username, password_hash, role, is_active FROM users WHERE username_key = ?",
+                "SELECT id, username, password_hash, role, is_active FROM Users "
+                "WHERE username = ? COLLATE NOCASE",
                 (normalized,),
             ).fetchone()
             if user is None or not user["is_active"] or not verify_password(password, user["password_hash"]):
@@ -75,6 +102,6 @@ class AuthService:
                 # rolls back a transaction when an exception leaves the block.
                 connection.commit()
                 raise AuthenticationError("Invalid username or password")
-            connection.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (utc_now_iso(), user["id"]))
+            connection.execute("UPDATE Users SET last_login_at = ? WHERE id = ?", (utc_now_iso(), user["id"]))
             record_event(connection, "login_succeeded", actor_user_id=user["id"])
         return Session(user["id"], user["username"], user["role"])

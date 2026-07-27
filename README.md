@@ -23,7 +23,11 @@ An administrator cannot deactivate their own account. Password resets require co
 
 ## Database and current scope
 
-The database defaults to `mpops.db` in the repository root. Set `MPOPS_DB_PATH` to another file path. The database directory, initial schema, and forward-only migrations are applied automatically at startup while preserving existing users and hashes.
+The production database defaults to `C:/sqlite/mpops/database/mpops.db`. Set
+`MPOPS_DB_PATH` to override it (tests always use temporary paths). The parent directory,
+canonical initial schema, and transactional forward-only migrations are handled at
+startup while preserving existing records and password hashes. The live database and
+its WAL/journal sidecars are ignored because they contain sensitive data.
 
 The Dashboard contains neutral summaries for upcoming jobs, assignment, technician payments, and reconciliation. Jobs, Technicians, Markets, Clients, Payments, and Reports are clear placeholders; no speculative operational tables or records are created.
 
@@ -31,6 +35,12 @@ The Dashboard contains neutral summaries for upcoming jobs, assignment, technici
 
 ```bash
 python -m unittest discover -s tests -v
+```
+
+Inspect a deployment without printing password hashes:
+
+```bash
+python -m app.verify_database
 ```
 
 See [`docs/architecture/authentication.md`](docs/architecture/authentication.md) for security boundaries and [`docs/decisions/0001-independent-project.md`](docs/decisions/0001-independent-project.md) for project separation.

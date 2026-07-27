@@ -27,6 +27,9 @@ class AuthTests(unittest.TestCase):
     def test_authentication_and_session_environment(self):
         session = self.auth.authenticate("admin", "correct-horse-123")
         self.assertEqual((session.user_id, session.username, session.role), (self.admin_id, "Admin", "admin"))
+        with self.auth.connect() as connection:
+            self.assertEqual(connection.execute("SELECT action FROM AuditLog ORDER BY id DESC").fetchone()[0],
+                             "login_succeeded")
         session.apply_to_environment()
         self.assertEqual(os.environ["MPOPS_USERNAME"], "Admin")
 
@@ -34,7 +37,7 @@ class AuthTests(unittest.TestCase):
         with self.assertRaisesRegex(AuthenticationError, "Invalid username or password"):
             self.auth.authenticate("Admin", "not-the-password")
         with self.auth.connect() as connection:
-            action = connection.execute("SELECT action FROM audit_log ORDER BY id DESC").fetchone()[0]
+            action = connection.execute("SELECT action FROM AuditLog ORDER BY id DESC").fetchone()[0]
         self.assertEqual(action, "login_failed")
 
     def test_only_first_admin_can_be_created_without_session(self):
@@ -55,7 +58,7 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(self.auth.settings.database_path.name, "mpops.db")
         with sqlite3.connect(self.auth.settings.database_path) as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertTrue({"users", "audit_log"}.issubset(tables))
+        self.assertTrue({"Users", "AuditLog", "Techs", "TechAddresses", "SchemaMigrations"}.issubset(tables))
 
 
 if __name__ == "__main__":

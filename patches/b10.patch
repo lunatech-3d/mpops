@@ -1,0 +1,14 @@
+diff --git a/database/migrations/README.md b/database/migrations/README.md
+index 3396cad90c84a34190f5add70b66dcdb55ad34bc..a681a47484e57991be373599cbef8b04b47272bb 100644
+--- a/database/migrations/README.md
++++ b/database/migrations/README.md
+@@ -1,4 +1,7 @@
+ # Migrations
+ 
+-Numbered forward-only migrations will be added here after the initial schema is released.
+-
++Numbered `.sql` and conditional `.py` migrations run in filename order. A migration is
++recorded in `SchemaMigrations` only after its transaction and foreign-key check pass.
++`002_reconcile_legacy.py` normalizes the supported historical schema variants; fresh
++databases already contain the final schema and mark that compatibility migration as
++applied in `001_initial.sql`.

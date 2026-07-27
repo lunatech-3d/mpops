@@ -9,6 +9,7 @@ dist/
 build/
 *.egg-info/
 mpops.db
-mpops.db-*
+mpops.db-shm
+mpops.db-wal
+mpops.db-journal
 .env
-

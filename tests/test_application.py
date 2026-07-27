@@ -35,9 +35,16 @@ class ApplicationServiceTests(unittest.TestCase):
 
     def test_admin_crud_password_and_activation(self):
         uid = self.users.create_user("NewUser", "original-pass-123", "operator", self.admin, "New User")
+        with self.auth.connect() as connection:
+            self.assertEqual(connection.execute("SELECT created_by FROM Users WHERE id=?", (uid,)).fetchone()[0],
+                             self.admin.user_id)
         self.assertEqual(len(self.users.list_users(self.admin, "new user")), 1)
         self.users.update_user(uid, display_name="Changed Name", role="viewer", actor=self.admin)
         self.assertEqual(self.users.get_user(uid, self.admin)["role"], "viewer")
+        with self.auth.connect() as connection:
+            updated = connection.execute("SELECT updated_at,updated_by FROM Users WHERE id=?", (uid,)).fetchone()
+            self.assertRegex(updated[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
+            self.assertEqual(updated[1], self.admin.user_id)
         self.users.reset_password(uid, "replacement-123", self.admin)
         self.assertEqual(self.auth.authenticate("newuser", "replacement-123").user_id, uid)
         self.users.set_active(uid, False, self.admin)
@@ -66,21 +73,85 @@ class ApplicationServiceTests(unittest.TestCase):
     def test_only_expected_tables_are_initialized(self):
         with self.auth.connect() as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertEqual(tables, {"users", "audit_log", "schema_migrations"})
+        self.assertEqual(tables - {"sqlite_sequence"},
+                         {"Users", "AuditLog", "Techs", "TechAddresses", "SchemaMigrations"})
+        with self.auth.connect() as connection:
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(Users)")}
+            self.assertEqual(columns, {"id", "username", "password_hash", "display_name", "role",
+                "is_active", "last_login_at", "created_at", "created_by", "updated_at", "updated_by"})
+            self.assertNotIn("username_key", columns)
+            self.assertFalse(connection.execute("PRAGMA foreign_key_check").fetchall())
 
 
 class MigrationTests(unittest.TestCase):
     def test_migration_preserves_existing_user_and_hash(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "old.db"
-            schema = (PROJECT_ROOT / "database/schema/001_initial.sql").read_text()
             encoded = hash_password("preserved-pass-123", 100_000)
             with sqlite3.connect(path) as connection:
-                connection.executescript(schema)
+                connection.executescript("""
+                    CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, username_key TEXT UNIQUE,
+                      password_hash TEXT, role TEXT, is_active INTEGER, created_at TEXT, last_login_at TEXT);
+                    CREATE TABLE audit_log (id INTEGER PRIMARY KEY, occurred_at TEXT, actor_user_id INTEGER,
+                      subject_user_id INTEGER, action TEXT, details_json TEXT);
+                    CREATE TABLE Techs (TechID INTEGER PRIMARY KEY, TechCode TEXT, FirstName TEXT, LastName TEXT,
+                      Status TEXT, CreatedAt TEXT, CreatedBy INTEGER,
+                      FOREIGN KEY(CreatedBy) REFERENCES Users(UserID));
+                    CREATE TABLE TechAddresses (AddressID INTEGER PRIMARY KEY, TechID INTEGER, Address1 TEXT,
+                      City TEXT, State TEXT, ZipCode TEXT, IsPrimary INTEGER, CreatedAt TEXT, CreatedBy INTEGER,
+                      FOREIGN KEY(TechID) REFERENCES Techs(TechID),
+                      FOREIGN KEY(CreatedBy) REFERENCES Users(UserID));
+                """)
                 connection.execute("INSERT INTO users (username,username_key,password_hash,role,is_active,created_at) VALUES (?,?,?,?,1,?)",
                                    ("Legacy", "legacy", encoded, "admin", "2020-01-01T00:00:00Z"))
+                connection.execute("INSERT INTO audit_log VALUES (7,?,?,?,?,?)",
+                    ("2020-01-01", 1, 1, "legacy_event", "{}"))
+                connection.execute("INSERT INTO Techs VALUES (10,'T-10','Ada','Lovelace','Active','2020',1)")
+                connection.execute("INSERT INTO TechAddresses VALUES (20,10,'1 Main','Town','ST','12345',1,'2020',1)")
             auth = AuthService(Settings(path, password_iterations=100_000))
             self.assertEqual(auth.authenticate("Legacy", "preserved-pass-123").username, "Legacy")
             with auth.connect() as connection:
-                columns = {row[1] for row in connection.execute("PRAGMA table_info(users)")}
-            self.assertTrue({"display_name", "created_by", "updated_at", "updated_by"}.issubset(columns))
+                row = connection.execute("SELECT id,password_hash FROM Users").fetchone()
+                self.assertEqual((row[0], row[1]), (1, encoded))
+                self.assertEqual(connection.execute("SELECT tech_id FROM Techs").fetchone()[0], 10)
+                self.assertEqual(connection.execute("SELECT address_id FROM TechAddresses").fetchone()[0], 20)
+                self.assertEqual(connection.execute("SELECT action FROM AuditLog WHERE id=7").fetchone()[0], "legacy_event")
+                self.assertFalse(connection.execute("PRAGMA foreign_key_check").fetchall())
+                applied = connection.execute("SELECT count(*) FROM SchemaMigrations WHERE name=?",
+                    ("002_reconcile_legacy.py",)).fetchone()[0]
+                self.assertEqual(applied, 1)
+            AuthService(Settings(path, password_iterations=100_000))
+            with auth.connect() as connection:
+                self.assertEqual(connection.execute("SELECT count(*) FROM SchemaMigrations").fetchone()[0], 1)
+
+    def test_failed_migration_is_not_recorded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "db.sqlite"
+            migrations = root / "migrations"
+            migrations.mkdir()
+            (migrations / "999_fail.sql").write_text("CREATE TABLE TemporaryThing(id); INVALID SQL;")
+            with sqlite3.connect(path) as connection:
+                connection.execute("CREATE TABLE Existing(id)")
+            settings = Settings(path, migrations_path=migrations, password_iterations=100_000)
+            with self.assertRaises(sqlite3.OperationalError):
+                AuthService(settings)
+            with sqlite3.connect(path) as connection:
+                self.assertFalse(connection.execute("SELECT 1 FROM SchemaMigrations WHERE name='999_fail.sql'").fetchone())
+                self.assertFalse(connection.execute("SELECT 1 FROM sqlite_master WHERE name='TemporaryThing'").fetchone())
+
+    def test_primary_address_is_unique(self):
+        with self.settings_database() as (auth, admin_id):
+            with auth.connect() as connection:
+                connection.execute("INSERT INTO Techs(tech_code,first_name,last_name,created_by) VALUES('T1','A','B',?)", (admin_id,))
+                connection.execute("INSERT INTO TechAddresses(tech_id,address_1,city,state,zip_code,created_by) VALUES(1,'A','C','S','Z',?)", (admin_id,))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute("INSERT INTO TechAddresses(tech_id,address_1,city,state,zip_code,created_by) VALUES(1,'B','C','S','Z',?)", (admin_id,))
+
+    from contextlib import contextmanager
+    @contextmanager
+    def settings_database(self):
+        with tempfile.TemporaryDirectory() as directory:
+            auth = AuthService(Settings(Path(directory) / "db", password_iterations=100_000))
+            admin_id = UserManager(auth).create_user("Admin", "admin-password-123", "admin")
+            yield auth, admin_id
