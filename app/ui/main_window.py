@@ -9,6 +9,10 @@ from app.ui.styles import NAV_BACKGROUND, PADDING
 class MainWindow:
     def __init__(self, root, auth, session, on_logout):
         self.root, self.auth, self.session, self.on_logout = root, auth, session, on_logout
+        # A new authenticated shell always owns a clean root, including after
+        # repeated login/logout cycles.
+        for child in root.winfo_children():
+            child.destroy()
         root.title("Matterport Ops"); root.geometry("1100x700"); root.minsize(850, 550); root.deiconify()
         self.secondary_windows = []
         header=ttk.Frame(root,padding=PADDING);header.pack(fill="x")

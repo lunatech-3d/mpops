@@ -4,13 +4,15 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from app.config import PROJECT_ROOT, Settings
 from app.security.auth import AuthService, Session
 from app.security.passwords import hash_password, verify_password
 from app.security.user_manager import AuthorizationError, UserManager
 from app.main import requires_initial_admin
-from app.ui.dialog_utils import validate_confirmation, validate_identity
+from app.ui.dialog_utils import close_modal, prepare_modal_dialog, validate_confirmation, validate_identity
+from app.ui.main_window import MainWindow
 
 
 class ApplicationServiceTests(unittest.TestCase):
@@ -35,6 +37,74 @@ class ApplicationServiceTests(unittest.TestCase):
         self.admin.apply_to_environment()
         Session.clear_environment()
         self.assertTrue(all(key not in os.environ for key in ("MPOPS_USER_ID", "MPOPS_USERNAME", "MPOPS_ROLE")))
+
+    def test_modal_lifecycle_skips_hidden_parent_and_waits_before_grab(self):
+        calls = []
+        parent = MagicMock()
+        parent.winfo_viewable.return_value = False
+        dialog = MagicMock()
+        dialog.winfo_reqwidth.return_value = 300
+        dialog.winfo_reqheight.return_value = 200
+        dialog.winfo_screenwidth.return_value = 1200
+        dialog.winfo_screenheight.return_value = 800
+        dialog.wait_visibility.side_effect = lambda: calls.append("visible")
+        dialog.grab_set.side_effect = lambda: calls.append("grab")
+
+        prepare_modal_dialog(dialog, parent)
+
+        dialog.transient.assert_not_called()
+        self.assertLess(calls.index("visible"), calls.index("grab"))
+        dialog.deiconify.assert_called_once_with()
+        dialog.lift.assert_called_once_with()
+        dialog.focus_force.assert_called_once_with()
+        dialog.attributes.assert_any_call("-topmost", True)
+        clear_topmost = dialog.after_idle.call_args.args[0]
+        clear_topmost()
+        dialog.attributes.assert_any_call("-topmost", False)
+
+    def test_close_modal_releases_grab_before_destroying(self):
+        calls = []
+        dialog = MagicMock()
+        dialog.grab_release.side_effect = lambda: calls.append("release")
+        dialog.destroy.side_effect = lambda: calls.append("destroy")
+        close_modal(dialog)
+        self.assertEqual(calls, ["release", "destroy"])
+
+    @patch("app.ui.initial_admin.prepare_modal_dialog")
+    @patch("app.ui.initial_admin.tk.StringVar", side_effect=lambda: MagicMock())
+    @patch("app.ui.initial_admin.tk.Toplevel")
+    def test_cancelling_first_run_setup_returns_false(self, toplevel, _string_var, _prepare):
+        dialog = toplevel.return_value
+        dialog.winfo_exists.return_value = False
+        root = MagicMock()
+        self.assertFalse(__import__("app.ui.initial_admin", fromlist=["show_initial_admin_dialog"])
+                         .show_initial_admin_dialog(root, MagicMock()))
+
+    @patch("app.security.login.prepare_modal_dialog")
+    @patch("app.security.login.tk.StringVar", side_effect=lambda: MagicMock())
+    @patch("app.security.login.tk.Toplevel")
+    def test_cancelling_login_returns_none(self, toplevel, _string_var, _prepare):
+        dialog = toplevel.return_value
+        dialog.winfo_exists.return_value = False
+        root = MagicMock()
+        self.assertIsNone(__import__("app.security.login", fromlist=["show_login"])
+                          .show_login(root, MagicMock()))
+
+    def test_logout_clears_session_root_and_invokes_login(self):
+        window = MainWindow.__new__(MainWindow)
+        child, secondary = MagicMock(), MagicMock()
+        secondary.winfo_exists.return_value = True
+        window.root = MagicMock()
+        window.root.winfo_children.return_value = [child]
+        window.secondary_windows = [secondary]
+        window.on_logout = MagicMock()
+        with patch.object(Session, "clear_environment") as clear:
+            window.logout()
+        clear.assert_called_once_with()
+        secondary.destroy.assert_called_once_with()
+        child.destroy.assert_called_once_with()
+        window.root.withdraw.assert_called_once_with()
+        window.on_logout.assert_called_once_with()
 
     def test_admin_crud_password_and_activation(self):
         uid = self.users.create_user("NewUser", "original-pass-123", "operator", self.admin, "New User")
