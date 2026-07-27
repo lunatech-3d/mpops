@@ -30,7 +30,8 @@ class ApplicationServiceTests(unittest.TestCase):
 
     def test_application_modules_import(self):
         for name in ("app.main", "app.ui.styles", "app.ui.dashboard", "app.ui.main_window", "app.ui.user_manager_window",
-                     "app.ui.initial_admin", "app.ui.user_form", "app.ui.password_reset"):
+                     "app.ui.initial_admin", "app.ui.user_form", "app.ui.password_reset",
+                     "app.ui.technician_manager", "app.ui.technician_form", "app.ui.address_form"):
             self.assertIsNotNone(importlib.import_module(name))
 
     def test_logout_clears_environment(self):
