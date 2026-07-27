@@ -1,0 +1,57 @@
+diff --git a/README.md b/README.md
+index b203bfd22941ef38a38b1792fef3d0aec899f5bd..a4f99d5e804705fbd4c555378a593c7f4346eadf 100644
+--- a/README.md
++++ b/README.md
+@@ -1,32 +1,36 @@
+ # Matterport Ops
+ 
+-Matterport Ops is an independent desktop operations application for managing
+-Matterport-related workflows. This repository owns its source, SQLite database,
+-configuration, assets, documentation, tests, and release history. It has no
+-runtime dependency on Phoenix Database.
+-
+-The first application layer provides local user registration, authentication,
+-session context, role-aware user administration, and an append-only audit trail.
+-Passwords are stored as salted PBKDF2-HMAC-SHA256 hashes. The application uses
+-`mpops.db` by default and recognizes only `MPOPS_`-prefixed identity settings.
++Matterport Ops is an independent Tkinter desktop operations application with no runtime dependency on Phoenix Database. It uses SQLite, role-aware authentication, PBKDF2-HMAC-SHA256 password hashes, sessions, and an append-only audit log.
+ 
+ ## Quick start
+ 
++Bootstrap the first administrator **only when the database has no users**, then start the application:
++
+ ```bash
+ python -m app.security.register_user --username admin --role admin
+-python -m app.security.login
++python -m app.main
+ ```
+ 
+-Set `MPOPS_DB_PATH` to select another database file. On first use, the schema is
+-created automatically from `database/schema/001_initial.sql`.
++The login screen rejects invalid credentials and inactive accounts without disclosing account details. After login, the header shows the current username and role. Log Out clears the session and returns to login without restarting Python; Exit closes the application.
++
++## Roles and administration
++
++* `admin` — full access, including **Administration → Users**. Administrators can search/filter users, add or edit accounts, reset passwords, and activate/deactivate other users.
++* `operator` — normal operational access; no user administration.
++* `viewer` — read-only access; no user administration.
++
++An administrator cannot deactivate their own account. Password resets require confirmation in the interface and use the same validation and salted hashing as account creation.
++
++## Database and current scope
++
++The database defaults to `mpops.db` in the repository root. Set `MPOPS_DB_PATH` to another file path. The database directory, initial schema, and forward-only migrations are applied automatically at startup while preserving existing users and hashes.
++
++The Dashboard contains neutral summaries for upcoming jobs, assignment, technician payments, and reconciliation. Jobs, Technicians, Markets, Clients, Payments, and Reports are clear placeholders; no speculative operational tables or records are created.
+ 
+ ## Development
+ 
+ ```bash
+ python -m unittest discover -s tests -v
+ ```
+ 
+-See [`docs/architecture/authentication.md`](docs/architecture/authentication.md)
+-for security boundaries and [`docs/decisions/0001-independent-project.md`](docs/decisions/0001-independent-project.md)
+-for the project-separation decision.
+-
++See [`docs/architecture/authentication.md`](docs/architecture/authentication.md) for security boundaries and [`docs/decisions/0001-independent-project.md`](docs/decisions/0001-independent-project.md) for project separation.

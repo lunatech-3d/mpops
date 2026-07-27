@@ -1,0 +1,7 @@
+diff --git a/app/ui/__init__.py b/app/ui/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7ae99fa863131c85df824cfc77ad7056b68ec23
+--- /dev/null
++++ b/app/ui/__init__.py
+@@ -0,0 +1 @@
++"""Tkinter interface components for Matterport Ops."""

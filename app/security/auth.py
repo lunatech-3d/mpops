@@ -27,6 +27,11 @@ class Session:
         os.environ["MPOPS_USERNAME"] = self.username
         os.environ["MPOPS_ROLE"] = self.role
 
+    @staticmethod
+    def clear_environment() -> None:
+        for name in ("MPOPS_USER_ID", "MPOPS_USERNAME", "MPOPS_ROLE"):
+            os.environ.pop(name, None)
+
 
 class AuthService:
     def __init__(self, settings: Settings | None = None):
@@ -44,6 +49,18 @@ class AuthService:
         schema = self.settings.schema_path.read_text(encoding="utf-8")
         with self.connect() as connection:
             connection.executescript(schema)
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS schema_migrations "
+                "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+            )
+            applied = {row[0] for row in connection.execute("SELECT name FROM schema_migrations")}
+            for migration in sorted(self.settings.migrations_path.glob("[0-9]*.sql")):
+                if migration.name not in applied:
+                    connection.executescript(migration.read_text(encoding="utf-8"))
+                    connection.execute(
+                        "INSERT INTO schema_migrations (name, applied_at) VALUES (?, ?)",
+                        (migration.name, utc_now_iso()),
+                    )
 
     def authenticate(self, username: str, password: str) -> Session:
         normalized = username.strip().casefold()

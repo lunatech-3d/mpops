@@ -14,6 +14,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 class Settings:
     database_path: Path
     schema_path: Path = PROJECT_ROOT / "database" / "schema" / "001_initial.sql"
+    migrations_path: Path = PROJECT_ROOT / "database" / "migrations"
     password_iterations: int = 600_000
 
 
@@ -24,4 +25,3 @@ def get_settings() -> Settings:
     if iterations < 100_000:
         raise ValueError("MPOPS_PASSWORD_ITERATIONS must be at least 100000")
     return Settings(database_path=database_path, password_iterations=iterations)
-
