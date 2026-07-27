@@ -88,7 +88,8 @@ class MigrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "old.db"
             encoded = hash_password("preserved-pass-123", 100_000)
-            with sqlite3.connect(path) as connection:
+            connection = sqlite3.connect(path)
+            try:
                 connection.executescript("""
                     CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT, username_key TEXT UNIQUE,
                       password_hash TEXT, role TEXT, is_active INTEGER, created_at TEXT, last_login_at TEXT);
@@ -108,6 +109,9 @@ class MigrationTests(unittest.TestCase):
                     ("2020-01-01", 1, 1, "legacy_event", "{}"))
                 connection.execute("INSERT INTO Techs VALUES (10,'T-10','Ada','Lovelace','Active','2020',1)")
                 connection.execute("INSERT INTO TechAddresses VALUES (20,10,'1 Main','Town','ST','12345',1,'2020',1)")
+                connection.commit()
+            finally:
+                connection.close()
             auth = AuthService(Settings(path, password_iterations=100_000))
             self.assertEqual(auth.authenticate("Legacy", "preserved-pass-123").username, "Legacy")
             with auth.connection() as connection:
@@ -131,14 +135,21 @@ class MigrationTests(unittest.TestCase):
             migrations = root / "migrations"
             migrations.mkdir()
             (migrations / "999_fail.sql").write_text("CREATE TABLE TemporaryThing(id); INVALID SQL;")
-            with sqlite3.connect(path) as connection:
+            connection = sqlite3.connect(path)
+            try:
                 connection.execute("CREATE TABLE Existing(id)")
+                connection.commit()
+            finally:
+                connection.close()
             settings = Settings(path, migrations_path=migrations, password_iterations=100_000)
             with self.assertRaises(sqlite3.OperationalError):
                 AuthService(settings)
-            with sqlite3.connect(path) as connection:
+            connection = sqlite3.connect(path)
+            try:
                 self.assertFalse(connection.execute("SELECT 1 FROM SchemaMigrations WHERE name='999_fail.sql'").fetchone())
                 self.assertFalse(connection.execute("SELECT 1 FROM sqlite_master WHERE name='TemporaryThing'").fetchone())
+            finally:
+                connection.close()
 
     def test_primary_address_is_unique(self):
         with self.settings_database() as (auth, admin_id):

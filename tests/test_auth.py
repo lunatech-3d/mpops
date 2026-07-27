@@ -1,5 +1,4 @@
 import os
-import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,7 +55,7 @@ class AuthTests(unittest.TestCase):
 
     def test_schema_is_independent(self):
         self.assertEqual(self.auth.settings.database_path.name, "mpops.db")
-        with sqlite3.connect(self.auth.settings.database_path) as connection:
+        with self.auth.connection() as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"Users", "AuditLog", "Techs", "TechAddresses", "SchemaMigrations"}.issubset(tables))
 
