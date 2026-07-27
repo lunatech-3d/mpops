@@ -5,7 +5,7 @@ from app.security.auth import AuthService
 
 def main() -> None:
     auth = AuthService()
-    with auth.connect() as connection:
+    with auth.connection() as connection:
         tables = [row[0] for row in connection.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")]
         migrations = [row[0] for row in connection.execute("SELECT name FROM SchemaMigrations ORDER BY name")]

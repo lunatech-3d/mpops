@@ -35,13 +35,13 @@ class ApplicationServiceTests(unittest.TestCase):
 
     def test_admin_crud_password_and_activation(self):
         uid = self.users.create_user("NewUser", "original-pass-123", "operator", self.admin, "New User")
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             self.assertEqual(connection.execute("SELECT created_by FROM Users WHERE id=?", (uid,)).fetchone()[0],
                              self.admin.user_id)
         self.assertEqual(len(self.users.list_users(self.admin, "new user")), 1)
         self.users.update_user(uid, display_name="Changed Name", role="viewer", actor=self.admin)
         self.assertEqual(self.users.get_user(uid, self.admin)["role"], "viewer")
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             updated = connection.execute("SELECT updated_at,updated_by FROM Users WHERE id=?", (uid,)).fetchone()
             self.assertRegex(updated[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\+00:00$")
             self.assertEqual(updated[1], self.admin.user_id)
@@ -71,11 +71,11 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertTrue(verify_password("existing-pass-123", encoded))
 
     def test_only_expected_tables_are_initialized(self):
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertEqual(tables - {"sqlite_sequence"},
                          {"Users", "AuditLog", "Techs", "TechAddresses", "SchemaMigrations"})
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(Users)")}
             self.assertEqual(columns, {"id", "username", "password_hash", "display_name", "role",
                 "is_active", "last_login_at", "created_at", "created_by", "updated_at", "updated_by"})
@@ -110,7 +110,7 @@ class MigrationTests(unittest.TestCase):
                 connection.execute("INSERT INTO TechAddresses VALUES (20,10,'1 Main','Town','ST','12345',1,'2020',1)")
             auth = AuthService(Settings(path, password_iterations=100_000))
             self.assertEqual(auth.authenticate("Legacy", "preserved-pass-123").username, "Legacy")
-            with auth.connect() as connection:
+            with auth.connection() as connection:
                 row = connection.execute("SELECT id,password_hash FROM Users").fetchone()
                 self.assertEqual((row[0], row[1]), (1, encoded))
                 self.assertEqual(connection.execute("SELECT tech_id FROM Techs").fetchone()[0], 10)
@@ -121,7 +121,7 @@ class MigrationTests(unittest.TestCase):
                     ("002_reconcile_legacy.py",)).fetchone()[0]
                 self.assertEqual(applied, 1)
             AuthService(Settings(path, password_iterations=100_000))
-            with auth.connect() as connection:
+            with auth.connection() as connection:
                 self.assertEqual(connection.execute("SELECT count(*) FROM SchemaMigrations").fetchone()[0], 1)
 
     def test_failed_migration_is_not_recorded(self):
@@ -142,7 +142,7 @@ class MigrationTests(unittest.TestCase):
 
     def test_primary_address_is_unique(self):
         with self.settings_database() as (auth, admin_id):
-            with auth.connect() as connection:
+            with auth.connection() as connection:
                 connection.execute("INSERT INTO Techs(tech_code,first_name,last_name,created_by) VALUES('T1','A','B',?)", (admin_id,))
                 connection.execute("INSERT INTO TechAddresses(tech_id,address_1,city,state,zip_code,created_by) VALUES(1,'A','C','S','Z',?)", (admin_id,))
                 with self.assertRaises(sqlite3.IntegrityError):

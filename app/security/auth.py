@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import sqlite3
 import importlib.util
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from app.config import Settings, get_settings
@@ -46,8 +48,17 @@ class AuthService:
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        connection = self.connect()
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
     def initialize_database(self) -> None:
-        with self.connect() as connection:
+        with self.connection() as connection:
             has_tables = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
             ).fetchone()
@@ -90,7 +101,7 @@ class AuthService:
 
     def authenticate(self, username: str, password: str) -> Session:
         normalized = username.strip()
-        with self.connect() as connection:
+        with self.connection() as connection:
             user = connection.execute(
                 "SELECT id, username, password_hash, role, is_active FROM Users "
                 "WHERE username = ? COLLATE NOCASE",

@@ -27,7 +27,7 @@ class AuthTests(unittest.TestCase):
     def test_authentication_and_session_environment(self):
         session = self.auth.authenticate("admin", "correct-horse-123")
         self.assertEqual((session.user_id, session.username, session.role), (self.admin_id, "Admin", "admin"))
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             self.assertEqual(connection.execute("SELECT action FROM AuditLog ORDER BY id DESC").fetchone()[0],
                              "login_succeeded")
         session.apply_to_environment()
@@ -36,7 +36,7 @@ class AuthTests(unittest.TestCase):
     def test_bad_password_is_generic_and_audited(self):
         with self.assertRaisesRegex(AuthenticationError, "Invalid username or password"):
             self.auth.authenticate("Admin", "not-the-password")
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             action = connection.execute("SELECT action FROM AuditLog ORDER BY id DESC").fetchone()[0]
         self.assertEqual(action, "login_failed")
 

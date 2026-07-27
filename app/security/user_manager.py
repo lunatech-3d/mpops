@@ -32,7 +32,7 @@ class UserManager:
             raise ValueError(f"Role must be one of: {', '.join(sorted(VALID_ROLES))}")
         encoded = hash_password(password, self.auth.settings.password_iterations)
         try:
-            with self.auth.connect() as connection:
+            with self.auth.connection() as connection:
                 if actor is None:
                     if connection.execute("SELECT COUNT(*) FROM Users").fetchone()[0] or role != "admin":
                         raise AuthorizationError("Only the initial administrator can be created without a session")
@@ -61,7 +61,7 @@ class UserManager:
             clauses.append("is_active = ?")
             values.append(int(active))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             rows = connection.execute(
                 "SELECT id, username, display_name, role, is_active, created_at, last_login_at, updated_at "
                 f"FROM Users{where} ORDER BY username COLLATE NOCASE", values)
@@ -69,7 +69,7 @@ class UserManager:
 
     def get_user(self, user_id: int, actor: Session) -> dict:
         self._require_admin(actor)
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             row = connection.execute(
                 "SELECT id, username, display_name, role, is_active, created_at, last_login_at, updated_at "
                 "FROM Users WHERE id = ?", (user_id,)).fetchone()
@@ -84,7 +84,7 @@ class UserManager:
             raise ValueError("Display name must contain between 1 and 100 characters")
         if role not in VALID_ROLES:
             raise ValueError(f"Role must be one of: {', '.join(sorted(VALID_ROLES))}")
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             cursor = connection.execute(
                 "UPDATE Users SET display_name=?, role=?, updated_at=?, updated_by=? WHERE id=?",
                 (name, role, utc_now_iso(), actor.user_id, user_id))
@@ -96,7 +96,7 @@ class UserManager:
     def reset_password(self, user_id: int, password: str, actor: Session) -> None:
         self._require_admin(actor)
         encoded = hash_password(password, self.auth.settings.password_iterations)
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             cursor = connection.execute(
                 "UPDATE Users SET password_hash=?, updated_at=?, updated_by=? WHERE id=?",
                 (encoded, utc_now_iso(), actor.user_id, user_id))
@@ -108,7 +108,7 @@ class UserManager:
         self._require_admin(actor)
         if actor.user_id == user_id and not active:
             raise ValueError("Administrators cannot deactivate their own account")
-        with self.auth.connect() as connection:
+        with self.auth.connection() as connection:
             cursor = connection.execute(
                 "UPDATE Users SET is_active=?, updated_at=?, updated_by=? WHERE id=?",
                 (int(active), utc_now_iso(), actor.user_id, user_id))
