@@ -21,6 +21,11 @@ The login screen rejects invalid credentials and inactive accounts without discl
 
 An administrator cannot deactivate their own account. Password resets require confirmation in the interface and use the same validation and salted hashing as account creation.
 
+`TechnicianService` provides technician lookup and administrator-only technician and
+address mutations. Address changes are transactional and enforce at most one primary
+address per technician; deleting a primary address intentionally leaves no primary
+rather than selecting one implicitly. The Technician Manager UI remains a later milestone.
+
 ## Database and current scope
 
 The production database defaults to `C:/sqlite/mpops/database/mpops.db`. Set
