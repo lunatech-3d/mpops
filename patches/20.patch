@@ -1,0 +1,10 @@
+diff --git a/database/migrations/README.md b/database/migrations/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..3396cad90c84a34190f5add70b66dcdb55ad34bc
+--- /dev/null
++++ b/database/migrations/README.md
+@@ -0,0 +1,4 @@
++# Migrations
++
++Numbered forward-only migrations will be added here after the initial schema is released.
++

@@ -1,0 +1,20 @@
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000000000000000000000000000000000000..35c1bdc4b6dfa56a0d651796c151542eaf05ad8e
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,14 @@
++__pycache__/
++*.py[cod]
++.pytest_cache/
++.coverage
++htmlcov/
++.venv/
++venv/
++dist/
++build/
++*.egg-info/
++mpops.db
++mpops.db-*
++.env
++

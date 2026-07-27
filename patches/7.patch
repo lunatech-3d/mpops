@@ -1,0 +1,12 @@
+diff --git a/app/security/__init__.py b/app/security/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..2194e65f38400852348bba78affa956a035819b0
+--- /dev/null
++++ b/app/security/__init__.py
+@@ -0,0 +1,6 @@
++"""Authentication, authorization, and auditing for Matterport Ops."""
++
++from .auth import AuthenticationError, AuthService, Session
++
++__all__ = ["AuthenticationError", "AuthService", "Session"]
++

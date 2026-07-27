@@ -1,0 +1,33 @@
+diff --git a/app/config.py b/app/config.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..83cb85d056f04e6b7b47ba5e6f925ca25567fb99
+--- /dev/null
++++ b/app/config.py
+@@ -0,0 +1,27 @@
++"""Application configuration with Matterport Ops-specific defaults."""
++
++from __future__ import annotations
++
++import os
++from dataclasses import dataclass
++from pathlib import Path
++
++
++PROJECT_ROOT = Path(__file__).resolve().parent.parent
++
++
++@dataclass(frozen=True)
++class Settings:
++    database_path: Path
++    schema_path: Path = PROJECT_ROOT / "database" / "schema" / "001_initial.sql"
++    password_iterations: int = 600_000
++
++
++def get_settings() -> Settings:
++    """Load settings from the ``MPOPS_`` environment namespace."""
++    database_path = Path(os.environ.get("MPOPS_DB_PATH", PROJECT_ROOT / "mpops.db"))
++    iterations = int(os.environ.get("MPOPS_PASSWORD_ITERATIONS", "600000"))
++    if iterations < 100_000:
++        raise ValueError("MPOPS_PASSWORD_ITERATIONS must be at least 100000")
++    return Settings(database_path=database_path, password_iterations=iterations)
++

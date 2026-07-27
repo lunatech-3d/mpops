@@ -1,0 +1,8 @@
+diff --git a/app/__init__.py b/app/__init__.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..8adfca16595418828c2321432287c358c599d8bf
+--- /dev/null
++++ b/app/__init__.py
+@@ -0,0 +1,2 @@
++"""Matterport Ops application package."""
++
