@@ -30,11 +30,33 @@ def technician_name(job):
 
 
 def job_address(job):
-    """Return the most useful compact address available for the grid."""
+    """Return the most useful complete address available for details screens."""
     if job.get("capture_address_raw"):
         return str(job["capture_address_raw"])
     parts = [job.get("address_1"), job.get("city"), job.get("state"), job.get("postal_code")]
     return ", ".join(str(value).strip() for value in parts if value)
+
+
+def job_location_parts(job):
+    """Return street, city, and state, using the raw address as a fallback."""
+    street = str(job.get("address_1") or "").strip()
+    city = str(job.get("city") or "").strip()
+    state = str(job.get("state") or "").strip().upper()
+    raw = str(job.get("capture_address_raw") or "").strip()
+
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not street and parts:
+        street = parts[0]
+    if not city and len(parts) >= 2:
+        city = parts[1]
+    if not state:
+        for part in reversed(parts[2:]):
+            match = re.search(r"\b([A-Za-z]{2})\b(?:\s+\d{5}(?:-\d{4})?)?$", part)
+            if match:
+                state = match.group(1).upper()
+                break
+
+    return street, city, state
 
 
 def client_name(job):
@@ -103,11 +125,11 @@ class JobsManager(ttk.Frame):
     """Searchable operational Job grid with basic create and edit actions."""
 
     COLUMNS = (
-        "external_job_id", "client", "project", "address", "scheduled_start_at",
-        "technician", "job_status", "expected_payout",
+        "external_job_id", "client", "project", "address", "city", "state",
+        "scheduled_start_at", "technician", "job_status", "expected_payout",
     )
     HEADINGS = (
-        "Job #", "Client", "Project", "Capture Address", "Scheduled",
+        "Job #", "Client", "Project", "Address", "City", "State", "Scheduled",
         "Primary Technician", "Status", "Expected Payout",
     )
 
@@ -150,8 +172,8 @@ class JobsManager(ttk.Frame):
         self.tree = ttk.Treeview(
             table, columns=self.COLUMNS, show="headings", selectmode="browse"
         )
-        widths = (105, 145, 145, 245, 150, 145, 105, 110)
-        anchors = ("w", "w", "w", "w", "w", "w", "w", "e")
+        widths = (105, 140, 140, 190, 120, 65, 150, 140, 100, 110)
+        anchors = ("w", "w", "w", "w", "w", "w", "w", "w", "w", "e")
         for name, heading, width, anchor in zip(
             self.COLUMNS, self.HEADINGS, widths, anchors
         ):
@@ -160,7 +182,7 @@ class JobsManager(ttk.Frame):
                 text=heading,
                 command=lambda column=name: self.sort_by(column),
             )
-            self.tree.column(name, width=width, minwidth=70, anchor=anchor)
+            self.tree.column(name, width=width, minwidth=55, anchor=anchor)
 
         ybar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         xbar = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
@@ -227,11 +249,14 @@ class JobsManager(ttk.Frame):
                     return float(row.get("expected_payout") or 0)
                 except (TypeError, ValueError):
                     return 0.0
+            street, city, state = job_location_parts(row)
             values = {
                 "external_job_id": row.get("external_job_id"),
                 "client": client_name(row),
                 "project": project_name(row),
-                "address": job_address(row),
+                "address": street,
+                "city": city,
+                "state": state,
                 "technician": technician_name(row),
                 "job_status": row.get("job_status"),
             }
@@ -264,11 +289,14 @@ class JobsManager(ttk.Frame):
             job_id = int(row["job_id"])
             iid = f"job-{job_id}"
             self.rows[iid] = row
+            street, city, state = job_location_parts(row)
             visible = {
                 "external_job_id": row.get("external_job_id") or "",
                 "client": client_name(row),
                 "project": project_name(row),
-                "address": job_address(row),
+                "address": street,
+                "city": city,
+                "state": state,
                 "scheduled_start_at": format_datetime(row.get("scheduled_start_at")),
                 "technician": technician_name(row),
                 "job_status": row.get("job_status") or "",
