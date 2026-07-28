@@ -76,7 +76,7 @@ class TechnicianManager(ttk.Frame):
         self.tree = ttk.Treeview(table, columns=self.COLUMNS, show="headings", selectmode="browse")
         widths = (90, 110, 110, 125, 110, 140, 110, 75, 165, 110, 95)
         for name, heading, width in zip(self.COLUMNS, self.HEADINGS, widths):
-            self.tree.heading(name, text=heading)
+            self.tree.heading(name, text=heading, command=lambda column=name: self.sort_by(column))
             self.tree.column(name, width=width, minwidth=50)
         ybar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         xbar = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
@@ -98,19 +98,9 @@ class TechnicianManager(ttk.Frame):
         self.refresh()
 
     def _handle_double_click(self, event):
-        """Sort headers and retain the existing row double-click details action."""
-        region = self.tree.identify_region(event.x, event.y)
-        if region == "heading":
-            column_id = self.tree.identify_column(event.x)
-            try:
-                column = self.COLUMNS[int(column_id.removeprefix("#")) - 1]
-            except (ValueError, IndexError):
-                return "break"
-            self.sort_by(column)
-            return "break"
-        if region in ("cell", "tree"):
+        """Open technician details when a data row is double-clicked."""
+        if self.tree.identify_region(event.x, event.y) in ("cell", "tree"):
             self.view_details()
-        return None
 
     def sort_by(self, column):
         """Sort visible technicians by a selected column, toggling ascending/descending."""
