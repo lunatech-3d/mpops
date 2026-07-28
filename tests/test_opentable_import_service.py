@@ -1,4 +1,5 @@
 import csv
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -95,16 +96,16 @@ class OpenTableImportServiceTests(unittest.TestCase):
         self.assertEqual(group["job"]["state"], "MI")
         self.assertEqual(group["job"]["postal_code"], "48170")
 
-    def test_import_creates_one_job_and_all_source_records(self):
-        self.write_rows([
-            source_row("1001", "JOB-1", "Parent Record", rate="200.80", size="5000"),
-            source_row("1002", "JOB-1", "LensCrafters", size="2500"),
-        ])
+    def test_import_creates_one_job_and_preserves_all_source_records(self):
+        parent = source_row("1001", "JOB-1", "Parent Record", rate="200.80", size="5000")
+        child = source_row("1002", "JOB-1", "LensCrafters", size="2500")
+        self.write_rows([parent, child])
 
         result = self.service.import_csv(self.session, str(self.csv_path))
 
         self.assertEqual(result["created"], 1)
         self.assertEqual(result["source_rows_added"], 2)
+        self.assertEqual(result["source_rows_updated"], 0)
         with self.auth.connection() as connection:
             job = connection.execute("SELECT * FROM Jobs WHERE external_job_id = 'JOB-1'").fetchone()
             records = connection.execute(
@@ -117,6 +118,9 @@ class OpenTableImportServiceTests(unittest.TestCase):
         self.assertAlmostEqual(records[0]["ct_rate"], 200.80)
         self.assertAlmostEqual(records[0]["ct_travel_payout"], 10.25)
         self.assertAlmostEqual(records[0]["ct_off_hours_payout"], 5.50)
+        preserved = json.loads(records[0]["source_row_json"])
+        self.assertEqual(preserved, parent)
+        self.assertNotIn("__source_row_number", preserved)
 
     def test_reimport_is_idempotent(self):
         rows = [
@@ -134,6 +138,7 @@ class OpenTableImportServiceTests(unittest.TestCase):
         self.assertEqual(result["updated"], 0)
         self.assertEqual(result["skipped"], 1)
         self.assertEqual(result["source_rows_added"], 0)
+        self.assertEqual(result["source_rows_updated"], 0)
         with self.auth.connection() as connection:
             self.assertEqual(connection.execute("SELECT COUNT(*) FROM Jobs").fetchone()[0], 1)
             self.assertEqual(
@@ -154,10 +159,36 @@ class OpenTableImportServiceTests(unittest.TestCase):
         self.assertEqual(preview["counts"], {"updated": 1})
         self.assertEqual(result["updated"], 1)
         self.assertEqual(result["source_rows_added"], 1)
+        self.assertEqual(result["source_rows_updated"], 0)
         with self.auth.connection() as connection:
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM JobSourceRecords").fetchone()[0], 2
             )
+
+    def test_changed_source_record_is_previewed_and_updated(self):
+        original = source_row("1001", "JOB-1", "Parent Record", rate="200.80", size="5000")
+        self.write_rows([original])
+        self.service.import_csv(self.session, str(self.csv_path))
+
+        changed = source_row("1001", "JOB-1", "Parent Record", rate="225.50", size="5500")
+        changed["Additional Details"] = "Use loading dock"
+        self.write_rows([changed])
+
+        preview = self.service.preview(str(self.csv_path))
+        result = self.service.import_csv(self.session, str(self.csv_path))
+
+        self.assertEqual(preview["counts"], {"updated": 1})
+        self.assertEqual(preview["items"][0]["changed_source_rows"], 1)
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["source_rows_added"], 0)
+        self.assertEqual(result["source_rows_updated"], 1)
+        with self.auth.connection() as connection:
+            record = connection.execute(
+                "SELECT * FROM JobSourceRecords WHERE external_record_number = '1001'"
+            ).fetchone()
+        self.assertAlmostEqual(record["ct_rate"], 225.50)
+        self.assertEqual(record["requested_capture_size"], 5500.0)
+        self.assertEqual(json.loads(record["source_row_json"]), changed)
 
     def test_invalid_currency_rolls_back_entire_import(self):
         bad = source_row("1002", "JOB-2", "Parent Record", rate="not-money")
