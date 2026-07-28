@@ -51,13 +51,15 @@ class TechnicianController:
 
 
 class TechnicianManager(ttk.Frame):
-    COLUMNS = ("first_name", "middle_name", "last_name", "preferred_name",
-               "status", "email", "mobile_phone", "hire_date")
-    HEADINGS = ("First Name", "Middle Name", "Last Name", "Preferred Name",
-                "Status", "Primary Email", "Mobile Phone", "Hire Date")
+    COLUMNS = ("first_name", "last_name", "status", "email", "mobile_phone")
+    HEADINGS = ("First Name", "Last Name", "Status", "Primary Email", "Mobile Phone")
 
     def __init__(self, parent, auth, session, service=None):
         super().__init__(parent, padding=PADDING, style="App.TFrame")
+        self._window = self.winfo_toplevel()
+        self._previous_geometry = self._window.geometry()
+        self._window.geometry("850x700")
+        self.bind("<Destroy>", self._restore_window_geometry)
         self.controller = TechnicianController(service or TechnicianService(auth), session)
         self.rows = {}
         self.sort_column = None
@@ -74,10 +76,10 @@ class TechnicianManager(ttk.Frame):
         entry.bind("<Return>", lambda _event: self.refresh())
         table = ttk.Frame(self); table.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=self.COLUMNS, show="headings", selectmode="browse")
-        widths = (110, 110, 125, 110, 75, 165, 110, 95)
+        widths = (120, 130, 80, 190, 125)
         for name, heading, width in zip(self.COLUMNS, self.HEADINGS, widths):
             self.tree.heading(name, text=heading, command=lambda column=name: self.sort_by(column))
-            self.tree.column(name, width=width, minwidth=50)
+            self.tree.column(name, width=width, minwidth=50, stretch=True)
         ybar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         xbar = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
@@ -96,6 +98,10 @@ class TechnicianManager(ttk.Frame):
         if not self.controller.can_modify:
             for button in self.mutation_buttons: button.configure(state="disabled")
         self.refresh()
+
+    def _restore_window_geometry(self, event):
+        if event.widget is self:
+            self._window.geometry(self._previous_geometry)
 
     def _handle_double_click(self, event):
         """Open technician details when a data row is double-clicked."""
