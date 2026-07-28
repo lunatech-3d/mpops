@@ -57,7 +57,7 @@ def changed_fields(original: dict, submitted: dict) -> dict:
     return changes
 
 
-def show_job_form(parent, job: dict | None = None, markets=()) -> dict | None:
+def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -> dict | None:
     """Show a compact modal Job editor and return submitted values."""
     result = None
     dialog = tk.Toplevel(parent)
@@ -73,6 +73,7 @@ def show_job_form(parent, job: dict | None = None, markets=()) -> dict | None:
     labels = (
         ("external_job_id", "External Job ID *"),
         ("market_id", "Market"),
+        ("technician_id", "Technician"),
         ("client_name_source", "Client"),
         ("project_name_source", "Project"),
         ("scheduled_start_at", "Scheduled Start"),
@@ -100,6 +101,16 @@ def show_job_form(parent, job: dict | None = None, markets=()) -> dict | None:
     market_var = tk.StringVar(
         value=market_id_to_display.get((job or {}).get("market_id"), "")
     )
+    technician_id_to_display = {
+        technician["tech_id"]: f"{technician['first_name']} {technician['last_name']}"
+        for technician in technicians
+    }
+    technician_display_to_id = {
+        display: tech_id for tech_id, display in technician_id_to_display.items()
+    }
+    technician_var = tk.StringVar(
+        value=technician_id_to_display.get((job or {}).get("technician_id"), "")
+    )
 
     first = None
     row = 0
@@ -110,6 +121,13 @@ def show_job_form(parent, job: dict | None = None, markets=()) -> dict | None:
                 outer,
                 textvariable=market_var,
                 values=tuple(market_display_to_id),
+                state="readonly",
+            )
+        elif name == "technician_id":
+            entry = ttk.Combobox(
+                outer,
+                textvariable=technician_var,
+                values=("", *technician_display_to_id),
                 state="readonly",
             )
         else:
@@ -143,6 +161,7 @@ def show_job_form(parent, job: dict | None = None, markets=()) -> dict | None:
         values["market_id"] = market_display_to_id.get(
             market_var.get(), (job or {}).get("market_id")
         )
+        values["technician_id"] = technician_display_to_id.get(technician_var.get())
         values["internal_notes"] = notes.get("1.0", "end-1c")
         try:
             result = job_form_data(values)

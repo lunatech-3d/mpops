@@ -35,6 +35,7 @@ _LONG_TEXT_FIELDS = frozenset({
     "additional_details", "floor_plan_attachments", "internal_notes",
 })
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_TECHNICIAN_UNCHANGED = object()
 
 _JOB_SUMMARY_SELECT = """
     SELECT
@@ -61,6 +62,7 @@ _JOB_SUMMARY_SELECT = """
     LEFT JOIN JobAssignments a
         ON a.job_id = j.job_id
        AND a.assignment_role = 'Primary'
+       AND a.assignment_status = 'Assigned'
        AND a.unassigned_at IS NULL
     LEFT JOIN Techs t ON t.tech_id = a.tech_id
 """
@@ -216,6 +218,78 @@ class JobsService:
         with self.auth.connection() as connection:
             return [dict(row) for row in connection.execute(sql, parameters)]
 
+    def list_active_technician_options(self) -> list[dict[str, Any]]:
+        """Return active technicians for the Job form, in display order."""
+        with self.auth.connection() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT tech_id, first_name, last_name FROM Techs "
+                "WHERE status = 'Active' "
+                "ORDER BY last_name COLLATE NOCASE, first_name COLLATE NOCASE, tech_id"
+            )]
+
+    def get_current_primary_assignment(self, job_id: int) -> dict[str, Any] | None:
+        """Return the most recent active, assigned primary technician."""
+        self._positive_id(job_id, "job_id")
+        with self.auth.connection() as connection:
+            self._require_job(connection, job_id)
+            row = connection.execute(
+                """
+                SELECT ja.tech_id, t.first_name, t.last_name, t.status
+                FROM JobAssignments ja
+                JOIN Techs t ON t.tech_id = ja.tech_id
+                WHERE ja.job_id = ?
+                  AND ja.assignment_role = 'Primary'
+                  AND ja.assignment_status = 'Assigned'
+                  AND ja.unassigned_at IS NULL
+                ORDER BY ja.assigned_at DESC, ja.job_assignment_id DESC
+                LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    @staticmethod
+    def _set_primary_technician(
+        connection: sqlite3.Connection, session: Session, job_id: int, tech_id: int | None
+    ) -> bool:
+        """Change a primary assignment using the caller's transaction."""
+        current = connection.execute(
+            "SELECT tech_id FROM JobAssignments WHERE job_id = ? "
+            "AND assignment_role = 'Primary' AND assignment_status = 'Assigned' "
+            "AND unassigned_at IS NULL ORDER BY assigned_at DESC, "
+            "job_assignment_id DESC LIMIT 1",
+            (job_id,),
+        ).fetchone()
+        if current is not None and int(current["tech_id"]) == tech_id:
+            return False
+
+        if tech_id is not None:
+            JobsService._positive_id(tech_id, "tech_id")
+            technician = connection.execute(
+                "SELECT status FROM Techs WHERE tech_id = ?", (tech_id,)
+            ).fetchone()
+            if technician is None:
+                raise LookupError("Technician not found")
+            if technician["status"] != "Active":
+                raise ValueError("Only active technicians may be assigned")
+
+        connection.execute(
+            "UPDATE JobAssignments SET assignment_status = 'Unassigned', "
+            "unassigned_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP "
+            "WHERE job_id = ? AND assignment_role = 'Primary' "
+            "AND assignment_status = 'Assigned' AND unassigned_at IS NULL",
+            (job_id,),
+        )
+        if tech_id is not None:
+            connection.execute(
+                "INSERT INTO JobAssignments (job_id, tech_id, assignment_role, "
+                "assignment_status, assigned_at, assigned_by, created_at) "
+                "VALUES (?, ?, 'Primary', 'Assigned', CURRENT_TIMESTAMP, ?, "
+                "CURRENT_TIMESTAMP)",
+                (job_id, tech_id, session.user_id),
+            )
+        return True
+
     def list_jobs(
         self,
         job_status: str | None = None,
@@ -303,7 +377,9 @@ class JobsService:
             ).fetchone()
             return dict(row) if row else None
 
-    def create_job(self, session: Session, job_data: dict[str, Any]) -> int:
+    def create_job(
+        self, session: Session, job_data: dict[str, Any], tech_id: int | None = None
+    ) -> int:
         self._require_operator(session)
         clean = self._clean_job(job_data, creating=True)
         fields = list(clean)
@@ -317,6 +393,8 @@ class JobsService:
                     [clean[field] for field in fields] + [utc_now_iso(), session.user_id],
                 )
                 job_id = int(cursor.lastrowid)
+                if tech_id is not None:
+                    self._set_primary_technician(connection, session, job_id, tech_id)
                 record_event(
                     connection,
                     "job_created",
@@ -334,11 +412,14 @@ class JobsService:
             raise ValueError("Job data conflicts with an existing record") from exc
 
     def update_job(
-        self, session: Session, job_id: int, changes: dict[str, Any]
+        self, session: Session, job_id: int, changes: dict[str, Any],
+        tech_id: int | None | object = _TECHNICIAN_UNCHANGED,
     ) -> dict[str, Any]:
         self._require_operator(session)
         self._positive_id(job_id, "job_id")
-        clean = self._clean_job(changes, creating=False)
+        clean = self._clean_job(changes, creating=False) if changes else {}
+        if not clean and tech_id is _TECHNICIAN_UNCHANGED:
+            raise ValueError("At least one job field is required")
         try:
             with self.auth.connection() as connection:
                 before = dict(self._require_job(connection, job_id))
@@ -346,12 +427,18 @@ class JobsService:
                     self._require_project(connection, clean["project_id"])
                 if "market_id" in clean:
                     self._require_market(connection, clean["market_id"])
-                assignments = ",".join(f"{field} = ?" for field in clean)
-                connection.execute(
-                    f"UPDATE Jobs SET {assignments}, updated_at = ?, updated_by = ? "
-                    "WHERE job_id = ?",
-                    [*clean.values(), utc_now_iso(), session.user_id, job_id],
-                )
+                if clean:
+                    assignments = ",".join(f"{field} = ?" for field in clean)
+                    connection.execute(
+                        f"UPDATE Jobs SET {assignments}, updated_at = ?, updated_by = ? "
+                        "WHERE job_id = ?",
+                        [*clean.values(), utc_now_iso(), session.user_id, job_id],
+                    )
+                assignment_changed = False
+                if tech_id is not _TECHNICIAN_UNCHANGED:
+                    assignment_changed = self._set_primary_technician(
+                        connection, session, job_id, tech_id
+                    )
                 record_event(
                     connection,
                     "job_updated",
@@ -361,7 +448,9 @@ class JobsService:
                         "external_job_id": clean.get(
                             "external_job_id", before["external_job_id"]
                         ),
-                        "fields_changed": sorted(clean),
+                        "fields_changed": sorted(clean) + (
+                            ["primary_technician"] if assignment_changed else []
+                        ),
                         "before": {field: before[field] for field in clean},
                         "after": clean,
                     },

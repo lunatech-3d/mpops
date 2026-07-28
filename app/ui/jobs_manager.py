@@ -114,11 +114,16 @@ class JobsController:
         return self.service.list_jobs(status_filter)
 
     def create(self, data):
-        return self.service.create_job(self.session, data)
+        data = dict(data)
+        tech_id = data.pop("technician_id", None)
+        return self.service.create_job(self.session, data, tech_id)
 
     def update(self, job_id, original, submitted):
         changes = changed_fields(original, submitted)
-        return self.service.update_job(self.session, job_id, changes) if changes else None
+        tech_id = submitted.get("technician_id")
+        if not changes and tech_id == original.get("technician_id"):
+            return None
+        return self.service.update_job(self.session, job_id, changes, tech_id)
 
 
 class JobsManager(ttk.Frame):
@@ -334,10 +339,11 @@ class JobsManager(ttk.Frame):
     def add(self):
         try:
             markets = self.controller.service.list_market_options()
+            technicians = self.controller.service.list_active_technician_options()
         except EXPECTED_ERRORS as exc:
             self._error(exc)
             return
-        data = show_job_form(self, markets=markets)
+        data = show_job_form(self, markets=markets, technicians=technicians)
         if data is None:
             return
         try:
@@ -362,14 +368,19 @@ class JobsManager(ttk.Frame):
         try:
             original = self.controller.service.get_job(job_id)
             markets = self.controller.service.list_market_options()
+            technicians = self.controller.service.list_active_technician_options()
+            assignment = self.controller.service.get_current_primary_assignment(job_id)
         except EXPECTED_ERRORS as exc:
             self._error(exc)
             return
         if original is None:
             self._error(LookupError("Job not found"))
             return
+        original["technician_id"] = assignment["tech_id"] if assignment else None
+        if assignment and assignment["status"] != "Active":
+            technicians = [*technicians, assignment]
 
-        submitted = show_job_form(self, original, markets)
+        submitted = show_job_form(self, original, markets, technicians)
         if submitted is None:
             return
         try:
