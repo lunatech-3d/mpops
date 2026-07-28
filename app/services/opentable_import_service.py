@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import csv
+import json
 import os
 import re
-import sqlite3
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -106,16 +106,34 @@ class OpenTableImportService:
         return _STATUS_MAP.get(text.casefold(), text)
 
     @staticmethod
+    def _source_row_json(row: dict[str, str]) -> str:
+        """Serialize only original source columns, excluding importer metadata."""
+        source = {key: value for key, value in row.items() if not key.startswith("__")}
+        return json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    @staticmethod
     def _parse_address(raw: str | None) -> dict[str, str | None]:
         """Best-effort split while always preserving the original address string."""
         if not raw:
-            return {"address_1": None, "address_2": None, "city": None,
-                    "state": None, "postal_code": None, "county": None,
-                    "country": None}
+            return {
+                "address_1": None,
+                "address_2": None,
+                "city": None,
+                "state": None,
+                "postal_code": None,
+                "county": None,
+                "country": None,
+            }
         parts = [part.strip() for part in raw.split(",") if part.strip()]
-        result = {"address_1": parts[0] if parts else raw, "address_2": None,
-                  "city": None, "state": None, "postal_code": None,
-                  "county": None, "country": None}
+        result = {
+            "address_1": parts[0] if parts else raw,
+            "address_2": None,
+            "city": None,
+            "state": None,
+            "postal_code": None,
+            "county": None,
+            "country": None,
+        }
         if len(parts) >= 2:
             result["city"] = parts[1]
         for part in parts[2:]:
@@ -230,18 +248,28 @@ class OpenTableImportService:
                 for row in connection.execute("SELECT job_id, external_job_id FROM Jobs")
             }
             existing_records = {
-                row[0] for row in connection.execute(
-                    "SELECT external_record_number FROM JobSourceRecords "
+                row["external_record_number"]: row["source_row_json"]
+                for row in connection.execute(
+                    "SELECT external_record_number, source_row_json FROM JobSourceRecords "
                     "WHERE source_system = 'OpenTable'"
                 )
             }
+
         items = []
         counts = defaultdict(int)
         for group in groups:
             job_key = group["external_job_id"].casefold()
-            records = [self._text(row.get("Record Number")) for row in group["source_rows"]]
-            imported = sum(record in existing_records for record in records if record)
-            if imported == len(records):
+            imported = 0
+            changed = 0
+            for row in group["source_rows"]:
+                record_number = self._text(row.get("Record Number"))
+                if record_number not in existing_records:
+                    continue
+                imported += 1
+                if existing_records[record_number] != self._source_row_json(row):
+                    changed += 1
+
+            if imported == group["source_row_count"] and changed == 0:
                 action = "Skipped"
             elif job_key in existing_jobs:
                 action = "Updated"
@@ -259,16 +287,28 @@ class OpenTableImportService:
                 "capture_address": group["job"].get("capture_address_raw"),
                 "source_row_count": group["source_row_count"],
                 "already_imported_rows": imported,
+                "changed_source_rows": changed,
+                "parent_record_count": group["parent_record_count"],
             })
-        return {"file_name": os.path.basename(file_path), "groups": groups,
-                "items": items, "counts": dict(counts)}
+        return {
+            "file_name": os.path.basename(file_path),
+            "groups": groups,
+            "items": items,
+            "counts": dict(counts),
+        }
 
     def import_csv(self, session: Session, file_path: str) -> dict[str, Any]:
         self._require_operator(session)
         preview = self.preview(file_path)
         now = utc_now_iso()
-        result = {"created": 0, "updated": 0, "skipped": 0,
-                  "source_rows_added": 0, "job_ids": []}
+        result = {
+            "created": 0,
+            "updated": 0,
+            "skipped": 0,
+            "source_rows_added": 0,
+            "source_rows_updated": 0,
+            "job_ids": [],
+        }
         with self.auth.connection() as connection:
             for group in preview["groups"]:
                 external_job_id = group["external_job_id"]
@@ -288,8 +328,11 @@ class OpenTableImportService:
                     result["created"] += 1
                 else:
                     job_id = int(existing["job_id"])
-                    changes = {field: value for field, value in job_data.items()
-                               if field != "external_job_id" and value is not None}
+                    changes = {
+                        field: value
+                        for field, value in job_data.items()
+                        if field != "external_job_id" and value is not None
+                    }
                     assignments = ",".join(f"{field} = ?" for field in changes)
                     if assignments:
                         connection.execute(
@@ -299,41 +342,62 @@ class OpenTableImportService:
                         )
                     result["updated"] += 1
 
-                added_for_job = 0
+                changed_for_job = 0
                 for row in group["source_rows"]:
                     record_number = self._text(row.get("Record Number"))
-                    exists = connection.execute(
-                        "SELECT 1 FROM JobSourceRecords WHERE source_system = 'OpenTable' "
+                    source_json = self._source_row_json(row)
+                    source_record = connection.execute(
+                        "SELECT job_source_record_id, source_row_json "
+                        "FROM JobSourceRecords WHERE source_system = 'OpenTable' "
                         "AND external_record_number = ?",
                         (record_number,),
                     ).fetchone()
-                    if exists:
-                        continue
-                    connection.execute(
-                        """
-                        INSERT INTO JobSourceRecords (
-                            job_id, source_system, external_record_number,
-                            record_description, is_parent_record, requested_capture_size,
-                            ct_rate, ct_travel_payout, ct_off_hours_payout,
-                            ap_invoice_number, imported_at, source_file_name,
-                            source_row_number, created_at
-                        ) VALUES (?, 'OpenTable', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            job_id, record_number, self._text(row.get("Floor/Unit/Suite")),
-                            int(self._is_parent(row)),
-                            self._number(row.get("Capture Size - Requested")),
-                            self._money(row.get("CT Rate")),
-                            self._money(row.get("CT Travel Payout")),
-                            self._money(row.get("CT Off Hours Payout")),
-                            self._text(row.get("AP Invoice Number")), now,
-                            os.path.basename(file_path),
-                            int(row["__source_row_number"]), now,
-                        ),
+                    values = (
+                        job_id,
+                        self._text(row.get("Floor/Unit/Suite")),
+                        int(self._is_parent(row)),
+                        self._number(row.get("Capture Size - Requested")),
+                        self._money(row.get("CT Rate")),
+                        self._money(row.get("CT Travel Payout")),
+                        self._money(row.get("CT Off Hours Payout")),
+                        self._text(row.get("AP Invoice Number")),
+                        source_json,
+                        now,
+                        os.path.basename(file_path),
+                        int(row["__source_row_number"]),
                     )
-                    added_for_job += 1
-                    result["source_rows_added"] += 1
-                if added_for_job == 0 and existing is not None:
+                    if source_record is None:
+                        connection.execute(
+                            """
+                            INSERT INTO JobSourceRecords (
+                                job_id, source_system, external_record_number,
+                                record_description, is_parent_record, requested_capture_size,
+                                ct_rate, ct_travel_payout, ct_off_hours_payout,
+                                ap_invoice_number, source_row_json, imported_at,
+                                source_file_name, source_row_number, created_at
+                            ) VALUES (?, 'OpenTable', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            (job_id, record_number, *values[1:], now),
+                        )
+                        result["source_rows_added"] += 1
+                        changed_for_job += 1
+                    elif source_record["source_row_json"] != source_json:
+                        connection.execute(
+                            """
+                            UPDATE JobSourceRecords SET
+                                job_id = ?, record_description = ?, is_parent_record = ?,
+                                requested_capture_size = ?, ct_rate = ?, ct_travel_payout = ?,
+                                ct_off_hours_payout = ?, ap_invoice_number = ?,
+                                source_row_json = ?, imported_at = ?, source_file_name = ?,
+                                source_row_number = ?
+                            WHERE job_source_record_id = ?
+                            """,
+                            (*values, int(source_record["job_source_record_id"])),
+                        )
+                        result["source_rows_updated"] += 1
+                        changed_for_job += 1
+
+                if changed_for_job == 0 and existing is not None:
                     result["skipped"] += 1
                     result["updated"] -= 1
                 result["job_ids"].append(job_id)
@@ -348,6 +412,7 @@ class OpenTableImportService:
                     "updated": result["updated"],
                     "skipped": result["skipped"],
                     "source_rows_added": result["source_rows_added"],
+                    "source_rows_updated": result["source_rows_updated"],
                 },
             )
         return result
