@@ -5,11 +5,31 @@ from unittest.mock import MagicMock
 
 from app.security.auth import Session
 from app.ui.address_form import address_form_data
-from app.ui.technician_form import changed_fields, technician_form_data
-from app.ui.technician_manager import TechnicianController
+from app.ui.technician_form import TECHNICIAN_FIELDS, changed_fields, technician_form_data
+from app.ui.technician_manager import TechnicianController, TechnicianManager, display_name
 
 
 class TechnicianUiHelpersTests(unittest.TestCase):
+    def test_complete_fields_and_operational_columns_exclude_internal_and_sensitive_data(self):
+        expected = {"tech_code", "first_name", "middle_name", "last_name", "suffix",
+                    "preferred_name", "company_name", "contractor_type", "inactive_reason",
+                    "date_of_birth", "ssn_last4", "drivers_license_number",
+                    "drivers_license_state", "email", "alternate_email", "mobile_phone",
+                    "home_phone", "work_phone", "emergency_contact_name",
+                    "emergency_contact_relationship", "emergency_contact_phone", "hire_date",
+                    "termination_date", "notes", "notes_private"}
+        self.assertEqual(set(TECHNICIAN_FIELDS), expected)
+        self.assertTrue({"tech_id", "created_by", "updated_by"}.isdisjoint(TECHNICIAN_FIELDS))
+        self.assertEqual(TechnicianManager.COLUMNS[0], "tech_code")
+        self.assertNotIn("tech_id", TechnicianManager.COLUMNS)
+        self.assertTrue(all("ID" not in heading.upper().split() for heading in TechnicianManager.HEADINGS))
+        self.assertTrue({"ssn_last4", "date_of_birth", "notes_private"}.isdisjoint(TechnicianManager.COLUMNS))
+
+    def test_display_name_uses_all_nonblank_components(self):
+        self.assertEqual(display_name({"first_name": "Ada", "middle_name": "M",
+                                       "last_name": "Lovelace", "suffix": "III"}),
+                         "Ada M Lovelace III")
+
     def test_ui_modules_import(self):
         for name in ("app.ui.technician_form", "app.ui.address_form", "app.ui.technician_manager"):
             self.assertIsNotNone(importlib.import_module(name))

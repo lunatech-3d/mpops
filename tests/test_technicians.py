@@ -63,6 +63,51 @@ class TechnicianServiceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.create_tech(code="t001")
 
+    def test_expanded_fields_validation_and_normalization(self):
+        tech_id = self.create_tech(
+            middle_name="M", suffix="III", company_name="Analytical Engines",
+            contractor_type="Independent", date_of_birth="1815-12-10", ssn_last4="1234",
+            drivers_license_number="DL-9", drivers_license_state="ny",
+            email="ada@example.test", alternate_email="other@example.test", work_phone="555-1",
+            emergency_contact_name="Charles", emergency_contact_relationship="Colleague",
+            emergency_contact_phone="555-2", notes_private="restricted")
+        tech = self.service.get_technician(tech_id)
+        self.assertEqual(tech["drivers_license_state"], "NY")
+        self.assertEqual(tech["ssn_last4"], "1234")
+        for field, value in (("email", "bad"), ("alternate_email", "bad"),
+                             ("date_of_birth", "2023-02-29"), ("hire_date", "01/01/2020"),
+                             ("termination_date", "2020-13-01"), ("ssn_last4", "123-45-6789"),
+                             ("drivers_license_state", "New York")):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                self.service.update_technician(self.admin, tech_id, {field: value})
+
+    def test_sensitive_update_audit_contains_names_not_values(self):
+        tech_id = self.create_tech()
+        secrets = {"ssn_last4": "9876", "drivers_license_number": "SECRET-DL",
+                   "notes_private": "SECRET NOTES", "date_of_birth": "2000-01-01"}
+        self.service.update_technician(self.admin, tech_id, secrets)
+        with self.auth.connection() as connection:
+            raw = connection.execute("SELECT details_json FROM AuditLog "
+                                     "WHERE action='technician_updated' ORDER BY id DESC").fetchone()[0]
+        self.assertTrue(set(secrets).issubset(json.loads(raw)["fields_changed"]))
+        for value in secrets.values(): self.assertNotIn(value, raw)
+
+    def test_atomic_deactivation_records_details_and_rolls_back_on_audit_failure(self):
+        tech_id = self.create_tech()
+        with patch("app.services.technician_service.record_event",
+                   side_effect=RuntimeError("audit unavailable")):
+            with self.assertRaises(RuntimeError):
+                self.service.deactivate_technician(self.admin, tech_id, "2026-07-28", "Paused")
+        self.assertEqual(self.service.get_technician(tech_id)["status"], "Active")
+        self.service.deactivate_technician(self.admin, tech_id, "2026-07-28", "Paused")
+        tech = self.service.get_technician(tech_id)
+        self.assertEqual((tech["status"], tech["termination_date"], tech["inactive_reason"]),
+                         ("Inactive", "2026-07-28", "Paused"))
+        self.service.set_technician_active(self.admin, tech_id, True)
+        tech = self.service.get_technician(tech_id)
+        self.assertEqual((tech["status"], tech["termination_date"], tech["inactive_reason"]),
+                         ("Active", "2026-07-28", "Paused"))
+
     def test_mutations_require_admin(self):
         with self.assertRaises(AuthorizationError):
             self.service.create_technician(self.operator,

@@ -225,7 +225,7 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(applied, 1)
             AuthService(Settings(path, password_iterations=100_000))
             with auth.connection() as connection:
-                self.assertEqual(connection.execute("SELECT count(*) FROM SchemaMigrations").fetchone()[0], 1)
+                self.assertEqual(connection.execute("SELECT count(*) FROM SchemaMigrations").fetchone()[0], 2)
 
     def test_failed_migration_is_not_recorded(self):
         with tempfile.TemporaryDirectory() as directory:

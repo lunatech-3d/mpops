@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from datetime import date
 from typing import Any
 
 from app.date_utils import utc_now_iso
@@ -14,8 +15,12 @@ from app.security.user_manager import AuthorizationError
 
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _TECH_FIELDS = frozenset({
-    "tech_code", "first_name", "last_name", "preferred_name", "email",
-    "mobile_phone", "home_phone", "hire_date", "termination_date", "notes",
+    "tech_code", "first_name", "middle_name", "last_name", "suffix", "preferred_name",
+    "company_name", "contractor_type", "inactive_reason", "date_of_birth", "ssn_last4",
+    "drivers_license_number", "drivers_license_state", "email", "alternate_email",
+    "mobile_phone", "home_phone", "work_phone", "emergency_contact_name",
+    "emergency_contact_relationship", "emergency_contact_phone", "hire_date",
+    "termination_date", "notes", "notes_private",
 })
 _ADDRESS_FIELDS = frozenset({
     "address_1", "address_2", "city", "state", "zip_code", "is_primary",
@@ -25,6 +30,14 @@ _REQUIRED_TECH = frozenset({"tech_code", "first_name", "last_name"})
 _REQUIRED_ADDRESS = frozenset({"address_1", "city", "state", "zip_code"})
 _TEXT_LIMITS = {field: 255 for field in _TECH_FIELDS | _ADDRESS_FIELDS}
 _TEXT_LIMITS["notes"] = 4000
+_TEXT_LIMITS["notes_private"] = 4000
+_SENSITIVE_FIELDS = frozenset({
+    "date_of_birth", "ssn_last4", "drivers_license_number", "drivers_license_state",
+    "emergency_contact_name", "emergency_contact_relationship", "emergency_contact_phone",
+    "notes_private",
+})
+_DATE_LABELS = {"date_of_birth": "Date of Birth", "hire_date": "Hire Date",
+                "termination_date": "Termination Date"}
 
 
 class TechnicianService:
@@ -65,8 +78,21 @@ class TechnicianService:
             return None
         if len(value) > _TEXT_LIMITS[field]:
             raise ValueError(f"{field} is too long")
-        if field == "email" and not _EMAIL.fullmatch(value):
-            raise ValueError("email is invalid")
+        if field in ("email", "alternate_email") and not _EMAIL.fullmatch(value):
+            raise ValueError(f"{'Primary' if field == 'email' else 'Alternate'} email is invalid.")
+        if field in _DATE_LABELS:
+            try:
+                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                    raise ValueError
+                date.fromisoformat(value)
+            except ValueError as exc:
+                raise ValueError(f"{_DATE_LABELS[field]} must use YYYY-MM-DD.") from exc
+        if field == "ssn_last4" and not re.fullmatch(r"\d{4}", value):
+            raise ValueError("SSN — Last 4 Digits must contain exactly four digits.")
+        if field == "drivers_license_state":
+            if not re.fullmatch(r"[A-Za-z]{2}", value):
+                raise ValueError("Driver's License State must be a two-letter abbreviation.")
+            value = value.upper()
         if field == "state" and len(value) == 2 and value.isalpha():
             value = value.upper()
         return value
@@ -144,8 +170,9 @@ class TechnicianService:
         if not query:
             return self.list_technicians(include_inactive)
         term = f"%{query}%"
-        searchable = ("tech_code", "first_name", "last_name", "preferred_name", "email",
-                      "mobile_phone", "home_phone")
+        searchable = ("tech_code", "first_name", "middle_name", "last_name", "suffix",
+                      "preferred_name", "company_name", "contractor_type", "email",
+                      "alternate_email", "mobile_phone", "home_phone", "work_phone")
         search = " OR ".join(f"coalesce({field}, '') LIKE ? COLLATE NOCASE" for field in searchable)
         where = f" WHERE ({search})" + ("" if include_inactive else " AND status = 'Active'")
         with self.auth.connection() as connection:
@@ -191,10 +218,34 @@ class TechnicianService:
             assignments = ",".join(f"{field}=?" for field in clean)
             connection.execute(f"UPDATE Techs SET {assignments},updated_at=?,updated_by=? WHERE tech_id=?",
                                [*clean.values(), utc_now_iso(), session.user_id, tech_id])
+            ordinary = set(clean) - _SENSITIVE_FIELDS
+            details = {"tech_id": tech_id, "fields_changed": sorted(clean)}
+            if ordinary:
+                details.update(before={k: before[k] for k in ordinary},
+                               after={k: clean[k] for k in ordinary})
             record_event(connection, "technician_updated", actor_user_id=session.user_id,
-                         details={"tech_id": tech_id, "before": {k: before[k] for k in clean},
-                                  "after": clean})
+                         details=details)
             return dict(connection.execute("SELECT * FROM Techs WHERE tech_id=?", (tech_id,)).fetchone())
+
+    def deactivate_technician(self, session: Session, tech_id: int,
+                              termination_date: str | None = None,
+                              inactive_reason: str | None = None) -> None:
+        """Atomically store deactivation context and retain the technician record."""
+        self._require_admin(session)
+        self._positive_id(tech_id, "tech_id")
+        clean = self._clean_technician(
+            {"termination_date": termination_date, "inactive_reason": inactive_reason}, creating=False)
+        with self.auth.connection() as connection:
+            before = dict(self._require_technician(connection, tech_id))
+            connection.execute(
+                "UPDATE Techs SET termination_date=?,inactive_reason=?,status='Inactive',"
+                "updated_at=?,updated_by=? WHERE tech_id=?",
+                (clean["termination_date"], clean["inactive_reason"], utc_now_iso(),
+                 session.user_id, tech_id))
+            record_event(connection, "technician_deactivated", actor_user_id=session.user_id,
+                         details={"tech_id": tech_id, "before": before["status"],
+                                  "after": "Inactive", "fields_changed":
+                                  ["termination_date", "inactive_reason", "status"]})
 
     def set_technician_active(self, session: Session, tech_id: int, is_active: bool) -> None:
         """Set Active/Inactive status without deleting technician history."""

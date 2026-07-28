@@ -13,6 +13,13 @@ from app.ui.technician_form import changed_fields, show_technician_form
 EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
 
 
+def display_name(technician):
+    """Build the user-facing name without exposing an internal identifier."""
+    return " ".join(str(technician.get(field) or "").strip()
+                    for field in ("first_name", "middle_name", "last_name", "suffix")
+                    if str(technician.get(field) or "").strip())
+
+
 class TechnicianController:
     """Small UI-facing adapter whose methods are easy to exercise without Tk."""
     def __init__(self, service, session):
@@ -32,6 +39,9 @@ class TechnicianController:
         return self.service.update_technician(self.session, tech_id, changes) if changes else None
     def set_active(self, tech_id, active):
         return self.service.set_technician_active(self.session, tech_id, active)
+    def deactivate(self, tech_id, termination_date=None, inactive_reason=None):
+        return self.service.deactivate_technician(
+            self.session, tech_id, termination_date, inactive_reason)
     def add_address(self, tech_id, data): return self.service.add_address(self.session, tech_id, data)
     def update_address(self, tech_id, address_id, original, submitted):
         changes = changed_fields(original, submitted, ADDRESS_FIELDS)
@@ -41,10 +51,10 @@ class TechnicianController:
 
 
 class TechnicianManager(ttk.Frame):
-    COLUMNS = ("tech_id", "tech_code", "first_name", "last_name", "preferred_name", "status",
-               "email", "mobile_phone", "hire_date", "termination_date")
-    HEADINGS = ("ID", "Tech Code", "First Name", "Last Name", "Preferred Name", "Status",
-                "Email", "Mobile Phone", "Hire Date", "Termination Date")
+    COLUMNS = ("tech_code", "display_name", "preferred_name", "company_name", "contractor_type",
+               "status", "email", "mobile_phone", "hire_date")
+    HEADINGS = ("Tech Code", "Name", "Preferred Name", "Company", "Contractor Type", "Status",
+                "Primary Email", "Mobile Phone", "Hire Date")
 
     def __init__(self, parent, auth, session, service=None):
         super().__init__(parent, padding=PADDING, style="App.TFrame")
@@ -62,7 +72,7 @@ class TechnicianManager(ttk.Frame):
         entry.bind("<Return>", lambda _event: self.refresh())
         table = ttk.Frame(self); table.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=self.COLUMNS, show="headings", selectmode="browse")
-        widths = (55, 90, 105, 105, 110, 70, 155, 110, 95, 110)
+        widths = (90, 165, 110, 140, 110, 75, 165, 110, 95)
         for name, heading, width in zip(self.COLUMNS, self.HEADINGS, widths):
             self.tree.heading(name, text=heading); self.tree.column(name, width=width, minwidth=50)
         ybar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
@@ -91,7 +101,8 @@ class TechnicianManager(ttk.Frame):
         self.tree.delete(*self.tree.get_children()); self.rows.clear()
         for row in rows:
             tech_id = int(row["tech_id"]); iid = f"tech-{tech_id}"; self.rows[iid] = row
-            self.tree.insert("", "end", iid=iid, values=[row.get(c) or "" for c in self.COLUMNS])
+            visible = dict(row, display_name=display_name(row))
+            self.tree.insert("", "end", iid=iid, values=[visible.get(c) or "" for c in self.COLUMNS])
         self.status.set(f"{len(rows)} technician(s) found." if rows else "No technicians found.")
         iid = f"tech-{select_id}" if select_id else None
         if iid and self.tree.exists(iid): self.tree.selection_set(iid); self.tree.see(iid)
@@ -105,7 +116,7 @@ class TechnicianManager(ttk.Frame):
 
     def _error(self, exc): messagebox.showerror("Technicians", str(exc), parent=self)
     def add(self):
-        data = show_technician_form(self)
+        data = show_technician_form(self, is_admin=self.controller.can_modify)
         if data is None: return
         try: tech_id = self.controller.create(data)
         except EXPECTED_ERRORS as exc: self._error(exc); return
@@ -116,7 +127,7 @@ class TechnicianManager(ttk.Frame):
         try: original = self.controller.service.get_technician(int(row["tech_id"]))
         except EXPECTED_ERRORS as exc: self._error(exc); return
         if original is None: self._error(LookupError("Technician not found")); return
-        data = show_technician_form(self, original)
+        data = show_technician_form(self, original, is_admin=self.controller.can_modify)
         if data is None: return
         try: result = self.controller.update(int(row["tech_id"]), original, data)
         except EXPECTED_ERRORS as exc: self._error(exc); return
@@ -124,16 +135,42 @@ class TechnicianManager(ttk.Frame):
     def toggle_active(self):
         row = self.selected()
         if not row: return
-        activate = row.get("status") != "Active"; name = row.get("preferred_name") or f"{row.get('first_name', '')} {row.get('last_name', '')}".strip()
-        text = (f"Reactivate {name}?" if activate else
-                f"Deactivate {name}?\n\nThe technician will remain in the database but will no longer appear in the active technician list.")
-        if not messagebox.askyesno("Confirm status change", text, parent=self): return
-        try: self.controller.set_active(int(row["tech_id"]), activate)
+        activate = row.get("status") != "Active"; name = row.get("preferred_name") or display_name(row)
+        if activate:
+            if not messagebox.askyesno("Confirm status change", f"Reactivate {name}?", parent=self): return
+            action = lambda: self.controller.set_active(int(row["tech_id"]), True)
+        else:
+            values = show_deactivation_dialog(self, name, row)
+            if values is None: return
+            action = lambda: self.controller.deactivate(int(row["tech_id"]), *values)
+        try: action()
         except EXPECTED_ERRORS as exc: self._error(exc); return
         self.refresh(int(row["tech_id"])); self.status.set("Technician reactivated." if activate else "Technician deactivated.")
     def view_details(self):
         row = self.selected()
         if row: TechnicianDetails(self, self.controller, int(row["tech_id"]))
+
+
+def show_deactivation_dialog(parent, name, technician):
+    """Collect deactivation context without performing database work in the UI."""
+    result = None
+    window = tk.Toplevel(parent); window.withdraw(); window.title(f"Deactivate {name}")
+    body = ttk.Frame(window, padding=PADDING); body.pack(fill="both", expand=True)
+    date_var = tk.StringVar(value=technician.get("termination_date") or "")
+    reason_var = tk.StringVar(value=technician.get("inactive_reason") or "")
+    for row, (label, variable) in enumerate((("Termination Date (YYYY-MM-DD)", date_var),
+                                             ("Inactive Reason", reason_var))):
+        ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
+        ttk.Entry(body, textvariable=variable, width=40).grid(row=row, column=1, pady=5)
+    def cancel(_event=None): close_modal(window)
+    def submit():
+        nonlocal result
+        result = (date_var.get().strip() or None, reason_var.get().strip() or None); close_modal(window)
+    buttons = ttk.Frame(body); buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(10, 0))
+    ttk.Button(buttons, text="Deactivate", command=submit).pack(side="left", padx=3)
+    ttk.Button(buttons, text="Cancel", command=cancel).pack(side="left", padx=3)
+    window.bind("<Escape>", cancel); window.protocol("WM_DELETE_WINDOW", cancel)
+    prepare_modal_dialog(window, parent); window.wait_window(); return result
 
 
 class TechnicianDetails:
@@ -143,11 +180,40 @@ class TechnicianDetails:
         try: technician = controller.service.get_technician(tech_id)
         except EXPECTED_ERRORS as exc: messagebox.showerror("Technician Details", str(exc), parent=parent); return
         if not technician: messagebox.showerror("Technician Details", "Technician not found.", parent=parent); return
-        self.window = tk.Toplevel(parent); self.window.withdraw(); self.window.title("Technician Details"); self.window.geometry("950x480")
+        self.window = tk.Toplevel(parent); self.window.withdraw(); self.window.title("Technician Details"); self.window.geometry("1000x700")
         body = ttk.Frame(self.window, padding=PADDING); body.pack(fill="both", expand=True)
-        name = f"{technician['first_name']} {technician['last_name']}"
+        name = display_name(technician)
         ttk.Label(body, text=name, style="Header.TLabel").pack(anchor="w")
         ttk.Label(body, text=f"{technician['tech_code']}  •  {technician['status']}  •  {technician.get('email') or 'No email'}").pack(anchor="w", pady=(0, 10))
+        profile = ttk.Frame(body); profile.pack(fill="x", pady=(0, 10))
+        sections = [
+            ("Identity", (("Preferred Name", "preferred_name"),)),
+            ("Engagement", (("Company", "company_name"), ("Contractor Type", "contractor_type"),
+                            ("Hire Date", "hire_date"), ("Termination Date", "termination_date"),
+                            ("Inactive Reason", "inactive_reason"))),
+            ("Contact", (("Alternate Email", "alternate_email"), ("Mobile Phone", "mobile_phone"),
+                         ("Home Phone", "home_phone"), ("Work Phone", "work_phone"))),
+            ("Notes", (("General Notes", "notes"),)),
+        ]
+        if controller.session.role == "admin":
+            sections.extend([
+                ("Emergency Contact", (("Contact Name", "emergency_contact_name"),
+                                       ("Relationship", "emergency_contact_relationship"),
+                                       ("Phone", "emergency_contact_phone"))),
+                ("Restricted Information", (("Date of Birth", "date_of_birth"),
+                                             ("SSN — Last 4 Digits", "ssn_last4"),
+                                             ("Driver’s License Number", "drivers_license_number"),
+                                             ("Driver’s License State", "drivers_license_state"),
+                                             ("Private Administrative Notes", "notes_private"))),
+            ])
+        for column, (title, values) in enumerate(sections):
+            section = ttk.LabelFrame(profile, text=title, padding=6)
+            section.grid(row=column // 3, column=column % 3, sticky="nsew", padx=3, pady=3)
+            for label, field in values:
+                ttk.Label(section, text=f"{label}: {technician.get(field) or '—'}",
+                          wraplength=285).pack(anchor="w")
+        for column in range(3): profile.columnconfigure(column, weight=1)
+        ttk.Label(body, text="Addresses", style="Header.TLabel").pack(anchor="w")
         self.tree = ttk.Treeview(body, columns=self.COLUMNS, show="headings", selectmode="browse")
         headings = ("Primary", "Address 1", "Address 2", "City", "State", "ZIP", "Effective Date", "End Date")
         for field, heading in zip(self.COLUMNS, headings): self.tree.heading(field, text=heading); self.tree.column(field, width=105)
