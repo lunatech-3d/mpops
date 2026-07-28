@@ -332,7 +332,12 @@ class JobsManager(ttk.Frame):
         messagebox.showerror("Jobs", str(exc), parent=self)
 
     def add(self):
-        data = show_job_form(self)
+        try:
+            markets = self.controller.service.list_market_options()
+        except EXPECTED_ERRORS as exc:
+            self._error(exc)
+            return
+        data = show_job_form(self, markets=markets)
         if data is None:
             return
         try:
@@ -356,6 +361,7 @@ class JobsManager(ttk.Frame):
         job_id = int(row["job_id"])
         try:
             original = self.controller.service.get_job(job_id)
+            markets = self.controller.service.list_market_options()
         except EXPECTED_ERRORS as exc:
             self._error(exc)
             return
@@ -363,7 +369,7 @@ class JobsManager(ttk.Frame):
             self._error(LookupError("Job not found"))
             return
 
-        submitted = show_job_form(self, original)
+        submitted = show_job_form(self, original, markets)
         if submitted is None:
             return
         try:

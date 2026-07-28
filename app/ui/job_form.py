@@ -8,7 +8,7 @@ from app.ui.styles import PADDING
 
 
 JOB_FORM_FIELDS = (
-    "external_job_id", "client_name_source", "project_name_source", "job_status",
+    "external_job_id", "market_id", "client_name_source", "project_name_source", "job_status",
     "scheduled_start_at", "capture_address_raw", "city", "state", "postal_code",
     "requested_capture_size", "onsite_contact_name", "onsite_contact_email",
     "onsite_contact_phone", "internal_notes",
@@ -22,7 +22,12 @@ STATUS_VALUES = (
 
 def job_form_data(values: dict) -> dict:
     """Normalize the basic job form into a JobsService payload."""
-    result = {name: str(values.get(name, "")).strip() for name in JOB_FORM_FIELDS}
+    result = {
+        name: str(values.get(name, "")).strip()
+        for name in JOB_FORM_FIELDS
+        if name != "market_id"
+    }
+    result["market_id"] = values.get("market_id") or None
     if not result["external_job_id"]:
         raise ValueError("External Job ID is required.")
     for name in JOB_FORM_FIELDS:
@@ -52,7 +57,7 @@ def changed_fields(original: dict, submitted: dict) -> dict:
     return changes
 
 
-def show_job_form(parent, job: dict | None = None) -> dict | None:
+def show_job_form(parent, job: dict | None = None, markets=()) -> dict | None:
     """Show a compact modal Job editor and return submitted values."""
     result = None
     dialog = tk.Toplevel(parent)
@@ -67,6 +72,7 @@ def show_job_form(parent, job: dict | None = None) -> dict | None:
 
     labels = (
         ("external_job_id", "External Job ID *"),
+        ("market_id", "Market"),
         ("client_name_source", "Client"),
         ("project_name_source", "Project"),
         ("scheduled_start_at", "Scheduled Start"),
@@ -82,14 +88,32 @@ def show_job_form(parent, job: dict | None = None) -> dict | None:
 
     variables = {
         name: tk.StringVar(value="" if (job or {}).get(name) is None else str((job or {}).get(name)))
-        for name in JOB_FORM_FIELDS if name != "internal_notes"
+        for name in JOB_FORM_FIELDS if name not in {"internal_notes", "market_id"}
     }
+    market_id_to_display = {
+        market["market_id"]: f"{market['state']} - {market['market_name']}"
+        for market in markets
+    }
+    market_display_to_id = {
+        display: market_id for market_id, display in market_id_to_display.items()
+    }
+    market_var = tk.StringVar(
+        value=market_id_to_display.get((job or {}).get("market_id"), "")
+    )
 
     first = None
     row = 0
     for name, label in labels:
         ttk.Label(outer, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
-        entry = ttk.Entry(outer, textvariable=variables[name])
+        if name == "market_id":
+            entry = ttk.Combobox(
+                outer,
+                textvariable=market_var,
+                values=tuple(market_display_to_id),
+                state="readonly",
+            )
+        else:
+            entry = ttk.Entry(outer, textvariable=variables[name])
         entry.grid(row=row, column=1, sticky="ew", pady=4)
         first = first or entry
         row += 1
@@ -116,6 +140,9 @@ def show_job_form(parent, job: dict | None = None) -> dict | None:
     def save(_event=None):
         nonlocal result
         values = {name: variable.get() for name, variable in variables.items()}
+        values["market_id"] = market_display_to_id.get(
+            market_var.get(), (job or {}).get("market_id")
+        )
         values["internal_notes"] = notes.get("1.0", "end-1c")
         try:
             result = job_form_data(values)
