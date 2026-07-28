@@ -51,15 +51,17 @@ class TechnicianController:
 
 
 class TechnicianManager(ttk.Frame):
-    COLUMNS = ("tech_code", "display_name", "preferred_name", "company_name", "contractor_type",
-               "status", "email", "mobile_phone", "hire_date")
-    HEADINGS = ("Tech Code", "Name", "Preferred Name", "Company", "Contractor Type", "Status",
-                "Primary Email", "Mobile Phone", "Hire Date")
+    COLUMNS = ("tech_code", "first_name", "middle_name", "last_name", "preferred_name",
+               "company_name", "contractor_type", "status", "email", "mobile_phone", "hire_date")
+    HEADINGS = ("Tech Code", "First Name", "Middle Name", "Last Name", "Preferred Name",
+                "Company", "Contractor Type", "Status", "Primary Email", "Mobile Phone", "Hire Date")
 
     def __init__(self, parent, auth, session, service=None):
         super().__init__(parent, padding=PADDING, style="App.TFrame")
         self.controller = TechnicianController(service or TechnicianService(auth), session)
         self.rows = {}
+        self.sort_column = None
+        self.sort_descending = False
         ttk.Label(self, text="Technicians", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
         filters = ttk.Frame(self); filters.pack(fill="x", pady=(0, 8))
         self.search_var = tk.StringVar(); self.inactive_var = tk.BooleanVar(value=False)
@@ -72,15 +74,16 @@ class TechnicianManager(ttk.Frame):
         entry.bind("<Return>", lambda _event: self.refresh())
         table = ttk.Frame(self); table.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=self.COLUMNS, show="headings", selectmode="browse")
-        widths = (90, 165, 110, 140, 110, 75, 165, 110, 95)
+        widths = (90, 110, 110, 125, 110, 140, 110, 75, 165, 110, 95)
         for name, heading, width in zip(self.COLUMNS, self.HEADINGS, widths):
-            self.tree.heading(name, text=heading); self.tree.column(name, width=width, minwidth=50)
+            self.tree.heading(name, text=heading)
+            self.tree.column(name, width=width, minwidth=50)
         ybar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         xbar = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.tree.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns")
         xbar.grid(row=1, column=0, sticky="ew"); table.rowconfigure(0, weight=1); table.columnconfigure(0, weight=1)
-        self.tree.bind("<Double-1>", lambda _event: self.view_details())
+        self.tree.bind("<Double-1>", self._handle_double_click)
         actions = ttk.Frame(self); actions.pack(fill="x", pady=(8, 0))
         self.mutation_buttons = []
         for label, command in (("Add Technician", self.add), ("Edit Technician", self.edit),
@@ -94,6 +97,42 @@ class TechnicianManager(ttk.Frame):
             for button in self.mutation_buttons: button.configure(state="disabled")
         self.refresh()
 
+    def _handle_double_click(self, event):
+        """Sort headers and retain the existing row double-click details action."""
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            column_id = self.tree.identify_column(event.x)
+            try:
+                column = self.COLUMNS[int(column_id.removeprefix("#")) - 1]
+            except (ValueError, IndexError):
+                return "break"
+            self.sort_by(column)
+            return "break"
+        if region in ("cell", "tree"):
+            self.view_details()
+        return None
+
+    def sort_by(self, column):
+        """Sort visible technicians by a selected column, toggling ascending/descending."""
+        descending = self.sort_column == column and not self.sort_descending
+        self.sort_column = column
+        self.sort_descending = descending
+        self._sort_tree(column, descending)
+        for name, heading in zip(self.COLUMNS, self.HEADINGS):
+            marker = " ▼" if name == column and descending else " ▲" if name == column else ""
+            self.tree.heading(name, text=heading + marker)
+
+    def _sort_tree(self, column, descending):
+        selected = self.tree.selection()
+        items = list(self.tree.get_children())
+        items.sort(key=lambda iid: str(self.rows[iid].get(column) or "").casefold(),
+                   reverse=descending)
+        for position, iid in enumerate(items):
+            self.tree.move(iid, "", position)
+        if selected:
+            self.tree.selection_set(selected)
+            self.tree.see(selected[0])
+
     def refresh(self, select_id=None):
         try: rows = self.controller.load(self.search_var.get(), bool(self.inactive_var.get()))
         except EXPECTED_ERRORS as exc:
@@ -101,8 +140,9 @@ class TechnicianManager(ttk.Frame):
         self.tree.delete(*self.tree.get_children()); self.rows.clear()
         for row in rows:
             tech_id = int(row["tech_id"]); iid = f"tech-{tech_id}"; self.rows[iid] = row
-            visible = dict(row, display_name=display_name(row))
-            self.tree.insert("", "end", iid=iid, values=[visible.get(c) or "" for c in self.COLUMNS])
+            self.tree.insert("", "end", iid=iid, values=[row.get(c) or "" for c in self.COLUMNS])
+        if self.sort_column:
+            self._sort_tree(self.sort_column, self.sort_descending)
         self.status.set(f"{len(rows)} technician(s) found." if rows else "No technicians found.")
         iid = f"tech-{select_id}" if select_id else None
         if iid and self.tree.exists(iid): self.tree.selection_set(iid); self.tree.see(iid)
