@@ -89,6 +89,10 @@ class OpenTableImportService:
             "%m/%d/%Y %I:%M %p",
             "%m/%d/%Y %H:%M",
             "%m/%d/%Y",
+            "%m-%d-%Y %I:%M%p",
+            "%m-%d-%Y %I:%M %p",
+            "%m-%d-%Y %H:%M",
+            "%m-%d-%Y",
         )
         normalized = re.sub(r"\s+", " ", text).replace("AM", "am").replace("PM", "pm")
         for fmt in formats:
