@@ -2,6 +2,7 @@
 from tkinter import messagebox, ttk
 from app.security.auth import Session
 from app.ui.dashboard import build_dashboard
+from app.ui.jobs_manager import JobsManager
 from app.ui.user_manager_window import open_user_manager
 from app.ui.technician_manager import TechnicianManager
 from app.ui.styles import NAV_BACKGROUND, PADDING
@@ -24,6 +25,7 @@ class MainWindow:
         self.content=ttk.Frame(body,style="App.TFrame");self.content.pack(side="left",fill="both",expand=True)
         for name in ("Dashboard","Jobs","Technicians","Markets","Clients","Payments","Reports"):
             command=(self.show_dashboard if name=="Dashboard" else
+                     self.show_jobs if name=="Jobs" else
                      self.show_technicians if name=="Technicians" else
                      lambda n=name:self.show_placeholder(n))
             ttk.Button(nav,text=name,style="Nav.TButton",command=command,width=18).pack(fill="x",pady=2)
@@ -38,6 +40,8 @@ class MainWindow:
         for child in self.content.winfo_children(): child.destroy()
     def show_dashboard(self):
         self.clear();build_dashboard(self.content,self.session,self.auth.settings.database_path).pack(fill="both",expand=True)
+    def show_jobs(self):
+        self.clear(); JobsManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
     def show_technicians(self):
         self.clear(); TechnicianManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
     def show_placeholder(self,name):
