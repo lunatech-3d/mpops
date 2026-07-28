@@ -51,10 +51,10 @@ class TechnicianController:
 
 
 class TechnicianManager(ttk.Frame):
-    COLUMNS = ("tech_code", "first_name", "middle_name", "last_name", "preferred_name",
-               "company_name", "contractor_type", "status", "email", "mobile_phone", "hire_date")
-    HEADINGS = ("Tech Code", "First Name", "Middle Name", "Last Name", "Preferred Name",
-                "Company", "Contractor Type", "Status", "Primary Email", "Mobile Phone", "Hire Date")
+    COLUMNS = ("first_name", "middle_name", "last_name", "preferred_name",
+               "status", "email", "mobile_phone", "hire_date")
+    HEADINGS = ("First Name", "Middle Name", "Last Name", "Preferred Name",
+                "Status", "Primary Email", "Mobile Phone", "Hire Date")
 
     def __init__(self, parent, auth, session, service=None):
         super().__init__(parent, padding=PADDING, style="App.TFrame")
@@ -74,7 +74,7 @@ class TechnicianManager(ttk.Frame):
         entry.bind("<Return>", lambda _event: self.refresh())
         table = ttk.Frame(self); table.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=self.COLUMNS, show="headings", selectmode="browse")
-        widths = (90, 110, 110, 125, 110, 140, 110, 75, 165, 110, 95)
+        widths = (110, 110, 125, 110, 75, 165, 110, 95)
         for name, heading, width in zip(self.COLUMNS, self.HEADINGS, widths):
             self.tree.heading(name, text=heading, command=lambda column=name: self.sort_by(column))
             self.tree.column(name, width=width, minwidth=50)
