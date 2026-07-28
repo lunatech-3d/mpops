@@ -484,6 +484,11 @@ A Job can contain a descriptive capture component, a `Parent Record`, separate r
 travel lines, and separate AP invoice references. Flattening those rows into `Jobs`
 would discard source detail and make later Tipalti reconciliation unreliable.
 
+The normalized columns support operational queries and reconciliation. The
+`source_row_json` column preserves the complete original source row exactly as it was
+received so later importer changes, source-column additions, and troubleshooting do not
+require reconstructing or discarding source evidence.
+
 ## Proposed definition
 
 ```sql
@@ -506,6 +511,8 @@ CREATE TABLE JobSourceRecords (
     ct_off_hours_payout          NUMERIC NOT NULL DEFAULT 0,
 
     ap_invoice_number            TEXT,
+
+    source_row_json              TEXT,
 
     imported_at                  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     source_file_name             TEXT,
@@ -530,6 +537,7 @@ CREATE TABLE JobSourceRecords (
 | `CT Travel Payout` | `ct_travel_payout` |
 | `CT Off Hours Payout` | `ct_off_hours_payout` |
 | `AP Invoice Number` | `ap_invoice_number` |
+| Complete original CSV row | `source_row_json` |
 
 `record_description` is intentionally broader than a literal floor/unit/suite field
 because the source contains values such as `Parent Record`, `Entire Home`, `Exterior
@@ -539,6 +547,11 @@ Capture`, `Clubhouse`, and `Full Store`.
 the source system's parent-record designation. The original description must still be
 preserved.
 
+`source_row_json` stores a JSON object containing the source column names and their
+original text values. Importer-only metadata such as an internal source-row counter must
+not be inserted into that JSON object. The JSON is an audit and traceability copy; the
+normalized columns remain authoritative for routine filtering, sorting, and reporting.
+
 ## Keys and constraints
 
 * Primary key: `job_source_record_id`
@@ -547,6 +560,7 @@ preserved.
 * `ap_invoice_number` should be indexed but must not initially be declared globally
   unique until an actual Tipalti export confirms its behavior.
 * Currency values are stored as numeric amounts in U.S. dollars.
+* `source_row_json` contains the complete original imported source row as valid JSON text.
 * The imported source filename and row number support traceability and repeatable imports.
 
 ## Interface visibility rules
@@ -555,6 +569,10 @@ preserved.
 form fields or list columns.
 
 The user-facing source identifier is `external_record_number`.
+
+`source_row_json` is primarily an audit and troubleshooting field. It should not appear
+as a normal list column, but may be exposed through an administrative source-record
+inspection view.
 
 ## Suggested indexes
 
@@ -730,7 +748,8 @@ rows. The importer must therefore:
 1. create or update one `Jobs` row for each distinct external Job ID;
 2. create or update one `JobSourceRecords` row for each distinct source-system record
    number;
-3. preserve all imported source values;
+3. preserve all imported source values in `source_row_json` while also populating the
+   normalized operational columns;
 4. resolve the source technician name to a `Techs.tech_id` when the match is reliable;
 5. create a `JobAssignments` record for the resolved technician;
 6. place uncertain or unmatched technician names into a review process rather than
