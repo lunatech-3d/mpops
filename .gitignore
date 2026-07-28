@@ -14,3 +14,4 @@ mpops.db-shm
 mpops.db-wal
 mpops.db-journal
 .env
+imports/technicians.csv
