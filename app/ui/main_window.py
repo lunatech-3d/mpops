@@ -3,6 +3,7 @@ from tkinter import messagebox, ttk
 from app.security.auth import Session
 from app.ui.dashboard import build_dashboard
 from app.ui.jobs_manager import JobsManager
+from app.ui.opentable_import_window import open_opentable_import
 from app.ui.user_manager_window import open_user_manager
 from app.ui.technician_manager import TechnicianManager
 from app.ui.styles import NAV_BACKGROUND, PADDING
@@ -29,6 +30,14 @@ class MainWindow:
                      self.show_technicians if name=="Technicians" else
                      lambda n=name:self.show_placeholder(n))
             ttk.Button(nav,text=name,style="Nav.TButton",command=command,width=18).pack(fill="x",pady=2)
+        if session.role in {"admin", "operator"}:
+            ttk.Separator(nav).pack(fill="x",pady=8)
+            ttk.Button(
+                nav,
+                text="Import OpenTable CSV",
+                command=self.open_opentable_import,
+                width=18,
+            ).pack(fill="x",pady=2)
         ttk.Separator(nav).pack(fill="x",pady=8)
         if session.role == "admin":
             ttk.Button(nav,text="Administration → Users",command=self.open_users).pack(fill="x",pady=2)
@@ -47,6 +56,14 @@ class MainWindow:
     def show_placeholder(self,name):
         self.clear(); frame=ttk.Frame(self.content,padding=PADDING*2,style="App.TFrame");frame.pack(fill="both",expand=True)
         ttk.Label(frame,text=name,style="Header.TLabel").pack(anchor="w");ttk.Label(frame,text="This module has not yet been implemented.",style="Status.TLabel").pack(anchor="w",pady=12)
+    def open_opentable_import(self):
+        window=open_opentable_import(
+            self.root,
+            self.auth,
+            self.session,
+            on_imported=self.show_jobs,
+        )
+        self.secondary_windows.append(window)
     def open_users(self):
         window=open_user_manager(self.root,self.auth,self.session)
         if window:self.secondary_windows.append(window)
