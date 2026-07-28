@@ -1,4 +1,4 @@
-"""OpenTable CSV preview and import workflow."""
+"""Matterport Job Intake Center workflow for OpenTable CSV exports."""
 
 import sqlite3
 import tkinter as tk
@@ -13,7 +13,7 @@ EXPECTED_ERRORS = (ValueError, OSError, AuthorizationError, sqlite3.Error)
 
 
 def preview_summary(preview):
-    """Return compact preview totals for display and testing."""
+    """Return compact Matterport intake preview totals for display and testing."""
     counts = preview.get("counts", {})
     items = preview.get("items", [])
     return {
@@ -29,7 +29,7 @@ def preview_summary(preview):
 
 
 class OpenTableImportWindow(tk.Toplevel):
-    """Choose an OpenTable CSV, inspect its effects, then explicitly import it."""
+    """Preview and import Matterport jobs from an OpenTable CSV export."""
 
     COLUMNS = (
         "action", "external_job_id", "client_name", "project_name", "job_status",
@@ -48,28 +48,38 @@ class OpenTableImportWindow(tk.Toplevel):
         self.service = service or OpenTableImportService(auth)
         self.preview_data = None
 
-        self.title("OpenTable Import")
+        self.title("Matterport Job Intake Center")
         self.geometry("1120x700")
         self.minsize(900, 560)
         self.transient(parent.winfo_toplevel())
 
         body = ttk.Frame(self, padding=PADDING)
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="OpenTable Import", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(body, text="Matterport Job Intake Center", style="Header.TLabel").pack(anchor="w")
         ttk.Label(
             body,
-            text="Select an OpenTable CSV. Review the proposed changes before importing.",
+            text=(
+                "Bring Matterport jobs into Matterport Ops from an OpenTable CSV export. "
+                "Review every proposed change before anything is written to the database."
+            ),
             style="Status.TLabel",
+            wraplength=950,
         ).pack(anchor="w", pady=(0, 12))
 
-        chooser = ttk.Frame(body)
-        chooser.pack(fill="x", pady=(0, 10))
+        source_frame = ttk.LabelFrame(body, text="Matterport Job Source: OpenTable CSV", padding=8)
+        source_frame.pack(fill="x", pady=(0, 10))
         self.path_var = tk.StringVar()
-        ttk.Entry(chooser, textvariable=self.path_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(chooser, text="Browse...", command=self.browse).pack(side="left", padx=(8, 0))
-        ttk.Button(chooser, text="Analyze", command=self.analyze).pack(side="left", padx=(6, 0))
+        ttk.Entry(source_frame, textvariable=self.path_var).pack(
+            side="left", fill="x", expand=True
+        )
+        ttk.Button(source_frame, text="Browse...", command=self.browse).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(source_frame, text="Analyze", command=self.analyze).pack(
+            side="left", padx=(6, 0)
+        )
 
-        self.summary_var = tk.StringVar(value="No CSV analyzed.")
+        self.summary_var = tk.StringVar(value="No OpenTable CSV analyzed.")
         ttk.Label(body, textvariable=self.summary_var, style="Status.TLabel").pack(
             anchor="w", pady=(0, 8)
         )
@@ -93,7 +103,12 @@ class OpenTableImportWindow(tk.Toplevel):
 
         actions = ttk.Frame(body)
         actions.pack(fill="x", pady=(10, 0))
-        self.import_button = ttk.Button(actions, text="Import", command=self.run_import, state="disabled")
+        self.import_button = ttk.Button(
+            actions,
+            text="Import Matterport Jobs",
+            command=self.run_import,
+            state="disabled",
+        )
         self.import_button.pack(side="right")
         ttk.Button(actions, text="Close", command=self.destroy).pack(side="right", padx=(0, 8))
 
@@ -103,7 +118,7 @@ class OpenTableImportWindow(tk.Toplevel):
     def browse(self):
         path = filedialog.askopenfilename(
             parent=self,
-            title="Select OpenTable CSV",
+            title="Select OpenTable Matterport Jobs CSV",
             filetypes=(("CSV files", "*.csv"), ("All files", "*.*")),
         )
         if path:
@@ -113,14 +128,16 @@ class OpenTableImportWindow(tk.Toplevel):
     def analyze(self):
         path = self.path_var.get().strip()
         if not path:
-            messagebox.showwarning("OpenTable Import", "Select a CSV file first.", parent=self)
+            messagebox.showwarning(
+                "Matterport Job Intake Center", "Select an OpenTable CSV file first.", parent=self
+            )
             return
         try:
             preview = self.service.preview(path)
         except EXPECTED_ERRORS as exc:
             self.preview_data = None
             self.import_button.configure(state="disabled")
-            messagebox.showerror("OpenTable Import", str(exc), parent=self)
+            messagebox.showerror("Matterport Job Intake Center", str(exc), parent=self)
             return
 
         self.preview_data = preview
@@ -151,7 +168,7 @@ class OpenTableImportWindow(tk.Toplevel):
             warning_parts.append(f'{summary["multiple_parents"]} multiple parents')
         warnings = "; ".join(warning_parts) if warning_parts else "no parent-record warnings"
         self.summary_var.set(
-            f'{summary["jobs"]} jobs: {summary["created"]} create, '
+            f'{summary["jobs"]} Matterport jobs: {summary["created"]} create, '
             f'{summary["updated"]} update, {summary["skipped"]} skip; '
             f'{summary["source_rows"]} source rows, {summary["changed_source_rows"]} changed; '
             f'{warnings}.'
@@ -165,23 +182,25 @@ class OpenTableImportWindow(tk.Toplevel):
         proposed = int(counts.get("created", 0)) + int(counts.get("updated", 0))
         if proposed == 0:
             messagebox.showinfo(
-                "OpenTable Import", "All rows are already imported and unchanged.", parent=self
+                "Matterport Job Intake Center",
+                "All Matterport jobs in this file are already imported and unchanged.",
+                parent=self,
             )
             return
         if not messagebox.askyesno(
-            "OpenTable Import",
-            f"Import {proposed} new or changed job(s)?",
+            "Confirm Matterport Job Intake",
+            f"Import {proposed} new or changed Matterport job(s)?",
             parent=self,
         ):
             return
         try:
             result = self.service.import_csv(self.session, self.path_var.get().strip())
         except EXPECTED_ERRORS as exc:
-            messagebox.showerror("OpenTable Import", str(exc), parent=self)
+            messagebox.showerror("Matterport Job Intake Center", str(exc), parent=self)
             return
 
         messagebox.showinfo(
-            "OpenTable Import Complete",
+            "Matterport Job Intake Complete",
             (
                 f'Created: {result["created"]}\n'
                 f'Updated: {result["updated"]}\n'
@@ -197,5 +216,5 @@ class OpenTableImportWindow(tk.Toplevel):
 
 
 def open_opentable_import(parent, auth, session, on_imported=None):
-    """Open and return the modal OpenTable import workflow."""
+    """Open and return the modal Matterport Job Intake Center workflow."""
     return OpenTableImportWindow(parent, auth, session, on_imported=on_imported)
