@@ -1,0 +1,169 @@
+name: Update Markets schema documentation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/update-markets-schema.yml
+
+permissions:
+  contents: write
+
+jobs:
+  update-schema:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Markets documentation
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path("database/schema/schema.md")
+          text = path.read_text(encoding="utf-8")
+
+          markets_bullet = """* **`Markets`** — operational service territories keyed internally by `market_id`,
+  with a market name, required two-letter state abbreviation, constrained `status`, and
+  create/update audit fields. Active markets are shown by default; inactive markets may
+  be included through the interface filter.
+"""
+
+          bullet_anchor = """* **`TechAddresses`** — keyed internally by `address_id`; `tech_id` references
+  `Techs.tech_id`; address, effective period, constrained `is_primary`, and
+  create/update audit fields.
+"""
+          if "* **`Markets`**" not in text:
+              text = text.replace(bullet_anchor, bullet_anchor + markets_bullet, 1)
+
+          markets_section = """# Table: `Markets`
+
+## Purpose
+
+Stores the operational service territories currently served by Matterport Ops. Each
+Market identifies a named service area and the U.S. state in which it operates.
+
+The internal primary key `market_id` is used by the application and foreign-key
+relationships. It must not be displayed as a normal user-facing identifier.
+
+## Definition
+
+```sql
+CREATE TABLE Markets (
+    market_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    market_name    TEXT NOT NULL COLLATE NOCASE,
+    state          TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'Active'
+                       CHECK (status IN ('Active', 'Inactive')),
+    created_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by     INTEGER NOT NULL,
+    updated_at     TEXT,
+    updated_by     INTEGER,
+
+    FOREIGN KEY (created_by) REFERENCES Users(id),
+    FOREIGN KEY (updated_by) REFERENCES Users(id),
+    UNIQUE (state, market_name)
+);
+```
+
+## Fields
+
+| Field | Type | Required | Default | Description |
+|---|---|---:|---|---|
+| `market_id` | INTEGER | Yes | Auto-generated | Internal primary key. It must not appear as a normal user-facing form field or list column. |
+| `market_name` | TEXT | Yes | None | Operational name of the service market, such as Detroit Metro, Grand Rapids, Charlotte, or Raleigh. |
+| `state` | TEXT | Yes | None | Two-letter USPS state abbreviation identifying the state served by the Market, such as `MI`, `NC`, `OH`, or `TN`. |
+| `status` | TEXT | Yes | `Active` | Controlled status. Allowed values are `Active` and `Inactive`. |
+| `created_at` | TEXT | Yes | `CURRENT_TIMESTAMP` | Timestamp when the Market record was created. |
+| `created_by` | INTEGER | Yes | None | Internal reference to the user who created the Market. |
+| `updated_at` | TEXT | No | NULL | Timestamp of the most recent Market update. |
+| `updated_by` | INTEGER | No | NULL | Internal reference to the user who most recently updated the Market. |
+
+## Keys and constraints
+
+* Primary key: `market_id`.
+* Business uniqueness: the combination of `state` and `market_name` is unique.
+* `market_name` uses case-insensitive comparison.
+* `state` is required and should contain an uppercase two-letter USPS abbreviation.
+* `status` is constrained to `Active` or `Inactive`.
+* `created_by` references `Users.id`.
+* `updated_by` references `Users.id`.
+
+## Interface behavior
+
+The Markets list displays:
+
+```text
+Market
+State
+Status
+```
+
+The Add/Edit Market form includes `market_name`, `state`, and `status`. Status can be
+changed between Active and Inactive from the form. The main Markets view also provides a
+status toggle for the selected Market.
+
+Only Active Markets are displayed by default. Selecting **Include inactive markets**
+shows both Active and Inactive records. Market records are retained rather than
+physically deleted so historical Jobs and other operational records can continue to
+reference them.
+
+## Indexes
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_Markets_name
+    ON Markets(market_name COLLATE NOCASE);
+
+CREATE INDEX IF NOT EXISTS idx_Markets_state
+    ON Markets(state);
+
+CREATE INDEX IF NOT EXISTS idx_Markets_status
+    ON Markets(status);
+```
+
+---
+
+"""
+
+          section_anchor = "# Table: `Techs`\n"
+          if "# Table: `Markets`" not in text:
+              text = text.replace(section_anchor, markets_section + section_anchor, 1)
+
+          index_anchor = """idx_TechAddresses_tech_id
+ux_TechAddresses_primary
+"""
+          market_indexes = """idx_TechAddresses_tech_id
+ux_TechAddresses_primary
+idx_Markets_name
+idx_Markets_state
+idx_Markets_status
+"""
+          text = text.replace(index_anchor, market_indexes, 1)
+
+          relationship_old = """Users create/update users, technicians, projects, jobs, and assignments and may act in
+audit events. A technician has zero or more addresses and zero or more job assignments.
+A Project has zero or more Jobs. A Job has zero or more source records and zero or more
+assignment-history records.
+"""
+          relationship_new = """Users create/update users, technicians, Markets, projects, jobs, and assignments and may
+act in audit events. A technician has zero or more addresses and zero or more job
+assignments. A Market identifies an operational service territory and may be referenced
+by zero or more Jobs. A Project has zero or more Jobs. A Job has zero or more source
+records and zero or more assignment-history records.
+"""
+          text = text.replace(relationship_old, relationship_new, 1)
+
+          path.write_text(text, encoding="utf-8")
+
+          workflow = Path(".github/workflows/update-markets-schema.yml")
+          workflow.unlink()
+
+      - name: Commit documentation update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add database/schema/schema.md .github/workflows/update-markets-schema.yml
+          git commit -m "Document Markets table state and status fields"
+          git push
