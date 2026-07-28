@@ -84,17 +84,37 @@ class OpenTableImportService:
         text = str(value or "").strip()
         if not text:
             return None
+
+        normalized = re.sub(r"\s+", " ", text).strip()
         formats = (
-            "%m/%d/%Y %I:%M%p",
+            "%m/%d/%Y %I:%M:%S %p",
             "%m/%d/%Y %I:%M %p",
+            "%m/%d/%Y %I:%M%p",
+            "%m/%d/%Y %H:%M:%S",
             "%m/%d/%Y %H:%M",
             "%m/%d/%Y",
-            "%m-%d-%Y %I:%M%p",
+            "%m/%d/%y %I:%M:%S %p",
+            "%m/%d/%y %I:%M %p",
+            "%m/%d/%y %I:%M%p",
+            "%m/%d/%y %H:%M:%S",
+            "%m/%d/%y %H:%M",
+            "%m/%d/%y",
+            "%m-%d-%Y %I:%M:%S %p",
             "%m-%d-%Y %I:%M %p",
+            "%m-%d-%Y %I:%M%p",
+            "%m-%d-%Y %H:%M:%S",
             "%m-%d-%Y %H:%M",
             "%m-%d-%Y",
+            "%m-%d-%y %I:%M:%S %p",
+            "%m-%d-%y %I:%M %p",
+            "%m-%d-%y %I:%M%p",
+            "%m-%d-%y %H:%M:%S",
+            "%m-%d-%y %H:%M",
+            "%m-%d-%y",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d %H:%M",
+            "%Y-%m-%d",
         )
-        normalized = re.sub(r"\s+", " ", text).replace("AM", "am").replace("PM", "pm")
         for fmt in formats:
             try:
                 return datetime.strptime(normalized, fmt).isoformat(timespec="minutes")
