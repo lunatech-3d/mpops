@@ -43,7 +43,9 @@ class MainWindow:
             ttk.Button(nav,text="Administration → Users",command=self.open_users).pack(fill="x",pady=2)
         ttk.Button(nav,text="Log Out",command=self.logout).pack(fill="x",pady=(20,2))
         ttk.Button(nav,text="Exit",command=root.destroy).pack(fill="x",pady=2)
-        self.show_dashboard()
+        # Matterport jobs are the current operational focus, so make the job
+        # list the first screen users see after signing in.
+        self.show_jobs()
 
     def clear(self):
         for child in self.content.winfo_children(): child.destroy()
