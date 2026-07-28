@@ -1,0 +1,351 @@
+"""Job repository operations for the first Matterport Ops implementation slice."""
+
+from __future__ import annotations
+
+import re
+import sqlite3
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
+from app.date_utils import utc_now_iso
+from app.security.audit import record_event
+from app.security.auth import AuthService, Session
+from app.security.user_manager import AuthorizationError
+
+
+_JOB_FIELDS = frozenset({
+    "project_id", "external_job_id", "project_name_source", "client_name_source",
+    "job_status", "request_received_at", "scheduled_start_at", "actual_start_at",
+    "completed_at", "cancelled_at", "capture_address_raw", "address_1", "address_2",
+    "city", "state", "postal_code", "county", "country", "requested_capture_size",
+    "additional_details", "scheduling_link", "floor_plan_attachments",
+    "onsite_contact_name", "onsite_contact_email", "onsite_contact_phone",
+    "preferred_datetime_1", "preferred_datetime_2", "alternate_datetime_1",
+    "alternate_datetime_2", "alternate_datetime_3", "cancellation_reason",
+    "internal_notes",
+})
+_REQUIRED_JOB_FIELDS = frozenset({"external_job_id"})
+_TIMESTAMP_FIELDS = frozenset({
+    "request_received_at", "scheduled_start_at", "actual_start_at", "completed_at",
+    "cancelled_at", "preferred_datetime_1", "preferred_datetime_2",
+    "alternate_datetime_1", "alternate_datetime_2", "alternate_datetime_3",
+})
+_LONG_TEXT_FIELDS = frozenset({
+    "additional_details", "floor_plan_attachments", "internal_notes",
+})
+_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+
+_JOB_SUMMARY_SELECT = """
+    SELECT
+        j.*,
+        p.project_code,
+        p.project_name,
+        p.client_name AS project_client_name,
+        a.job_assignment_id AS primary_assignment_id,
+        a.assignment_status AS primary_assignment_status,
+        t.tech_code AS primary_tech_code,
+        t.first_name AS primary_tech_first_name,
+        t.last_name AS primary_tech_last_name,
+        COALESCE((
+            SELECT SUM(sr.ct_rate + sr.ct_travel_payout + sr.ct_off_hours_payout)
+            FROM JobSourceRecords sr
+            WHERE sr.job_id = j.job_id
+        ), 0) AS expected_payout
+    FROM Jobs j
+    LEFT JOIN Projects p ON p.project_id = j.project_id
+    LEFT JOIN JobAssignments a
+        ON a.job_id = j.job_id
+       AND a.assignment_role = 'Primary'
+       AND a.unassigned_at IS NULL
+    LEFT JOIN Techs t ON t.tech_id = a.tech_id
+"""
+
+
+class JobsService:
+    """Create, update, retrieve, list, and search operational Jobs."""
+
+    def __init__(self, auth: AuthService):
+        self.auth = auth
+
+    @staticmethod
+    def _require_operator(session: Session | None) -> None:
+        if session is None or session.role not in {"admin", "operator"}:
+            raise AuthorizationError("Administrator or operator role required")
+
+    @staticmethod
+    def _positive_id(value: Any, label: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"{label} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _page_value(value: Any, label: str, *, minimum: int, maximum: int | None = None) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"{label} must be an integer of at least {minimum}")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{label} must not exceed {maximum}")
+        return value
+
+    @staticmethod
+    def _clean_text(field: str, value: Any, *, required: bool = False) -> str | None:
+        if value is None:
+            if required:
+                raise ValueError(f"{field} is required")
+            return None
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be text")
+        value = value.strip()
+        if not value:
+            if required:
+                raise ValueError(f"{field} is required")
+            return None
+        limit = 4000 if field in _LONG_TEXT_FIELDS else 1000 if field == "capture_address_raw" else 255
+        if len(value) > limit:
+            raise ValueError(f"{field} is too long")
+        if field == "onsite_contact_email" and not _EMAIL.fullmatch(value):
+            raise ValueError("On-site contact email is invalid")
+        if field == "state" and len(value) == 2 and value.isalpha():
+            value = value.upper()
+        return value
+
+    @staticmethod
+    def _clean_timestamp(field: str, value: Any) -> str | None:
+        value = JobsService._clean_text(field, value)
+        if value is None:
+            return None
+        normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            datetime.fromisoformat(normalized)
+        except ValueError as exc:
+            raise ValueError(f"{field} must be an ISO-compatible date or timestamp") from exc
+        return value
+
+    @staticmethod
+    def _clean_number(field: str, value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        if isinstance(value, bool):
+            raise ValueError(f"{field} must be numeric")
+        try:
+            number = Decimal(str(value).strip())
+        except (InvalidOperation, AttributeError) as exc:
+            raise ValueError(f"{field} must be numeric") from exc
+        if not number.is_finite() or number < 0:
+            raise ValueError(f"{field} must be zero or greater")
+        return float(number)
+
+    @classmethod
+    def _clean_job(cls, data: dict[str, Any], *, creating: bool) -> dict[str, Any]:
+        if not isinstance(data, dict):
+            raise ValueError("job data must be a dictionary")
+        invalid = set(data) - _JOB_FIELDS
+        if invalid:
+            raise ValueError(f"Unsupported job fields: {', '.join(sorted(invalid))}")
+        if creating:
+            missing = _REQUIRED_JOB_FIELDS - set(data)
+            if missing:
+                raise ValueError(f"Missing required fields: {', '.join(sorted(missing))}")
+        elif not data:
+            raise ValueError("At least one job field is required")
+
+        clean: dict[str, Any] = {}
+        for field, value in data.items():
+            if field == "project_id":
+                clean[field] = None if value is None else cls._positive_id(value, field)
+            elif field == "requested_capture_size":
+                clean[field] = cls._clean_number(field, value)
+            elif field in _TIMESTAMP_FIELDS:
+                clean[field] = cls._clean_timestamp(field, value)
+            else:
+                clean[field] = cls._clean_text(
+                    field, value, required=field in _REQUIRED_JOB_FIELDS
+                )
+        if creating:
+            clean.setdefault("job_status", "Requested")
+        return clean
+
+    @staticmethod
+    def _require_job(connection: sqlite3.Connection, job_id: int) -> sqlite3.Row:
+        row = connection.execute("SELECT * FROM Jobs WHERE job_id = ?", (job_id,)).fetchone()
+        if row is None:
+            raise LookupError("Job not found")
+        return row
+
+    @staticmethod
+    def _require_project(connection: sqlite3.Connection, project_id: int | None) -> None:
+        if project_id is None:
+            return
+        row = connection.execute(
+            "SELECT 1 FROM Projects WHERE project_id = ?", (project_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError("Project not found")
+
+    @staticmethod
+    def _summary_row(connection: sqlite3.Connection, job_id: int) -> dict[str, Any]:
+        row = connection.execute(
+            _JOB_SUMMARY_SELECT + " WHERE j.job_id = ?", (job_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError("Job not found")
+        return dict(row)
+
+    def list_jobs(
+        self,
+        job_status: str | None = None,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Return Jobs in scheduled-date order, optionally filtered by status."""
+        limit = self._page_value(limit, "limit", minimum=1, maximum=2000)
+        offset = self._page_value(offset, "offset", minimum=0)
+        parameters: list[Any] = []
+        where = ""
+        if job_status is not None:
+            status = self._clean_text("job_status", job_status, required=True)
+            where = " WHERE j.job_status = ? COLLATE NOCASE"
+            parameters.append(status)
+        parameters.extend((limit, offset))
+        sql = (
+            _JOB_SUMMARY_SELECT
+            + where
+            + " ORDER BY CASE WHEN j.scheduled_start_at IS NULL THEN 1 ELSE 0 END, "
+              "j.scheduled_start_at, j.external_job_id COLLATE NOCASE LIMIT ? OFFSET ?"
+        )
+        with self.auth.connection() as connection:
+            return [dict(row) for row in connection.execute(sql, parameters)]
+
+    def search_jobs(
+        self,
+        query: str,
+        job_status: str | None = None,
+        *,
+        limit: int = 500,
+        offset: int = 0,
+    ) -> list[dict[str, Any]]:
+        """Search Job, Project, location, and active-primary technician fields."""
+        if not isinstance(query, str):
+            raise ValueError("query must be text")
+        query = query.strip()
+        if not query:
+            return self.list_jobs(job_status, limit=limit, offset=offset)
+        limit = self._page_value(limit, "limit", minimum=1, maximum=2000)
+        offset = self._page_value(offset, "offset", minimum=0)
+        term = f"%{query}%"
+        searchable = (
+            "j.external_job_id", "j.project_name_source", "j.client_name_source",
+            "j.capture_address_raw", "j.address_1", "j.address_2", "j.city", "j.state",
+            "j.postal_code", "j.county", "j.job_status", "p.project_code",
+            "p.project_name", "p.client_name", "t.tech_code", "t.first_name", "t.last_name",
+        )
+        conditions = [
+            "(" + " OR ".join(
+                f"COALESCE({field}, '') LIKE ? COLLATE NOCASE" for field in searchable
+            ) + ")"
+        ]
+        parameters: list[Any] = [term] * len(searchable)
+        if job_status is not None:
+            conditions.append("j.job_status = ? COLLATE NOCASE")
+            parameters.append(self._clean_text("job_status", job_status, required=True))
+        parameters.extend((limit, offset))
+        sql = (
+            _JOB_SUMMARY_SELECT
+            + " WHERE " + " AND ".join(conditions)
+            + " ORDER BY CASE WHEN j.scheduled_start_at IS NULL THEN 1 ELSE 0 END, "
+              "j.scheduled_start_at, j.external_job_id COLLATE NOCASE LIMIT ? OFFSET ?"
+        )
+        with self.auth.connection() as connection:
+            return [dict(row) for row in connection.execute(sql, parameters)]
+
+    def get_job(self, job_id: int) -> dict[str, Any] | None:
+        """Return one Job summary, or ``None`` when the identifier does not exist."""
+        self._positive_id(job_id, "job_id")
+        with self.auth.connection() as connection:
+            row = connection.execute(
+                _JOB_SUMMARY_SELECT + " WHERE j.job_id = ?", (job_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_job_by_external_id(self, external_job_id: str) -> dict[str, Any] | None:
+        """Return one Job by its user-facing external identifier."""
+        external_job_id = self._clean_text(
+            "external_job_id", external_job_id, required=True
+        )
+        with self.auth.connection() as connection:
+            row = connection.execute(
+                _JOB_SUMMARY_SELECT
+                + " WHERE j.external_job_id = ? COLLATE NOCASE",
+                (external_job_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def create_job(self, session: Session, job_data: dict[str, Any]) -> int:
+        """Create and audit a Job; administrators and operators may create Jobs."""
+        self._require_operator(session)
+        clean = self._clean_job(job_data, creating=True)
+        fields = list(clean)
+        try:
+            with self.auth.connection() as connection:
+                self._require_project(connection, clean.get("project_id"))
+                cursor = connection.execute(
+                    f"INSERT INTO Jobs ({','.join(fields)}, created_at, created_by) "
+                    f"VALUES ({','.join('?' for _ in fields)}, ?, ?)",
+                    [clean[field] for field in fields] + [utc_now_iso(), session.user_id],
+                )
+                job_id = int(cursor.lastrowid)
+                record_event(
+                    connection,
+                    "job_created",
+                    actor_user_id=session.user_id,
+                    details={
+                        "job_id": job_id,
+                        "external_job_id": clean["external_job_id"],
+                    },
+                )
+                return job_id
+        except sqlite3.IntegrityError as exc:
+            message = str(exc).lower()
+            if "external_job_id" in message or "unique" in message:
+                raise ValueError("A Job with this external Job ID already exists") from exc
+            raise ValueError("Job data conflicts with an existing record") from exc
+
+    def update_job(
+        self, session: Session, job_id: int, changes: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Update allowlisted Job fields and return the resulting Job summary."""
+        self._require_operator(session)
+        self._positive_id(job_id, "job_id")
+        clean = self._clean_job(changes, creating=False)
+        try:
+            with self.auth.connection() as connection:
+                before = dict(self._require_job(connection, job_id))
+                if "project_id" in clean:
+                    self._require_project(connection, clean["project_id"])
+                assignments = ",".join(f"{field} = ?" for field in clean)
+                connection.execute(
+                    f"UPDATE Jobs SET {assignments}, updated_at = ?, updated_by = ? "
+                    "WHERE job_id = ?",
+                    [*clean.values(), utc_now_iso(), session.user_id, job_id],
+                )
+                record_event(
+                    connection,
+                    "job_updated",
+                    actor_user_id=session.user_id,
+                    details={
+                        "job_id": job_id,
+                        "external_job_id": clean.get(
+                            "external_job_id", before["external_job_id"]
+                        ),
+                        "fields_changed": sorted(clean),
+                        "before": {field: before[field] for field in clean},
+                        "after": clean,
+                    },
+                )
+                return self._summary_row(connection, job_id)
+        except sqlite3.IntegrityError as exc:
+            message = str(exc).lower()
+            if "external_job_id" in message or "unique" in message:
+                raise ValueError("A Job with this external Job ID already exists") from exc
+            raise ValueError("Job data conflicts with an existing record") from exc
