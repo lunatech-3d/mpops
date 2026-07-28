@@ -34,7 +34,7 @@ class MainWindow:
             ttk.Separator(nav).pack(fill="x",pady=8)
             ttk.Button(
                 nav,
-                text="Import OpenTable CSV",
+                text="Job Intake Center",
                 command=self.open_opentable_import,
                 width=18,
             ).pack(fill="x",pady=2)
