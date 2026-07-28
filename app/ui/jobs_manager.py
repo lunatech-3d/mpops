@@ -1,0 +1,357 @@
+"""Embedded Jobs Manager for day-to-day Matterport operations."""
+
+import sqlite3
+import tkinter as tk
+from tkinter import messagebox, ttk
+
+from app.security.user_manager import AuthorizationError
+from app.services.jobs_service import JobsService
+from app.ui.job_form import changed_fields, show_job_form
+from app.ui.styles import PADDING
+
+
+EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
+STATUS_VALUES = (
+    "All", "Requested", "Scheduling", "Scheduled", "Assigned", "In Progress",
+    "Completed", "Cancelled", "On Hold",
+)
+
+
+def technician_name(job):
+    """Build the active primary technician's display name."""
+    name = " ".join(
+        str(job.get(field) or "").strip()
+        for field in ("primary_tech_first_name", "primary_tech_last_name")
+        if str(job.get(field) or "").strip()
+    )
+    return name or job.get("primary_tech_code") or ""
+
+
+def job_address(job):
+    """Return the most useful compact address available for the grid."""
+    if job.get("capture_address_raw"):
+        return str(job["capture_address_raw"])
+    parts = [job.get("address_1"), job.get("city"), job.get("state"), job.get("postal_code")]
+    return ", ".join(str(value).strip() for value in parts if value)
+
+
+def client_name(job):
+    return job.get("client_name_source") or job.get("project_client_name") or ""
+
+
+def project_name(job):
+    return job.get("project_name_source") or job.get("project_name") or ""
+
+
+def format_currency(value):
+    try:
+        return f"${float(value or 0):,.2f}"
+    except (TypeError, ValueError):
+        return "$0.00"
+
+
+class JobsController:
+    """UI-facing JobsService adapter that can be tested without Tk widgets."""
+
+    def __init__(self, service, session):
+        self.service, self.session = service, session
+
+    @property
+    def can_modify(self):
+        return self.session.role in {"admin", "operator"}
+
+    def load(self, query="", status="All"):
+        status_filter = None if status == "All" else status
+        if query.strip():
+            return self.service.search_jobs(query, status_filter)
+        return self.service.list_jobs(status_filter)
+
+    def create(self, data):
+        return self.service.create_job(self.session, data)
+
+    def update(self, job_id, original, submitted):
+        changes = changed_fields(original, submitted)
+        return self.service.update_job(self.session, job_id, changes) if changes else None
+
+
+class JobsManager(ttk.Frame):
+    """Searchable operational Job grid with basic create and edit actions."""
+
+    COLUMNS = (
+        "external_job_id", "client", "project", "address", "scheduled_start_at",
+        "technician", "job_status", "expected_payout",
+    )
+    HEADINGS = (
+        "Job #", "Client", "Project", "Capture Address", "Scheduled",
+        "Primary Technician", "Status", "Expected Payout",
+    )
+
+    def __init__(self, parent, auth, session, service=None):
+        super().__init__(parent, padding=PADDING, style="App.TFrame")
+        self.controller = JobsController(service or JobsService(auth), session)
+        self.rows = {}
+
+        ttk.Label(self, text="Jobs", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
+
+        filters = ttk.Frame(self)
+        filters.pack(fill="x", pady=(0, 8))
+        self.search_var = tk.StringVar()
+        self.status_var = tk.StringVar(value="All")
+
+        ttk.Label(filters, text="Search:").pack(side="left")
+        search = ttk.Entry(filters, textvariable=self.search_var, width=34)
+        search.pack(side="left", padx=(6, 12))
+        search.bind("<Return>", lambda _event: self.refresh())
+
+        ttk.Label(filters, text="Status:").pack(side="left")
+        status = ttk.Combobox(
+            filters,
+            textvariable=self.status_var,
+            values=STATUS_VALUES,
+            state="readonly",
+            width=15,
+        )
+        status.pack(side="left", padx=6)
+        status.bind("<<ComboboxSelected>>", lambda _event: self.refresh())
+
+        ttk.Button(filters, text="Search", command=self.refresh).pack(side="left", padx=(6, 0))
+        ttk.Button(filters, text="Clear", command=self.clear_filters).pack(side="left", padx=6)
+        ttk.Button(filters, text="Refresh", command=self.refresh).pack(side="left")
+
+        table = ttk.Frame(self)
+        table.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(
+            table, columns=self.COLUMNS, show="headings", selectmode="browse"
+        )
+        widths = (105, 145, 145, 245, 135, 145, 105, 110)
+        anchors = ("w", "w", "w", "w", "w", "w", "w", "e")
+        for name, heading, width, anchor in zip(
+            self.COLUMNS, self.HEADINGS, widths, anchors
+        ):
+            self.tree.heading(name, text=heading)
+            self.tree.column(name, width=width, minwidth=70, anchor=anchor)
+
+        ybar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
+        xbar = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns")
+        xbar.grid(row=1, column=0, sticky="ew")
+        table.rowconfigure(0, weight=1)
+        table.columnconfigure(0, weight=1)
+        self.tree.bind("<Double-1>", lambda _event: self.edit_or_view())
+
+        actions = ttk.Frame(self)
+        actions.pack(fill="x", pady=(8, 0))
+        self.add_button = ttk.Button(actions, text="Add Job", command=self.add)
+        self.add_button.pack(side="left", padx=(0, 6))
+        self.edit_button = ttk.Button(actions, text="Edit Job", command=self.edit)
+        self.edit_button.pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="View Details", command=self.view_details).pack(
+            side="left", padx=(0, 6)
+        )
+        ttk.Button(actions, text="Refresh", command=self.refresh).pack(side="left")
+
+        self.status = tk.StringVar()
+        ttk.Label(self, textvariable=self.status, style="Status.TLabel").pack(
+            anchor="w", pady=(7, 0)
+        )
+
+        if not self.controller.can_modify:
+            self.add_button.configure(state="disabled")
+            self.edit_button.configure(state="disabled")
+
+        self.refresh()
+
+    def clear_filters(self):
+        self.search_var.set("")
+        self.status_var.set("All")
+        self.refresh()
+
+    def refresh(self, select_id=None):
+        try:
+            rows = self.controller.load(self.search_var.get(), self.status_var.get())
+        except EXPECTED_ERRORS as exc:
+            self._error(exc)
+            return
+
+        self.tree.delete(*self.tree.get_children())
+        self.rows.clear()
+        for row in rows:
+            job_id = int(row["job_id"])
+            iid = f"job-{job_id}"
+            self.rows[iid] = row
+            visible = {
+                "external_job_id": row.get("external_job_id") or "",
+                "client": client_name(row),
+                "project": project_name(row),
+                "address": job_address(row),
+                "scheduled_start_at": row.get("scheduled_start_at") or "",
+                "technician": technician_name(row),
+                "job_status": row.get("job_status") or "",
+                "expected_payout": format_currency(row.get("expected_payout")),
+            }
+            self.tree.insert(
+                "", "end", iid=iid, values=[visible[column] for column in self.COLUMNS]
+            )
+
+        message = f"{len(rows)} job(s) found." if rows else "No jobs found."
+        if len(rows) >= 500:
+            message += " Showing the first 500 records."
+        self.status.set(message)
+
+        iid = f"job-{select_id}" if select_id else None
+        if iid and self.tree.exists(iid):
+            self.tree.selection_set(iid)
+            self.tree.focus(iid)
+            self.tree.see(iid)
+
+    def selected(self, warn=True):
+        selection = self.tree.selection()
+        if not selection:
+            if warn:
+                messagebox.showwarning("Jobs", "Select a job first.", parent=self)
+            return None
+        return self.rows.get(selection[0])
+
+    def _error(self, exc):
+        messagebox.showerror("Jobs", str(exc), parent=self)
+
+    def add(self):
+        data = show_job_form(self)
+        if data is None:
+            return
+        try:
+            job_id = self.controller.create(data)
+        except EXPECTED_ERRORS as exc:
+            self._error(exc)
+            return
+        self.refresh(job_id)
+        self.status.set("Job added successfully.")
+
+    def edit_or_view(self):
+        if self.controller.can_modify:
+            self.edit()
+        else:
+            self.view_details()
+
+    def edit(self):
+        row = self.selected()
+        if not row:
+            return
+        job_id = int(row["job_id"])
+        try:
+            original = self.controller.service.get_job(job_id)
+        except EXPECTED_ERRORS as exc:
+            self._error(exc)
+            return
+        if original is None:
+            self._error(LookupError("Job not found"))
+            return
+
+        submitted = show_job_form(self, original)
+        if submitted is None:
+            return
+        try:
+            result = self.controller.update(job_id, original, submitted)
+        except EXPECTED_ERRORS as exc:
+            self._error(exc)
+            return
+        self.refresh(job_id)
+        self.status.set("Job updated." if result else "No changes were made.")
+
+    def view_details(self):
+        row = self.selected()
+        if not row:
+            return
+        try:
+            job = self.controller.service.get_job(int(row["job_id"]))
+        except EXPECTED_ERRORS as exc:
+            self._error(exc)
+            return
+        if not job:
+            self._error(LookupError("Job not found"))
+            return
+        JobDetails(self, job)
+
+
+class JobDetails:
+    """Read-only operational summary for one Job."""
+
+    def __init__(self, parent, job):
+        self.window = tk.Toplevel(parent)
+        self.window.title(f"Job {job.get('external_job_id') or ''}")
+        self.window.geometry("760x620")
+        self.window.minsize(650, 500)
+
+        body = ttk.Frame(self.window, padding=PADDING)
+        body.pack(fill="both", expand=True)
+        ttk.Label(
+            body,
+            text=f"Job {job.get('external_job_id') or ''}",
+            style="Header.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            body,
+            text=f"{job.get('job_status') or '—'}  •  {client_name(job) or 'No client'}",
+        ).pack(anchor="w", pady=(0, 12))
+
+        sections = (
+            ("Project", (
+                ("Project Code", job.get("project_code")),
+                ("Project", project_name(job)),
+                ("Client", client_name(job)),
+            )),
+            ("Schedule", (
+                ("Request Received", job.get("request_received_at")),
+                ("Scheduled Start", job.get("scheduled_start_at")),
+                ("Actual Start", job.get("actual_start_at")),
+                ("Completed", job.get("completed_at")),
+            )),
+            ("Location", (
+                ("Capture Address", job_address(job)),
+                ("County", job.get("county")),
+                ("Country", job.get("country")),
+                ("Capture Size", job.get("requested_capture_size")),
+            )),
+            ("Assignment", (
+                ("Primary Technician", technician_name(job)),
+                ("Assignment Status", job.get("primary_assignment_status")),
+                ("Expected Payout", format_currency(job.get("expected_payout"))),
+            )),
+            ("On-site Contact", (
+                ("Name", job.get("onsite_contact_name")),
+                ("Email", job.get("onsite_contact_email")),
+                ("Phone", job.get("onsite_contact_phone")),
+            )),
+        )
+
+        grid = ttk.Frame(body)
+        grid.pack(fill="x")
+        for index, (title, values) in enumerate(sections):
+            frame = ttk.LabelFrame(grid, text=title, padding=8)
+            frame.grid(
+                row=index // 2, column=index % 2, sticky="nsew", padx=4, pady=4
+            )
+            for label, value in values:
+                ttk.Label(
+                    frame,
+                    text=f"{label}: {value if value not in (None, '') else '—'}",
+                    wraplength=315,
+                ).pack(anchor="w", pady=1)
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+
+        notes_frame = ttk.LabelFrame(body, text="Internal Notes", padding=8)
+        notes_frame.pack(fill="both", expand=True, padx=4, pady=(8, 4))
+        notes = tk.Text(notes_frame, height=7, wrap="word")
+        notes.pack(fill="both", expand=True)
+        notes.insert("1.0", job.get("internal_notes") or "")
+        notes.configure(state="disabled")
+
+        ttk.Button(body, text="Close", command=self.window.destroy).pack(
+            anchor="e", pady=(8, 0)
+        )
+        self.window.transient(parent.winfo_toplevel())
+        self.window.grab_set()
+        self.window.focus_set()
