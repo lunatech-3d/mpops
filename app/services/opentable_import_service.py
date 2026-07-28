@@ -62,7 +62,7 @@ class OpenTableImportService:
             number = Decimal(text)
         except InvalidOperation as exc:
             raise ValueError(f"Invalid currency value: {value}") from exc
-        if not number.is_finite() or number < 0:
+        if not number.is_finite():
             raise ValueError(f"Invalid currency value: {value}")
         return float(number)
 
