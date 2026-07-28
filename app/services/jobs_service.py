@@ -15,7 +15,7 @@ from app.security.user_manager import AuthorizationError
 
 
 _JOB_FIELDS = frozenset({
-    "project_id", "external_job_id", "project_name_source", "client_name_source",
+    "project_id", "market_id", "external_job_id", "project_name_source", "client_name_source",
     "job_status", "request_received_at", "scheduled_start_at", "actual_start_at",
     "completed_at", "cancelled_at", "capture_address_raw", "address_1", "address_2",
     "city", "state", "postal_code", "county", "country", "requested_capture_size",
@@ -39,6 +39,9 @@ _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _JOB_SUMMARY_SELECT = """
     SELECT
         j.*,
+        m.market_name,
+        m.state AS market_state,
+        m.status AS market_status,
         p.project_code,
         p.project_name,
         p.client_name AS project_client_name,
@@ -53,6 +56,7 @@ _JOB_SUMMARY_SELECT = """
             WHERE sr.job_id = j.job_id
         ), 0) AS expected_payout
     FROM Jobs j
+    LEFT JOIN Markets m ON m.market_id = j.market_id
     LEFT JOIN Projects p ON p.project_id = j.project_id
     LEFT JOIN JobAssignments a
         ON a.job_id = j.job_id
@@ -151,8 +155,8 @@ class JobsService:
 
         clean: dict[str, Any] = {}
         for field, value in data.items():
-            if field == "project_id":
-                clean[field] = None if value is None else cls._positive_id(value, field)
+            if field in {"project_id", "market_id"}:
+                clean[field] = None if value in (None, "") else cls._positive_id(value, field)
             elif field == "requested_capture_size":
                 clean[field] = cls._clean_number(field, value)
             elif field in _TIMESTAMP_FIELDS:
@@ -183,6 +187,16 @@ class JobsService:
             raise LookupError("Project not found")
 
     @staticmethod
+    def _require_market(connection: sqlite3.Connection, market_id: int | None) -> None:
+        if market_id is None:
+            return
+        row = connection.execute(
+            "SELECT 1 FROM Markets WHERE market_id = ?", (market_id,)
+        ).fetchone()
+        if row is None:
+            raise LookupError("Market not found")
+
+    @staticmethod
     def _summary_row(connection: sqlite3.Connection, job_id: int) -> dict[str, Any]:
         row = connection.execute(
             _JOB_SUMMARY_SELECT + " WHERE j.job_id = ?", (job_id,)
@@ -191,6 +205,17 @@ class JobsService:
             raise LookupError("Job not found")
         return dict(row)
 
+    def list_market_options(self, *, include_inactive: bool = False) -> list[dict[str, Any]]:
+        """Return Markets for Job form dropdowns."""
+        sql = "SELECT market_id, market_name, state, status FROM Markets"
+        parameters: tuple[Any, ...] = ()
+        if not include_inactive:
+            sql += " WHERE status = ? COLLATE NOCASE"
+            parameters = ("Active",)
+        sql += " ORDER BY state COLLATE NOCASE, market_name COLLATE NOCASE"
+        with self.auth.connection() as connection:
+            return [dict(row) for row in connection.execute(sql, parameters)]
+
     def list_jobs(
         self,
         job_status: str | None = None,
@@ -198,7 +223,6 @@ class JobsService:
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Return Jobs in scheduled-date order, optionally filtered by status."""
         limit = self._page_value(limit, "limit", minimum=1, maximum=2000)
         offset = self._page_value(offset, "offset", minimum=0)
         parameters: list[Any] = []
@@ -225,7 +249,6 @@ class JobsService:
         limit: int = 500,
         offset: int = 0,
     ) -> list[dict[str, Any]]:
-        """Search Job, Project, location, and active-primary technician fields."""
         if not isinstance(query, str):
             raise ValueError("query must be text")
         query = query.strip()
@@ -237,8 +260,9 @@ class JobsService:
         searchable = (
             "j.external_job_id", "j.project_name_source", "j.client_name_source",
             "j.capture_address_raw", "j.address_1", "j.address_2", "j.city", "j.state",
-            "j.postal_code", "j.county", "j.job_status", "p.project_code",
-            "p.project_name", "p.client_name", "t.tech_code", "t.first_name", "t.last_name",
+            "j.postal_code", "j.county", "j.job_status", "m.market_name", "m.state",
+            "p.project_code", "p.project_name", "p.client_name", "t.tech_code",
+            "t.first_name", "t.last_name",
         )
         conditions = [
             "(" + " OR ".join(
@@ -260,7 +284,6 @@ class JobsService:
             return [dict(row) for row in connection.execute(sql, parameters)]
 
     def get_job(self, job_id: int) -> dict[str, Any] | None:
-        """Return one Job summary, or ``None`` when the identifier does not exist."""
         self._positive_id(job_id, "job_id")
         with self.auth.connection() as connection:
             row = connection.execute(
@@ -269,7 +292,6 @@ class JobsService:
             return dict(row) if row else None
 
     def get_job_by_external_id(self, external_job_id: str) -> dict[str, Any] | None:
-        """Return one Job by its user-facing external identifier."""
         external_job_id = self._clean_text(
             "external_job_id", external_job_id, required=True
         )
@@ -282,13 +304,13 @@ class JobsService:
             return dict(row) if row else None
 
     def create_job(self, session: Session, job_data: dict[str, Any]) -> int:
-        """Create and audit a Job; administrators and operators may create Jobs."""
         self._require_operator(session)
         clean = self._clean_job(job_data, creating=True)
         fields = list(clean)
         try:
             with self.auth.connection() as connection:
                 self._require_project(connection, clean.get("project_id"))
+                self._require_market(connection, clean.get("market_id"))
                 cursor = connection.execute(
                     f"INSERT INTO Jobs ({','.join(fields)}, created_at, created_by) "
                     f"VALUES ({','.join('?' for _ in fields)}, ?, ?)",
@@ -314,7 +336,6 @@ class JobsService:
     def update_job(
         self, session: Session, job_id: int, changes: dict[str, Any]
     ) -> dict[str, Any]:
-        """Update allowlisted Job fields and return the resulting Job summary."""
         self._require_operator(session)
         self._positive_id(job_id, "job_id")
         clean = self._clean_job(changes, creating=False)
@@ -323,6 +344,8 @@ class JobsService:
                 before = dict(self._require_job(connection, job_id))
                 if "project_id" in clean:
                     self._require_project(connection, clean["project_id"])
+                if "market_id" in clean:
+                    self._require_market(connection, clean["market_id"])
                 assignments = ",".join(f"{field} = ?" for field in clean)
                 connection.execute(
                     f"UPDATE Jobs SET {assignments}, updated_at = ?, updated_by = ? "
