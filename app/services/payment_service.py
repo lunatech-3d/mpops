@@ -7,6 +7,7 @@ underlying schema.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import date, datetime
 from typing import Any
@@ -16,6 +17,9 @@ from app.security.audit import record_event
 from app.security.auth import AuthService, Session
 from app.security.user_manager import AuthorizationError
 
+
+LOGGER = logging.getLogger(__name__)
+_AP_INVOICE_LOOKUP_SQL = "SELECT job_id, ap_invoice_number FROM Jobs WHERE ap_invoice_number = ?"
 
 BATCH_STATUSES = (
     "Draft", "Imported", "Needs Review", "Reconciled", "Approved", "Closed", "Cancelled"
@@ -883,7 +887,7 @@ class PaymentService:
             return dict(self._require_item(connection, payment_item_id))
 
     def match_payment_items(self, session: Session, payment_batch_id: int) -> dict[str, int]:
-        """Match every item in a batch to ``Jobs.external_job_id`` atomically."""
+        """Match each imported invoice number to ``Jobs.ap_invoice_number`` atomically."""
         self._require_operator(session)
         self._positive_id(payment_batch_id, "payment_batch_id")
         matched = missing = ambiguous = 0
@@ -895,15 +899,23 @@ class PaymentService:
                 "WHERE payment_batch_id = ? ORDER BY payment_item_id", (payment_batch_id,)
             ).fetchall()
             for item in items:
-                jobs = connection.execute(
-                    "SELECT job_id FROM Jobs WHERE external_job_id = ? COLLATE NOCASE",
-                    (item["document_number"],),
-                ).fetchall()
+                # ``document_number`` is the payment schema's invoice-number field.
+                # Both importers trim these values at ingestion, so deliberately do
+                # not introduce fuzzy matching or transform the deterministic key.
+                lookup_value = item["document_number"]
+                jobs = connection.execute(_AP_INVOICE_LOOKUP_SQL, (lookup_value,)).fetchall()
+                LOGGER.info(
+                    "Payment match diagnostic | Invoice Number: %r | Lookup Value: %r | "
+                    "SQL: %s | Matching Job Found: %s | Matching Job Value(s): %r",
+                    item["document_number"], lookup_value, _AP_INVOICE_LOOKUP_SQL,
+                    "Yes" if jobs else "No",
+                    [job["ap_invoice_number"] for job in jobs],
+                )
                 if len(jobs) == 1:
                     job = jobs[0]
                     connection.execute(
                         "UPDATE MatterportPaymentItems SET job_id = ?, match_status = 'Matched', "
-                        "match_method = 'External Job ID', match_notes = NULL, updated_at = ? "
+                        "match_method = 'AP Invoice Number', match_notes = NULL, updated_at = ? "
                         "WHERE payment_item_id = ?",
                         (job["job_id"], utc_now_iso(), item["payment_item_id"]),
                     )
@@ -923,9 +935,9 @@ class PaymentService:
                     job = None
                     connection.execute(
                         "UPDATE MatterportPaymentItems SET job_id = NULL, "
-                        "match_status = 'Ambiguous', match_method = 'External Job ID', "
+                        "match_status = 'Ambiguous', match_method = 'AP Invoice Number', "
                         "match_notes = ?, updated_at = ? WHERE payment_item_id = ?",
-                        ("Multiple Jobs share this document number", utc_now_iso(),
+                        ("Multiple Jobs share this AP invoice number", utc_now_iso(),
                          item["payment_item_id"]),
                     )
                     ambiguous += 1

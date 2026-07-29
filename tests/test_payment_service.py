@@ -42,8 +42,9 @@ class PaymentServiceTests(unittest.TestCase):
     def create_job(self, external_id):
         with self.auth.connection() as connection:
             return int(connection.execute(
-                "INSERT INTO Jobs (external_job_id, created_by) VALUES (?, ?)",
-                (external_id, self.session.user_id),
+                "INSERT INTO Jobs (external_job_id, ap_invoice_number, created_by) "
+                "VALUES (?, ?, ?)",
+                (external_id, external_id, self.session.user_id),
             ).lastrowid)
 
     def test_fresh_batch_creation_retrieval_and_listing(self):
@@ -258,7 +259,7 @@ class PaymentServiceTests(unittest.TestCase):
     def test_matching_success_and_failure(self):
         batch_id = self.create_batch()
         job_id = self.create_job("JOB-MATCH")
-        self.add_item(batch_id, "job-match", 100)
+        self.add_item(batch_id, "JOB-MATCH", 100)
         self.add_item(batch_id, "NOT-FOUND", 200)
         self.assertEqual(self.service.match_payment_items(self.session, batch_id), {
             "matched_count": 1, "missing_job_count": 1,
@@ -266,7 +267,7 @@ class PaymentServiceTests(unittest.TestCase):
         })
         matched, missing = self.service.list_payment_items(batch_id)
         self.assertEqual((matched["job_id"], matched["match_status"], matched["match_method"]),
-                         (job_id, "Matched", "External Job ID"))
+                         (job_id, "Matched", "AP Invoice Number"))
         self.assertEqual((missing["job_id"], missing["match_status"]),
                          (None, "Missing Job"))
 
@@ -387,7 +388,7 @@ class PaymentServiceTests(unittest.TestCase):
         })
         self.assertIsNone(self.service.get_primary_technician(job_id))
 
-    def test_matching_detects_ambiguous_external_job_ids(self):
+    def test_matching_detects_ambiguous_ap_invoice_numbers(self):
         batch_id = self.create_batch(100)
         first = self.create_job("DUP-JOB")
         # Rebuild this isolated test's Jobs table without its UNIQUE constraint
@@ -397,10 +398,11 @@ class PaymentServiceTests(unittest.TestCase):
             connection.execute("ALTER TABLE Jobs RENAME TO Jobs_unique")
             connection.execute("CREATE TABLE Jobs AS SELECT * FROM Jobs_unique")
             second = int(connection.execute(
-                "INSERT INTO Jobs (job_id, external_job_id, created_by) VALUES (?, ?, ?)",
-                (first + 1, "dup-job", self.session.user_id),
+                "INSERT INTO Jobs (job_id, external_job_id, ap_invoice_number, created_by) "
+                "VALUES (?, ?, ?, ?)",
+                (first + 1, "other-job", "DUP-JOB", self.session.user_id),
             ).lastrowid)
-        self.add_item(batch_id, "Dup-Job", 100)
+        self.add_item(batch_id, "DUP-JOB", 100)
         summary = self.service.match_payment_items(self.session, batch_id)
         self.assertEqual(summary, {"matched_count": 0, "missing_job_count": 0,
                                    "ambiguous_count": 1, "unmatched_count": 1})
@@ -408,12 +410,47 @@ class PaymentServiceTests(unittest.TestCase):
         self.assertIsNone(item["job_id"])
         self.assertNotIn(item["job_id"], (first, second))
         self.assertEqual((item["match_status"], item["match_method"]),
-                         ("Ambiguous", "External Job ID"))
+                         ("Ambiguous", "AP Invoice Number"))
         self.assertIn("Multiple Jobs", item["match_notes"])
         with self.auth.connection() as connection:
             actions = [row[0] for row in connection.execute(
                 "SELECT action FROM AuditLog WHERE action = 'payment_item_match_ambiguous'")]
         self.assertEqual(actions, ["payment_item_match_ambiguous"])
+
+    def test_matching_uses_ap_invoice_number_and_logs_diagnostics(self):
+        batch_id = self.create_batch(100)
+        with self.auth.connection() as connection:
+            job_id = int(connection.execute(
+                "INSERT INTO Jobs (external_job_id, ap_invoice_number, created_by) "
+                "VALUES (?, ?, ?)",
+                ("UNRELATED-JOB-ID", "AP-rec1ZrtnPyo5sE9a5", self.session.user_id),
+            ).lastrowid)
+        self.add_item(batch_id, "AP-rec1ZrtnPyo5sE9a5", 100)
+
+        with self.assertLogs("app.services.payment_service", level="INFO") as logs:
+            result = self.service.match_payment_items(self.session, batch_id)
+
+        self.assertEqual(result["matched_count"], 1)
+        self.assertEqual(self.service.list_payment_items(batch_id)[0]["job_id"], job_id)
+        diagnostic = "\n".join(logs.output)
+        self.assertIn("Invoice Number: 'AP-rec1ZrtnPyo5sE9a5'", diagnostic)
+        self.assertIn("Lookup Value: 'AP-rec1ZrtnPyo5sE9a5'", diagnostic)
+        self.assertIn("Matching Job Found: Yes", diagnostic)
+        self.assertIn("Matching Job Value(s): ['AP-rec1ZrtnPyo5sE9a5']", diagnostic)
+
+    def test_matching_does_not_fall_back_to_external_job_id(self):
+        batch_id = self.create_batch(100)
+        with self.auth.connection() as connection:
+            connection.execute(
+                "INSERT INTO Jobs (external_job_id, ap_invoice_number, created_by) "
+                "VALUES (?, ?, ?)",
+                ("AP-external-only", "AP-different", self.session.user_id),
+            )
+        self.add_item(batch_id, "AP-external-only", 100)
+
+        result = self.service.match_payment_items(self.session, batch_id)
+
+        self.assertEqual(result["missing_job_count"], 1)
 
     def test_matching_allowed_statuses_and_rejected_statuses(self):
         for status in ("Draft", "Imported", "Needs Review"):
