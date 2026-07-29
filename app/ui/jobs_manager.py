@@ -429,6 +429,10 @@ class JobDetails:
         ).pack(anchor="w", pady=(0, 12))
 
         sections = (
+            ("Identifiers", (
+                ("External Job ID", job.get("external_job_id")),
+                ("AP Invoice Number", job.get("ap_invoice_number")),
+            )),
             ("Project", (
                 ("Project Code", job.get("project_code")),
                 ("Project", project_name(job)),

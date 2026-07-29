@@ -15,7 +15,7 @@ from app.security.user_manager import AuthorizationError
 
 
 _JOB_FIELDS = frozenset({
-    "project_id", "market_id", "external_job_id", "project_name_source", "client_name_source",
+    "project_id", "market_id", "external_job_id", "ap_invoice_number", "project_name_source", "client_name_source",
     "job_status", "request_received_at", "scheduled_start_at", "actual_start_at",
     "completed_at", "cancelled_at", "capture_address_raw", "address_1", "address_2",
     "city", "state", "postal_code", "county", "country", "requested_capture_size",

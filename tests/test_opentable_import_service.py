@@ -7,6 +7,7 @@ from pathlib import Path
 from app.config import PROJECT_ROOT, Settings
 from app.security.auth import AuthService
 from app.security.user_manager import UserManager
+from app.services.jobs_service import JobsService
 from app.services.opentable_import_service import OpenTableImportService
 
 
@@ -21,7 +22,8 @@ COLUMNS = [
 ]
 
 
-def source_row(record_number, job_id, space, *, rate="0", size="", status="Scheduled"):
+def source_row(record_number, job_id, space, *, rate="0", size="", status="Scheduled",
+               invoice="INV-100"):
     return {
         "Record Number": record_number,
         "Request Date/Time": "1/2/2026 9:15am",
@@ -39,7 +41,7 @@ def source_row(record_number, job_id, space, *, rate="0", size="", status="Sched
         "CT Travel Payout": "10.25" if space == "Parent Record" else "0",
         "CT Off Hours Payout": "5.50" if space == "Parent Record" else "0",
         "CT Rate": rate,
-        "AP Invoice Number": "INV-100",
+        "AP Invoice Number": invoice,
         "CT Name": "Test Technician",
         "On-Site Contact Name": "Site Manager",
         "On-Site Contact Email": "manager@example.test",
@@ -71,9 +73,9 @@ class OpenTableImportServiceTests(unittest.TestCase):
     def tearDown(self):
         self.tempdir.cleanup()
 
-    def write_rows(self, rows):
+    def write_rows(self, rows, *, columns=COLUMNS):
         with self.csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=COLUMNS)
+            writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(rows)
 
@@ -113,6 +115,7 @@ class OpenTableImportServiceTests(unittest.TestCase):
                 (job["job_id"],),
             ).fetchall()
         self.assertEqual(job["job_status"], "Scheduled")
+        self.assertEqual(job["ap_invoice_number"], "INV-100")
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]["is_parent_record"], 1)
         self.assertAlmostEqual(records[0]["ct_rate"], 200.80)
@@ -144,6 +147,73 @@ class OpenTableImportServiceTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM JobSourceRecords").fetchone()[0], 2
             )
+
+    def test_blank_invoice_number_is_stored_as_null(self):
+        self.write_rows([source_row("1001", "JOB-1", "Parent Record", invoice="   ")])
+
+        self.service.import_csv(self.session, str(self.csv_path))
+
+        with self.auth.connection() as connection:
+            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+        self.assertIsNone(job["ap_invoice_number"])
+
+    def test_missing_invoice_column_is_rejected(self):
+        columns = [column for column in COLUMNS if column != "AP Invoice Number"]
+        self.write_rows([source_row("1001", "JOB-1", "Parent Record")], columns=columns)
+
+        with self.assertRaisesRegex(ValueError, "AP Invoice Number"):
+            self.service.read_csv(str(self.csv_path))
+
+    def test_duplicate_import_keeps_identical_invoice_without_conflict(self):
+        self.write_rows([source_row("1001", "JOB-1", "Parent Record",
+                                    invoice="AP-rec1ZrtnPyo5sE9a5")])
+        self.service.import_csv(self.session, str(self.csv_path))
+
+        result = self.service.import_csv(self.session, str(self.csv_path))
+
+        self.assertEqual(result["skipped"], 1)
+        self.assertEqual(result["ap_invoice_conflicts"], 0)
+        with self.auth.connection() as connection:
+            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+        self.assertEqual(job["ap_invoice_number"], "AP-rec1ZrtnPyo5sE9a5")
+
+    def test_changed_invoice_is_logged_and_does_not_overwrite_job(self):
+        original = source_row("1001", "JOB-1", "Parent Record", invoice="AP-original")
+        self.write_rows([original])
+        self.service.import_csv(self.session, str(self.csv_path))
+        changed = source_row("1001", "JOB-1", "Parent Record", invoice="AP-changed")
+        self.write_rows([changed])
+
+        result = self.service.import_csv(self.session, str(self.csv_path))
+
+        self.assertEqual(result["ap_invoice_conflicts"], 1)
+        with self.auth.connection() as connection:
+            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+            event = connection.execute(
+                "SELECT details_json FROM AuditLog "
+                "WHERE action = 'opentable_ap_invoice_conflict'"
+            ).fetchone()
+        self.assertEqual(job["ap_invoice_number"], "AP-original")
+        self.assertEqual(json.loads(event["details_json"])["imported_ap_invoice_number"],
+                         "AP-changed")
+
+    def test_invoice_number_whitespace_is_trimmed(self):
+        self.write_rows([source_row("1001", "JOB-1", "Parent Record",
+                                    invoice="  AP-rec1ZrtnPyo5sE9a5 \t")])
+
+        self.service.import_csv(self.session, str(self.csv_path))
+
+        with self.auth.connection() as connection:
+            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+        self.assertEqual(job["ap_invoice_number"], "AP-rec1ZrtnPyo5sE9a5")
+
+    def test_job_validation_accepts_and_normalizes_invoice_number(self):
+        clean = JobsService._clean_job(
+            {"external_job_id": "JOB-1", "ap_invoice_number": "  AP-rec1  "},
+            creating=True,
+        )
+
+        self.assertEqual(clean["ap_invoice_number"], "AP-rec1")
 
     def test_existing_job_receives_only_new_source_record(self):
         self.write_rows([source_row("1001", "JOB-1", "Parent Record", rate="200.80")])

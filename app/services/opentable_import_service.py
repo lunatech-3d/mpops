@@ -210,6 +210,7 @@ class OpenTableImportService:
             cancellation_reason = source_status
         return {
             "external_job_id": external_job_id,
+            "ap_invoice_number": cls._text(chosen.get("AP Invoice Number")),
             "project_name_source": cls._text(chosen.get("Project Name")),
             "client_name_source": cls._text(chosen.get("MP Client.")),
             "job_status": cls._status(chosen.get("Job Status")),
@@ -332,12 +333,14 @@ class OpenTableImportService:
             "source_rows_added": 0,
             "source_rows_updated": 0,
             "job_ids": [],
+            "ap_invoice_conflicts": 0,
         }
         with self.auth.connection() as connection:
             for group in preview["groups"]:
                 external_job_id = group["external_job_id"]
                 existing = connection.execute(
-                    "SELECT job_id FROM Jobs WHERE external_job_id = ? COLLATE NOCASE",
+                    "SELECT job_id, ap_invoice_number FROM Jobs "
+                    "WHERE external_job_id = ? COLLATE NOCASE",
                     (external_job_id,),
                 ).fetchone()
                 job_data = group["job"]
@@ -357,6 +360,24 @@ class OpenTableImportService:
                         for field, value in job_data.items()
                         if field != "external_job_id" and value is not None
                     }
+                    imported_invoice = changes.pop("ap_invoice_number", None)
+                    existing_invoice = self._text(existing["ap_invoice_number"])
+                    if imported_invoice and existing_invoice is None:
+                        changes["ap_invoice_number"] = imported_invoice
+                    elif imported_invoice and imported_invoice != existing_invoice:
+                        result["ap_invoice_conflicts"] += 1
+                        record_event(
+                            connection,
+                            "opentable_ap_invoice_conflict",
+                            actor_user_id=session.user_id,
+                            details={
+                                "job_id": job_id,
+                                "external_job_id": external_job_id,
+                                "existing_ap_invoice_number": existing_invoice,
+                                "imported_ap_invoice_number": imported_invoice,
+                                "file_name": os.path.basename(file_path),
+                            },
+                        )
                     assignments = ",".join(f"{field} = ?" for field in changes)
                     if assignments:
                         connection.execute(
@@ -437,6 +458,7 @@ class OpenTableImportService:
                     "skipped": result["skipped"],
                     "source_rows_added": result["source_rows_added"],
                     "source_rows_updated": result["source_rows_updated"],
+                    "ap_invoice_conflicts": result["ap_invoice_conflicts"],
                 },
             )
         return result
