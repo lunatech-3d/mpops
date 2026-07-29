@@ -65,7 +65,6 @@ class AuthService:
             ).fetchone()
             if not has_tables:
                 connection.executescript(self.settings.schema_path.read_text(encoding="utf-8"))
-                return
             connection.execute("CREATE TABLE IF NOT EXISTS SchemaMigrations "
                                "(name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
             connection.commit()

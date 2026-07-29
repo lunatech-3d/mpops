@@ -173,7 +173,10 @@ class ApplicationServiceTests(unittest.TestCase):
         with self.auth.connection() as connection:
             tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertEqual(tables - {"sqlite_sequence"},
-                         {"Users", "AuditLog", "Techs", "TechAddresses", "SchemaMigrations"})
+                         {"Users", "AuditLog", "Techs", "TechAddresses", "SchemaMigrations",
+                          "Projects", "Jobs", "JobSourceRecords", "JobAssignments", "Markets",
+                          "MatterportPaymentBatches", "MatterportPaymentItems", "TechnicianJobEarnings",
+                          "TechnicianPaymentRuns", "TechnicianPayments", "TechnicianPaymentEarnings"})
         with self.auth.connection() as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(Users)")}
             self.assertEqual(columns, {"id", "username", "password_hash", "display_name", "role",
@@ -225,7 +228,10 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(applied, 1)
             AuthService(Settings(path, password_iterations=100_000))
             with auth.connection() as connection:
-                self.assertEqual(connection.execute("SELECT count(*) FROM SchemaMigrations").fetchone()[0], 2)
+                applied = {row[0] for row in connection.execute("SELECT name FROM SchemaMigrations")}
+                self.assertEqual(applied, {"002_reconcile_legacy.py", "003_expand_technicians.py",
+                                           "004_add_jobs.py", "010_create_markets.sql",
+                                           "011_add_payment_payout_schema.py"})
 
     def test_failed_migration_is_not_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
