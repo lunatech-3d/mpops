@@ -164,7 +164,11 @@ class OpenTableImportServiceTests(unittest.TestCase):
         groups = self.service.read_csv(str(self.csv_path))
 
         # Reproduce a job imported before AP invoice numbers were mapped. Its preserved
+<<<<<<< ours
         # source rows already match the CSV, so source-row change detection reports no change.
+=======
+        # source rows already match the CSV, so only the job-level backfill needs an update.
+>>>>>>> theirs
         self.service.import_csv(self.session, str(self.csv_path))
         with self.auth.connection() as connection:
             connection.execute("UPDATE Jobs SET ap_invoice_number = NULL")
@@ -173,7 +177,13 @@ class OpenTableImportServiceTests(unittest.TestCase):
         result = self.service.import_csv(self.session, str(self.csv_path))
 
         self.assertEqual(groups[0]["job"]["ap_invoice_number"], "AP-child-record")
+<<<<<<< ours
         self.assertEqual(preview["counts"], {"skipped": 1})
+=======
+        self.assertEqual(preview["counts"], {"updated": 1})
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["skipped"], 0)
+>>>>>>> theirs
         self.assertEqual(result["source_rows_updated"], 0)
         with self.auth.connection() as connection:
             job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()

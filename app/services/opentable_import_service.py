@@ -278,8 +278,10 @@ class OpenTableImportService:
         groups = self.read_csv(file_path)
         with self.auth.connection() as connection:
             existing_jobs = {
-                row["external_job_id"].casefold(): int(row["job_id"])
-                for row in connection.execute("SELECT job_id, external_job_id FROM Jobs")
+                row["external_job_id"].casefold(): row
+                for row in connection.execute(
+                    "SELECT job_id, external_job_id, ap_invoice_number FROM Jobs"
+                )
             }
             existing_records = {
                 row["external_record_number"]: row["source_row_json"]
@@ -293,6 +295,7 @@ class OpenTableImportService:
         counts = defaultdict(int)
         for group in groups:
             job_key = group["external_job_id"].casefold()
+            existing_job = existing_jobs.get(job_key)
             imported = 0
             changed = 0
             for row in group["source_rows"]:
@@ -303,16 +306,21 @@ class OpenTableImportService:
                 if existing_records[record_number] != self._source_row_json(row):
                     changed += 1
 
-            if imported == group["source_row_count"] and changed == 0:
+            invoice_backfill = (
+                existing_job is not None
+                and self._text(existing_job["ap_invoice_number"]) is None
+                and group["job"].get("ap_invoice_number") is not None
+            )
+            if imported == group["source_row_count"] and changed == 0 and not invoice_backfill:
                 action = "Skipped"
-            elif job_key in existing_jobs:
+            elif existing_job is not None:
                 action = "Updated"
             else:
                 action = "Created"
             counts[action.lower()] += 1
             items.append({
                 "action": action,
-                "existing_job_id": existing_jobs.get(job_key),
+                "existing_job_id": int(existing_job["job_id"]) if existing_job else None,
                 "external_job_id": group["external_job_id"],
                 "client_name": group["job"].get("client_name_source"),
                 "project_name": group["job"].get("project_name_source"),
@@ -353,6 +361,7 @@ class OpenTableImportService:
                     (external_job_id,),
                 ).fetchone()
                 job_data = group["job"]
+                job_changed = False
                 if existing is None:
                     fields = [field for field, value in job_data.items() if value is not None]
                     cursor = connection.execute(
@@ -373,6 +382,7 @@ class OpenTableImportService:
                     existing_invoice = self._text(existing["ap_invoice_number"])
                     if imported_invoice and existing_invoice is None:
                         changes["ap_invoice_number"] = imported_invoice
+                        job_changed = True
                     elif imported_invoice and imported_invoice != existing_invoice:
                         result["ap_invoice_conflicts"] += 1
                         record_event(
@@ -451,7 +461,7 @@ class OpenTableImportService:
                         result["source_rows_updated"] += 1
                         changed_for_job += 1
 
-                if changed_for_job == 0 and existing is not None:
+                if changed_for_job == 0 and existing is not None and not job_changed:
                     result["skipped"] += 1
                     result["updated"] -= 1
                 result["job_ids"].append(job_id)
