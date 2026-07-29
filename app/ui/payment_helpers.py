@@ -81,13 +81,22 @@ def import_preview_summary(batch_total_cents: int, imported_total_cents: int,
 def workflow_summary(batch_status: str, totals: dict[str, int]) -> list[str]:
     """Map service-derived totals to concise, presentation-only workflow lines."""
     items = totals.get("item_count", 0)
-    lines = ["✓ Batch created", f"{'✓' if items else '□'} {items} items imported"]
-    for count, label in ((totals.get("missing_job_count", 0), "missing jobs"),
-                         (totals.get("ambiguous_count", 0), "ambiguous matches")):
+    lines = ["✓ Batch Created", f"{'✓' if items else '□'} Imported {items} Items",
+             f"{'✓' if totals.get('matched_count', 0) else '□'} Matched "
+             f"{totals.get('matched_count', 0)} Jobs"]
+    for count, label in ((totals.get("missing_job_count", 0), "Missing Jobs"),
+                         (totals.get("ambiguous_count", 0), "Ambiguous Matches"),
+                         (totals.get("amount_review_count", 0), "Amount Review")):
         lines.append(f"{'⚠' if count else '✓'} {count} {label}")
-    lines.append(f"{'✓' if totals.get('difference_cents') == 0 else '⚠'} Payment totals "
-                 f"{'balance' if totals.get('difference_cents') == 0 else 'do not balance'}")
+    lines.append(f"{'✓' if totals.get('difference_cents') == 0 else '⚠'} Totals "
+                 f"{'Balanced' if totals.get('difference_cents') == 0 else 'Not Balanced'}")
     ready = bool(items and totals.get("difference_cents") == 0 and
                  totals.get("exception_count", 0) == 0)
-    lines.append(f"{'✓' if ready or batch_status in ('Reconciled', 'Approved', 'Closed') else '□'} Ready to reconcile")
+    lines.append(f"{'✓' if ready or batch_status in ('Reconciled', 'Approved', 'Closed') else '□'} Ready for Reconciliation")
     return lines
+
+
+def visible_exception_tabs(groups: dict[str, list[dict[str, Any]]]) -> tuple[str, ...]:
+    """Return only non-empty exception categories in their operational order."""
+    order = ("Missing Jobs", "Ambiguous Matches", "Amount Review", "Duplicates", "Excluded")
+    return tuple(name for name in order if groups.get(name))

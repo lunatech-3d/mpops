@@ -3,7 +3,8 @@
 import unittest
 
 from app.ui.payment_helpers import (format_cents, next_batch_status, parse_currency,
-                                    status_permissions, totals_to_display, import_preview_summary, workflow_summary)
+                                    status_permissions, totals_to_display, import_preview_summary,
+                                    visible_exception_tabs, workflow_summary)
 
 
 class PaymentUiHelperTests(unittest.TestCase):
@@ -51,8 +52,14 @@ class PaymentUiHelperTests(unittest.TestCase):
         self.assertFalse(preview["balances"])
         lines = workflow_summary("Draft", {"item_count": 2, "missing_job_count": 1,
             "ambiguous_count": 0, "difference_cents": 0, "exception_count": 1})
-        self.assertIn("⚠ 1 missing jobs", lines)
-        self.assertEqual(lines[-1], "□ Ready to reconcile")
+        self.assertIn("⚠ 1 Missing Jobs", lines)
+        self.assertIn("✓ Totals Balanced", lines)
+        self.assertEqual(lines[-1], "□ Ready for Reconciliation")
+
+    def test_exception_tab_visibility_preserves_operational_order(self):
+        groups = {"Excluded": [{"id": 2}], "Missing Jobs": [{"id": 1}],
+                  "Duplicates": [], "Amount Review": []}
+        self.assertEqual(visible_exception_tabs(groups), ("Missing Jobs", "Excluded"))
 
 
 if __name__ == "__main__":

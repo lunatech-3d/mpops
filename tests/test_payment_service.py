@@ -2,10 +2,12 @@
 
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 from app.config import Settings
 from app.security.auth import AuthService
+from app.security.auth import Session
 from app.security.user_manager import UserManager
 from app.services.payment_service import PaymentService
 
@@ -267,6 +269,53 @@ class PaymentServiceTests(unittest.TestCase):
                          (job_id, "Matched", "External Job ID"))
         self.assertEqual((missing["job_id"], missing["match_status"]),
                          (None, "Missing Job"))
+
+    def test_exception_assignment_exclusion_restore_amount_and_audit(self):
+        batch_id = self.create_batch(300)
+        job_id = self.create_job("RESOLVE-JOB")
+        missing = self.add_item(batch_id, "MISSING-RESOLVE", 100)
+        amount = self.add_item(batch_id, "AMOUNT-RESOLVE", 200)
+        self.service.update_payment_item(self.session, missing, {"match_status": "Missing Job"})
+        self.service.update_payment_item(self.session, amount,
+                                         {"match_status": "Amount Review", "job_id": job_id})
+
+        assigned = self.service.assign_payment_item_job(self.session, missing, job_id, "Confirmed")
+        self.assertEqual((assigned["match_status"], assigned["job_id"]), ("Matched", job_id))
+        excluded = self.service.exclude_payment_item(self.session, missing, "Investigating", "Manual")
+        self.assertEqual(excluded["match_status"], "Excluded")
+        self.assertEqual(self.service.restore_payment_item(self.session, missing)["match_status"], "Matched")
+        accepted = self.service.accept_amount_difference(
+            self.session, amount, "job", "Use contract", 175)
+        self.assertEqual((accepted["amount_received_cents"], accepted["match_status"]),
+                         (175, "Matched"))
+        with self.auth.connection() as connection:
+            rows = connection.execute(
+                "SELECT action, details_json FROM AuditLog WHERE action IN "
+                "('payment_item_job_assigned','payment_item_excluded',"
+                "'payment_item_restored','payment_amount_override') ORDER BY id").fetchall()
+        self.assertEqual([row["action"] for row in rows], [
+            "payment_item_job_assigned", "payment_item_excluded",
+            "payment_item_restored", "payment_amount_override"])
+        details = json.loads(rows[-1]["details_json"])
+        self.assertEqual(details["payment_batch_id"], batch_id)
+        self.assertEqual(details["previous_status"], "Amount Review")
+        self.assertEqual(details["new_status"], "Matched")
+
+    def test_exception_grouping_candidates_authorization_and_duplicate_policy(self):
+        batch_id = self.create_batch(100)
+        item_id = self.add_item(batch_id, "CANDIDATE", 100)
+        self.service.update_payment_item(self.session, item_id, {"match_status": "Missing Job"})
+        exact_job = self.create_job("CANDIDATE")
+        groups = self.service.list_payment_exceptions(batch_id)
+        self.assertEqual(list(groups), ["Missing Jobs"])
+        self.assertEqual(self.service.get_exception_summary(batch_id)["Missing Jobs"], 1)
+        candidates = self.service.list_exception_candidates(item_id)
+        self.assertEqual((candidates[0]["job_id"], candidates[0]["confidence"]), (exact_job, 100))
+        viewer = Session(999, "viewer", "viewer")
+        with self.assertRaisesRegex(Exception, "operator"):
+            self.service.assign_payment_item_job(viewer, item_id, exact_job)
+        with self.assertRaisesRegex(ValueError, "does not allow"):
+            self.service.resolve_duplicate_payment(self.session, item_id, "import_anyway")
 
     def test_active_primary_technician_lookup(self):
         job_id = self.create_job("TECH-JOB")

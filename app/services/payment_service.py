@@ -59,6 +59,15 @@ _TEXT_LIMITS = {
     "document_type": 100, "description_raw": 4000, "match_method": 255,
     "match_notes": 4000,
 }
+EXCEPTION_STATUSES = frozenset({"Unmatched", "Missing Job", "Ambiguous",
+                                "Amount Review", "Excluded"})
+EXCEPTION_GROUPS = {
+    "Missing Jobs": frozenset({"Unmatched", "Missing Job"}),
+    "Ambiguous Matches": frozenset({"Ambiguous"}),
+    "Amount Review": frozenset({"Amount Review"}),
+    "Duplicates": frozenset(),  # Duplicate imports are rejected by repository policy.
+    "Excluded": frozenset({"Excluded"}),
+}
 
 
 class PaymentService:
@@ -548,6 +557,183 @@ class PaymentService:
                 "SELECT * FROM MatterportPaymentItems WHERE payment_batch_id = ? "
                 "ORDER BY payment_item_id", (payment_batch_id,)
             )]
+
+    @staticmethod
+    def _resolution_notes(notes: Any) -> str | None:
+        if notes is None or (isinstance(notes, str) and not notes.strip()):
+            return None
+        if not isinstance(notes, str):
+            raise ValueError("resolution notes must be text")
+        notes = notes.strip()
+        if len(notes) > 500:
+            raise ValueError("resolution notes may not exceed 500 characters")
+        return notes
+
+    @staticmethod
+    def _audit_resolution(connection: sqlite3.Connection, action: str, session: Session,
+                          item: sqlite3.Row, new_status: str, notes: str | None,
+                          **details: Any) -> None:
+        record_event(connection, action, actor_user_id=session.user_id, details={
+            "payment_item_id": item["payment_item_id"],
+            "payment_batch_id": item["payment_batch_id"],
+            "previous_status": item["match_status"], "new_status": new_status,
+            "notes": notes, **details,
+        })
+
+    def list_payment_exceptions(self, payment_batch_id: int) -> dict[str, list[dict[str, Any]]]:
+        """Return unresolved and excluded items grouped for the resolution notebook."""
+        self._positive_id(payment_batch_id, "payment_batch_id")
+        with self.auth.connection() as connection:
+            self._require_batch(connection, payment_batch_id)
+            rows = [dict(row) for row in connection.execute(
+                "SELECT * FROM MatterportPaymentItems WHERE payment_batch_id = ? "
+                "AND match_status IN ('Unmatched','Missing Job','Ambiguous','Amount Review','Excluded') "
+                "ORDER BY payment_item_id", (payment_batch_id,))]
+        return {group: [row for row in rows if row["match_status"] in statuses]
+                for group, statuses in EXCEPTION_GROUPS.items()
+                if any(row["match_status"] in statuses for row in rows)}
+
+    def get_exception_summary(self, payment_batch_id: int) -> dict[str, int]:
+        groups = self.list_payment_exceptions(payment_batch_id)
+        return {name: len(groups.get(name, ())) for name in EXCEPTION_GROUPS}
+
+    def list_exception_candidates(self, payment_item_id: int) -> list[dict[str, Any]]:
+        """Suggest jobs without selecting one; operators always make the final choice."""
+        self._positive_id(payment_item_id, "payment_item_id")
+        with self.auth.connection() as connection:
+            item = self._require_item(connection, payment_item_id)
+            needle = item["document_number"] or ""
+            rows = connection.execute(
+                """SELECT j.job_id, j.external_job_id AS job_number,
+                          j.client_name_source AS customer,
+                          COALESCE(j.capture_address_raw, j.address_1) AS property_address,
+                          COALESCE(j.completed_at, j.actual_start_at, j.scheduled_start_at) AS capture_date,
+                          t.first_name, t.last_name
+                   FROM Jobs j
+                   LEFT JOIN JobAssignments a ON a.job_id = j.job_id
+                     AND a.assignment_role = 'Primary' AND a.unassigned_at IS NULL
+                     AND a.assignment_status = 'Assigned'
+                   LEFT JOIN Techs t ON t.tech_id = a.tech_id AND t.status = 'Active'
+                   WHERE j.external_job_id LIKE ? COLLATE NOCASE
+                      OR COALESCE(j.project_name_source, '') LIKE ? COLLATE NOCASE
+                   ORDER BY CASE WHEN j.external_job_id = ? COLLATE NOCASE THEN 0 ELSE 1 END,
+                            j.job_id DESC LIMIT 25""",
+                (f"%{needle}%", f"%{needle}%", needle)).fetchall()
+        result = []
+        for row in rows:
+            candidate = dict(row)
+            candidate["technician"] = " ".join(filter(None, (candidate.pop("first_name"),
+                                                                 candidate.pop("last_name"))))
+            candidate["confidence"] = (100 if str(candidate["job_number"]).casefold() == needle.casefold()
+                                       else 60)
+            result.append(candidate)
+        return result
+
+    def assign_payment_item_job(self, session: Session, payment_item_id: int, job_id: int,
+                                notes: str | None = None) -> dict[str, Any]:
+        self._require_operator(session)
+        self._positive_id(payment_item_id, "payment_item_id")
+        self._positive_id(job_id, "job_id")
+        notes = self._resolution_notes(notes)
+        with self.auth.connection() as connection:
+            item = self._require_item(connection, payment_item_id)
+            batch = self._require_batch(connection, item["payment_batch_id"])
+            self._require_batch_mutation(batch, "match")
+            self._require_job(connection, job_id)
+            connection.execute(
+                "UPDATE MatterportPaymentItems SET job_id=?, match_status='Matched', "
+                "match_method='Manual exception resolution', match_notes=?, updated_at=? "
+                "WHERE payment_item_id=?", (job_id, notes, utc_now_iso(), payment_item_id))
+            self._audit_resolution(connection, "payment_item_job_assigned", session, item,
+                                   "Matched", notes, job_id=job_id)
+            return dict(self._require_item(connection, payment_item_id))
+
+    def exclude_payment_item(self, session: Session, payment_item_id: int,
+                             notes: str | None = None, reason: str = "Operator decision") -> dict[str, Any]:
+        self._require_operator(session)
+        self._positive_id(payment_item_id, "payment_item_id")
+        notes = self._resolution_notes(notes)
+        reason = self._text("match_method", reason, required=True)
+        with self.auth.connection() as connection:
+            item = self._require_item(connection, payment_item_id)
+            batch = self._require_batch(connection, item["payment_batch_id"])
+            self._require_batch_mutation(batch, "match")
+            connection.execute(
+                "UPDATE MatterportPaymentItems SET match_status='Excluded', match_method=?, "
+                "match_notes=?, updated_at=? WHERE payment_item_id=?",
+                (f"Excluded: {reason}", notes, utc_now_iso(), payment_item_id))
+            self._audit_resolution(connection, "payment_item_excluded", session, item,
+                                   "Excluded", notes, reason=reason)
+            return dict(self._require_item(connection, payment_item_id))
+
+    def restore_payment_item(self, session: Session, payment_item_id: int,
+                             notes: str | None = None) -> dict[str, Any]:
+        self._require_operator(session)
+        self._positive_id(payment_item_id, "payment_item_id")
+        notes = self._resolution_notes(notes)
+        with self.auth.connection() as connection:
+            item = self._require_item(connection, payment_item_id)
+            if item["match_status"] != "Excluded":
+                raise ValueError("Only excluded payment items may be restored")
+            batch = self._require_batch(connection, item["payment_batch_id"])
+            self._require_batch_mutation(batch, "match")
+            status = "Matched" if item["job_id"] else "Missing Job"
+            connection.execute(
+                "UPDATE MatterportPaymentItems SET match_status=?, match_method='Restored', "
+                "match_notes=?, updated_at=? WHERE payment_item_id=?",
+                (status, notes, utc_now_iso(), payment_item_id))
+            self._audit_resolution(connection, "payment_item_restored", session, item,
+                                   status, notes)
+            return dict(self._require_item(connection, payment_item_id))
+
+    def accept_amount_difference(self, session: Session, payment_item_id: int, decision: str,
+                                 notes: str | None = None,
+                                 job_amount_cents: int | None = None) -> dict[str, Any]:
+        """Resolve an amount review using an explicit operator decision."""
+        self._require_operator(session)
+        self._positive_id(payment_item_id, "payment_item_id")
+        if decision not in {"imported", "job"}:
+            raise ValueError("decision must be 'imported' or 'job'")
+        notes = self._resolution_notes(notes)
+        if decision == "job":
+            job_amount_cents = self._cents(job_amount_cents, "job_amount_cents")
+        with self.auth.connection() as connection:
+            item = self._require_item(connection, payment_item_id)
+            batch = self._require_batch(connection, item["payment_batch_id"])
+            self._require_batch_mutation(batch, "match")
+            if item["match_status"] != "Amount Review":
+                raise ValueError("Payment item is not awaiting amount review")
+            status = "Matched" if item["job_id"] else "Missing Job"
+            amount = item["amount_received_cents"] if decision == "imported" else job_amount_cents
+            connection.execute(
+                "UPDATE MatterportPaymentItems SET amount_received_cents=?, match_status=?, "
+                "match_method=?, match_notes=?, updated_at=? WHERE payment_item_id=?",
+                (amount, status, f"Amount override: accepted {decision} amount", notes,
+                 utc_now_iso(), payment_item_id))
+            self._audit_resolution(connection, "payment_amount_override", session, item,
+                                   status, notes, decision=decision,
+                                   previous_amount_cents=item["amount_received_cents"],
+                                   new_amount_cents=amount)
+            return dict(self._require_item(connection, payment_item_id))
+
+    def resolve_duplicate_payment(self, session: Session, payment_item_id: int, decision: str,
+                                  notes: str | None = None) -> dict[str, Any]:
+        """Apply repository duplicate policy; importing anyway is intentionally forbidden."""
+        if decision == "import_anyway":
+            raise ValueError("Repository policy does not allow importing duplicate payments")
+        if decision not in {"keep_existing", "exclude_duplicate"}:
+            raise ValueError("Invalid duplicate resolution")
+        result = self.exclude_payment_item(session, payment_item_id, notes, "Duplicate payment")
+        # Record the specific financial decision in addition to the exclusion transition.
+        with self.auth.connection() as connection:
+            item = self._require_item(connection, payment_item_id)
+            record_event(connection, "payment_duplicate_resolved", actor_user_id=session.user_id,
+                         details={"payment_item_id": payment_item_id,
+                                  "payment_batch_id": item["payment_batch_id"],
+                                  "previous_status": result["match_status"],
+                                  "new_status": "Excluded", "decision": decision,
+                                  "notes": self._resolution_notes(notes)})
+        return result
 
     def match_payment_items(self, session: Session, payment_batch_id: int) -> dict[str, int]:
         """Match every item in a batch to ``Jobs.external_job_id`` atomically."""

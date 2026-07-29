@@ -13,6 +13,7 @@ from app.security.user_manager import AuthorizationError
 from app.services.payment_service import BATCH_STATUSES, PaymentService
 from app.ui.payment_helpers import (format_cents, next_batch_status, parse_currency,
                                     status_permissions, totals_to_display, workflow_summary)
+from app.ui.payment_exception_center import PaymentExceptionCenter
 from app.ui.styles import PADDING
 from app.ui.tipalti_import_dialog import TipaltiImportDialog
 
@@ -187,9 +188,10 @@ class PaymentBatchDetail(tk.Toplevel):
         self.save_button = ttk.Button(actions, text="Save", command=self.save)
         self.import_button = ttk.Button(actions, text="Import Tipalti Data", command=self.open_importer)
         self.match_button = ttk.Button(actions, text="Match Jobs", command=self.match_jobs)
+        self.resolve_button = ttk.Button(actions, text="Resolve Exceptions", command=self.resolve_exceptions)
         self.advance_button = ttk.Button(actions, text="Advance Status", command=self.advance)
         self.delete_button = ttk.Button(actions, text="Delete Draft", command=self.delete)
-        for button in (self.save_button, self.import_button, self.match_button, self.advance_button, self.delete_button): button.pack(side="left", padx=(0, 6))
+        for button in (self.save_button, self.import_button, self.match_button, self.resolve_button, self.advance_button, self.delete_button): button.pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Refresh", command=self.refresh).pack(side="left")
         ttk.Button(actions, text="Close", command=self.close).pack(side="right")
         self.snapshot: dict[str, Any] = {}
@@ -217,6 +219,8 @@ class PaymentBatchDetail(tk.Toplevel):
         self.match_button.configure(state="normal" if self.batch_id and permissions["can_match"] else "disabled")
         self.delete_button.configure(state="normal" if self.batch_id and permissions["can_delete"] else "disabled")
         self.advance_button.configure(state="normal" if self.batch_id and permissions["can_advance"] else "disabled")
+        exception_count = int(self.total_vars.get("exception_count", tk.StringVar(value="0")).get() or 0)
+        self.resolve_button.configure(state="normal" if self.batch_id and exception_count > 0 else "disabled")
         next_status = next_batch_status(self.status_var.get())
         self.advance_button.configure(text={"Imported":"Send to Review", "Needs Review":"Reconcile", "Reconciled":"Approve", "Approved":"Close Batch"}.get(self.status_var.get(), "Mark Imported") if next_status else "Advance Status")
 
@@ -286,6 +290,11 @@ class PaymentBatchDetail(tk.Toplevel):
         except Exception as exc: _show_error(self, exc); return
         self.refresh(); self.on_changed(self.batch_id)
         messagebox.showinfo("Job Matching", f"Matched: {result['matched_count']}\nMissing Jobs: {result['missing_job_count']}\nAmbiguous: {result['ambiguous_count']}", parent=self)
+
+    def resolve_exceptions(self) -> None:
+        if self.batch_id:
+            PaymentExceptionCenter(self, self.service, self.session, self.batch_id,
+                                   lambda: (self.refresh(), self.on_changed(self.batch_id)))
 
     def advance(self) -> None:
         current = self.status_var.get(); requested = next_batch_status(current)
