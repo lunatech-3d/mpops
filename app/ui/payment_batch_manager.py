@@ -15,6 +15,7 @@ from app.ui.payment_helpers import (format_cents, next_batch_status, parse_curre
                                     status_permissions, totals_to_display, workflow_summary)
 from app.ui.payment_exception_center import PaymentExceptionCenter
 from app.ui.styles import PADDING
+from app.ui.scrollable_frame import ScrollableFrame
 from app.ui.matterport_email_import_dialog import MatterportEmailImportDialog
 from app.ui.tipalti_import_dialog import TipaltiImportDialog
 
@@ -137,13 +138,23 @@ class PaymentBatchDetail(tk.Toplevel):
         super().__init__(parent); self.service, self.session = service, session
         self.batch_id, self.on_changed = batch_id, on_changed
         self.can_modify = session.role in {"admin", "operator"}; self.batch: dict[str, Any] = {}
-        self.title("Matterport Payment Batch"); self.geometry("1180x780"); self.minsize(900, 650)
+        self.title("Matterport Payment Batch"); self.geometry("1180x700"); self.minsize(1100, 550)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.vars = {field: tk.StringVar() for field in FIELDS if field != "notes"}
         self.status_var = tk.StringVar(value="Draft"); self.total_vars: dict[str, tk.StringVar] = {}
-        outer = ttk.Frame(self, padding=PADDING); outer.pack(fill="both", expand=True)
-        ttk.Label(outer, text="Matterport Payment Batch", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
-        header = ttk.LabelFrame(outer, text="Batch", padding=8); header.pack(fill="x")
+        # Keep workflow actions outside the scrolling form so they remain
+        # reachable as the window shrinks or more detail sections are added.
+        outer = ttk.Frame(self)
+        outer.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1); self.columnconfigure(0, weight=1)
+        scrollable = ScrollableFrame(outer)
+        scrollable.grid(row=0, column=0, sticky="nsew")
+        outer.rowconfigure(0, weight=1); outer.columnconfigure(0, weight=1)
+        content = scrollable.content
+        content.configure(padding=PADDING)
+        self.scrollable_content = scrollable
+        ttk.Label(content, text="Matterport Payment Batch", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
+        header = ttk.LabelFrame(content, text="Batch", padding=8); header.pack(fill="x")
         labels = (("Payment Date", "payment_date"), ("Payment Amount", "payment_amount_cents"),
                   ("Payment Method", "payment_method"), ("Payer", "payer_name"),
                   ("Source System", "source_system"), ("Status", "status"),
@@ -160,7 +171,7 @@ class PaymentBatchDetail(tk.Toplevel):
         ttk.Label(header, text="Notes:").grid(row=2, column=0, sticky="nw", pady=4)
         self.notes = tk.Text(header, height=3, wrap="word"); self.notes.grid(row=2, column=1, columnspan=7, sticky="ew", pady=4)
         for col in (1, 3, 5, 7): header.columnconfigure(col, weight=1)
-        items_frame = ttk.LabelFrame(outer, text="Payment Items", padding=6); items_frame.pack(fill="both", expand=True, pady=8)
+        items_frame = ttk.LabelFrame(content, text="Payment Items", padding=6); items_frame.pack(fill="both", expand=True, pady=8)
         columns = ("document_number", "document_date", "description_raw", "amount", "job", "technician", "match_status", "match_notes")
         headings = ("Document Number", "Document Date", "Description", "Amount", "Job", "Technician", "Match Status", "Match Notes")
         self.items = ttk.Treeview(items_frame, columns=columns, show="headings", selectmode="browse")
@@ -169,7 +180,7 @@ class PaymentBatchDetail(tk.Toplevel):
         self.items.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.items.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
         items_frame.rowconfigure(0, weight=1); items_frame.columnconfigure(0, weight=1)
-        totals = ttk.LabelFrame(outer, text="Reconciliation", padding=6); totals.pack(fill="x")
+        totals = ttk.LabelFrame(content, text="Reconciliation", padding=6); totals.pack(fill="x")
         specs = (("Payment Amount", "payment_amount_cents"), ("Imported Total", "imported_total_cents"),
                  ("Difference", "difference_cents"), ("Matched Total", "matched_total_cents"),
                  ("Excluded Total", "excluded_total_cents"), ("Exception Total", "unmatched_total_cents"),
@@ -183,16 +194,17 @@ class PaymentBatchDetail(tk.Toplevel):
             style = "Section.TLabel" if key == "difference_cents" else "TLabel"
             ttk.Label(totals, textvariable=var, style=style).grid(row=row, column=col + 1, sticky="w", padx=(0, 8))
         self.workflow_var = tk.StringVar()
-        workflow = ttk.LabelFrame(outer, text="Workflow", padding=6); workflow.pack(fill="x", pady=(0, 4))
+        workflow = ttk.LabelFrame(content, text="Workflow", padding=6); workflow.pack(fill="x", pady=(0, 4))
         ttk.Label(workflow, textvariable=self.workflow_var, justify="left").pack(anchor="w")
         self.lock_var = tk.StringVar()
         ttk.Label(workflow, textvariable=self.lock_var, justify="left",
                   style="Section.TLabel").pack(anchor="w", pady=(4, 0))
         self.history_var = tk.StringVar()
-        history = ttk.LabelFrame(outer, text="Financial History", padding=6)
+        history = ttk.LabelFrame(content, text="Financial History", padding=6)
         history.pack(fill="x", pady=(0, 4))
         ttk.Label(history, textvariable=self.history_var, justify="left").pack(anchor="w")
-        actions = ttk.Frame(outer); actions.pack(fill="x", pady=(8, 0))
+        actions = ttk.Frame(outer, padding=(PADDING, 8, PADDING, PADDING))
+        actions.grid(row=1, column=0, sticky="ew")
         self.save_button = ttk.Button(actions, text="Save", command=self.save)
         self.import_button = ttk.Button(actions, text="Import Payment Email", command=self.open_importer)
         self.metadata_button = ttk.Button(actions, text="Import Tipalti Metadata",
