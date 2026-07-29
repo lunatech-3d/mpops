@@ -7,6 +7,7 @@ from app.config import Settings
 from app.security.auth import AuthService
 from app.security.user_manager import UserManager
 from app.services.jobs_service import JobsService
+from app.ui.job_form import job_form_data
 
 
 class JobTechnicianAssignmentTests(unittest.TestCase):
@@ -69,6 +70,9 @@ class JobTechnicianAssignmentTests(unittest.TestCase):
         )
         current = self.service.get_current_primary_assignment(job_id)
         self.assertEqual(current["tech_id"], self.active_id)
+        self.assertEqual(
+            self.service.get_job(job_id)["primary_technician_id"], self.active_id
+        )
         self.assertEqual(len(self._assignments(job_id)), 1)
 
         self.service.update_job(self.session, job_id, {}, self.active_id)
@@ -86,6 +90,15 @@ class JobTechnicianAssignmentTests(unittest.TestCase):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[1]["assignment_status"], "Unassigned")
         self.assertIsNone(self.service.get_current_primary_assignment(job_id))
+        self.assertIsNone(self.service.get_job(job_id)["primary_technician_id"])
+
+    def test_job_form_payload_preserves_primary_technician_id(self):
+        payload = job_form_data({
+            "external_job_id": "JOB-FORM",
+            "primary_technician_id": self.active_id,
+        })
+
+        self.assertEqual(payload["primary_technician_id"], self.active_id)
 
     def test_inactive_technician_cannot_be_newly_assigned_and_job_rolls_back(self):
         with self.assertRaisesRegex(ValueError, "active technicians"):

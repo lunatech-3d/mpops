@@ -79,6 +79,8 @@ class OperationsController:
         return self.service.list_jobs(limit=2000)
 
     def create(self, data):
+        data = dict(data)
+        data.pop("primary_technician_id", None)
         return self.service.create_job(self.session, data)
 
     def update(self, job_id, original, submitted):

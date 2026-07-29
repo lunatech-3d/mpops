@@ -47,6 +47,7 @@ _JOB_SUMMARY_SELECT = """
         p.project_name,
         p.client_name AS project_client_name,
         a.job_assignment_id AS primary_assignment_id,
+        a.tech_id AS primary_technician_id,
         a.assignment_status AS primary_assignment_status,
         t.tech_code AS primary_tech_code,
         t.first_name AS primary_tech_first_name,
@@ -378,7 +379,8 @@ class JobsService:
             return dict(row) if row else None
 
     def create_job(
-        self, session: Session, job_data: dict[str, Any], tech_id: int | None = None
+        self, session: Session, job_data: dict[str, Any],
+        primary_technician_id: int | None = None,
     ) -> int:
         self._require_operator(session)
         clean = self._clean_job(job_data, creating=True)
@@ -393,8 +395,10 @@ class JobsService:
                     [clean[field] for field in fields] + [utc_now_iso(), session.user_id],
                 )
                 job_id = int(cursor.lastrowid)
-                if tech_id is not None:
-                    self._set_primary_technician(connection, session, job_id, tech_id)
+                if primary_technician_id is not None:
+                    self._set_primary_technician(
+                        connection, session, job_id, primary_technician_id
+                    )
                 record_event(
                     connection,
                     "job_created",
@@ -413,12 +417,12 @@ class JobsService:
 
     def update_job(
         self, session: Session, job_id: int, changes: dict[str, Any],
-        tech_id: int | None | object = _TECHNICIAN_UNCHANGED,
+        primary_technician_id: int | None | object = _TECHNICIAN_UNCHANGED,
     ) -> dict[str, Any]:
         self._require_operator(session)
         self._positive_id(job_id, "job_id")
         clean = self._clean_job(changes, creating=False) if changes else {}
-        if not clean and tech_id is _TECHNICIAN_UNCHANGED:
+        if not clean and primary_technician_id is _TECHNICIAN_UNCHANGED:
             raise ValueError("At least one job field is required")
         try:
             with self.auth.connection() as connection:
@@ -435,9 +439,9 @@ class JobsService:
                         [*clean.values(), utc_now_iso(), session.user_id, job_id],
                     )
                 assignment_changed = False
-                if tech_id is not _TECHNICIAN_UNCHANGED:
+                if primary_technician_id is not _TECHNICIAN_UNCHANGED:
                     assignment_changed = self._set_primary_technician(
-                        connection, session, job_id, tech_id
+                        connection, session, job_id, primary_technician_id
                     )
                 record_event(
                     connection,

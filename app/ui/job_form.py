@@ -13,6 +13,7 @@ JOB_FORM_FIELDS = (
     "requested_capture_size", "onsite_contact_name", "onsite_contact_email",
     "onsite_contact_phone", "internal_notes",
 )
+PRIMARY_TECHNICIAN_FIELD = "primary_technician_id"
 
 STATUS_VALUES = (
     "Requested", "Scheduling", "Scheduled", "Assigned", "In Progress",
@@ -28,6 +29,9 @@ def job_form_data(values: dict) -> dict:
         if name != "market_id"
     }
     result["market_id"] = values.get("market_id") or None
+    # The assignment is stored in JobAssignments rather than Jobs, but it must
+    # remain in the form payload so the controller can save it separately.
+    result[PRIMARY_TECHNICIAN_FIELD] = values.get(PRIMARY_TECHNICIAN_FIELD) or None
     if not result["external_job_id"]:
         raise ValueError("External Job ID is required.")
     for name in JOB_FORM_FIELDS:
@@ -73,7 +77,7 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     labels = (
         ("external_job_id", "External Job ID *"),
         ("market_id", "Market"),
-        ("technician_id", "Technician"),
+        (PRIMARY_TECHNICIAN_FIELD, "Technician"),
         ("client_name_source", "Client"),
         ("project_name_source", "Project"),
         ("scheduled_start_at", "Scheduled Start"),
@@ -109,7 +113,7 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
         display: tech_id for tech_id, display in technician_id_to_display.items()
     }
     technician_var = tk.StringVar(
-        value=technician_id_to_display.get((job or {}).get("technician_id"), "")
+        value=technician_id_to_display.get((job or {}).get(PRIMARY_TECHNICIAN_FIELD), "")
     )
 
     first = None
@@ -123,7 +127,7 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
                 values=tuple(market_display_to_id),
                 state="readonly",
             )
-        elif name == "technician_id":
+        elif name == PRIMARY_TECHNICIAN_FIELD:
             entry = ttk.Combobox(
                 outer,
                 textvariable=technician_var,
@@ -161,7 +165,9 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
         values["market_id"] = market_display_to_id.get(
             market_var.get(), (job or {}).get("market_id")
         )
-        values["technician_id"] = technician_display_to_id.get(technician_var.get())
+        values[PRIMARY_TECHNICIAN_FIELD] = technician_display_to_id.get(
+            technician_var.get()
+        )
         values["internal_notes"] = notes.get("1.0", "end-1c")
         try:
             result = job_form_data(values)

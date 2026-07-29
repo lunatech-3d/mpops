@@ -115,15 +115,17 @@ class JobsController:
 
     def create(self, data):
         data = dict(data)
-        tech_id = data.pop("technician_id", None)
-        return self.service.create_job(self.session, data, tech_id)
+        primary_technician_id = data.pop("primary_technician_id", None)
+        return self.service.create_job(self.session, data, primary_technician_id)
 
     def update(self, job_id, original, submitted):
         changes = changed_fields(original, submitted)
-        tech_id = submitted.get("technician_id")
-        if not changes and tech_id == original.get("technician_id"):
+        primary_technician_id = submitted.get("primary_technician_id")
+        if not changes and primary_technician_id == original.get("primary_technician_id"):
             return None
-        return self.service.update_job(self.session, job_id, changes, tech_id)
+        return self.service.update_job(
+            self.session, job_id, changes, primary_technician_id
+        )
 
 
 class JobsManager(ttk.Frame):
@@ -376,7 +378,6 @@ class JobsManager(ttk.Frame):
         if original is None:
             self._error(LookupError("Job not found"))
             return
-        original["technician_id"] = assignment["tech_id"] if assignment else None
         if assignment and assignment["status"] != "Active":
             technicians = [*technicians, assignment]
 
