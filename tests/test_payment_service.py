@@ -137,7 +137,71 @@ class PaymentServiceTests(unittest.TestCase):
             "unmatched_total_cents": 300,
             "matched_count": 1,
             "unmatched_count": 1,
+            "missing_job_count": 1,
+            "ambiguous_count": 0,
+            "amount_review_count": 0,
+            "excluded_count": 0,
+            "excluded_total_cents": 0,
+            "item_count": 2,
+            "resolved_count": 1,
+            "exception_count": 1,
         })
+
+    def test_batch_totals_distinguish_resolved_and_exception_statuses(self):
+        amounts = {
+            "Matched": 101,
+            "Excluded": 202,
+            "Missing Job": 303,
+            "Ambiguous": 404,
+            "Amount Review": 505,
+            "Unmatched": 606,
+        }
+        batch_id = self.create_batch(sum(amounts.values()))
+        for index, (status, amount) in enumerate(amounts.items()):
+            item_id = self.add_item(batch_id, f"TOTAL-{index}", amount)
+            self.service.update_payment_item(
+                self.session, item_id, {"match_status": status})
+
+        self.assertEqual(self.service.calculate_batch_totals(batch_id), {
+            "payment_amount_cents": 2121,
+            "imported_total_cents": 2121,
+            "difference_cents": 0,
+            "matched_total_cents": 101,
+            "unmatched_total_cents": 1818,
+            "matched_count": 1,
+            "unmatched_count": 4,
+            "missing_job_count": 1,
+            "ambiguous_count": 1,
+            "amount_review_count": 1,
+            "excluded_count": 1,
+            "excluded_total_cents": 202,
+            "item_count": 6,
+            "resolved_count": 2,
+            "exception_count": 4,
+        })
+
+    def test_matched_and_excluded_batch_has_no_exceptions_and_reconciles(self):
+        batch_id = self.create_batch(100)
+        for document, amount, status in (
+            ("RESOLVED-MATCH", 60, "Matched"),
+            ("RESOLVED-EXCLUDED", 40, "Excluded"),
+        ):
+            item_id = self.add_item(batch_id, document, amount)
+            self.service.update_payment_item(
+                self.session, item_id, {"match_status": status})
+        for status in ("Imported", "Needs Review"):
+            self.service.update_payment_batch(
+                self.session, batch_id, {"batch_status": status})
+
+        totals = self.service.calculate_batch_totals(batch_id)
+        self.assertEqual(totals["exception_count"], 0)
+        self.assertEqual(totals["unmatched_count"], 0)
+        self.assertEqual(totals["unmatched_total_cents"], 0)
+        self.assertEqual(totals["excluded_total_cents"], 40)
+        self.assertEqual(totals["imported_total_cents"], 100)
+        self.assertEqual(self.service.update_payment_batch(
+            self.session, batch_id, {"batch_status": "Reconciled"})["batch_status"],
+            "Reconciled")
 
     def test_matching_success_and_failure(self):
         batch_id = self.create_batch()

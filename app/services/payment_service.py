@@ -546,24 +546,52 @@ class PaymentService:
                        COALESCE(SUM(CASE WHEN match_status = 'Matched'
                                         THEN amount_received_cents ELSE 0 END), 0)
                            AS matched_total_cents,
-                       COALESCE(SUM(CASE WHEN match_status <> 'Matched'
+                       COALESCE(SUM(CASE WHEN match_status IN
+                                             ('Unmatched', 'Missing Job', 'Ambiguous',
+                                              'Amount Review')
                                         THEN amount_received_cents ELSE 0 END), 0)
                            AS unmatched_total_cents,
                        COALESCE(SUM(CASE WHEN match_status = 'Matched' THEN 1 ELSE 0 END), 0)
                            AS matched_count,
-                       COALESCE(SUM(CASE WHEN match_status <> 'Matched' THEN 1 ELSE 0 END), 0)
-                           AS unmatched_count
+                       COALESCE(SUM(CASE WHEN match_status = 'Unmatched' THEN 1 ELSE 0 END), 0)
+                           AS unmatched_status_count,
+                       COALESCE(SUM(CASE WHEN match_status = 'Missing Job' THEN 1 ELSE 0 END), 0)
+                           AS missing_job_count,
+                       COALESCE(SUM(CASE WHEN match_status = 'Ambiguous' THEN 1 ELSE 0 END), 0)
+                           AS ambiguous_count,
+                       COALESCE(SUM(CASE WHEN match_status = 'Amount Review' THEN 1 ELSE 0 END), 0)
+                           AS amount_review_count,
+                       COALESCE(SUM(CASE WHEN match_status = 'Excluded' THEN 1 ELSE 0 END), 0)
+                           AS excluded_count,
+                       COALESCE(SUM(CASE WHEN match_status = 'Excluded'
+                                        THEN amount_received_cents ELSE 0 END), 0)
+                           AS excluded_total_cents,
+                       COUNT(*) AS item_count
                 FROM MatterportPaymentItems WHERE payment_batch_id = ?
                 """, (payment_batch_id,)
             ).fetchone()
             imported = int(totals["imported_total_cents"])
             payment = int(batch["payment_amount_cents"])
+            matched_count = int(totals["matched_count"])
+            excluded_count = int(totals["excluded_count"])
+            exception_count = sum(int(totals[field]) for field in (
+                "unmatched_status_count", "missing_job_count", "ambiguous_count",
+                "amount_review_count",
+            ))
             return {
                 "payment_amount_cents": payment,
                 "imported_total_cents": imported,
                 "difference_cents": payment - imported,
                 "matched_total_cents": int(totals["matched_total_cents"]),
                 "unmatched_total_cents": int(totals["unmatched_total_cents"]),
-                "matched_count": int(totals["matched_count"]),
-                "unmatched_count": int(totals["unmatched_count"]),
+                "matched_count": matched_count,
+                "unmatched_count": exception_count,
+                "missing_job_count": int(totals["missing_job_count"]),
+                "ambiguous_count": int(totals["ambiguous_count"]),
+                "amount_review_count": int(totals["amount_review_count"]),
+                "excluded_count": excluded_count,
+                "excluded_total_cents": int(totals["excluded_total_cents"]),
+                "item_count": int(totals["item_count"]),
+                "resolved_count": matched_count + excluded_count,
+                "exception_count": exception_count,
             }
