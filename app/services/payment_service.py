@@ -47,7 +47,7 @@ _BATCH_EDIT_FIELDS = {
     "Draft": _BATCH_FIELDS,
     "Imported": _BATCH_FIELDS - {"payment_date", "payment_amount_cents"},
     "Needs Review": frozenset({"notes", "batch_status"}),
-    "Reconciled": frozenset({"notes", "batch_status"}),
+    "Reconciled": frozenset({"batch_status"}),
     "Approved": frozenset({"notes", "batch_status"}),
     "Closed": frozenset(),
     "Cancelled": frozenset(),
@@ -255,24 +255,106 @@ class PaymentService:
             raise ValueError("Only Draft payment batches may be deleted")
 
     @staticmethod
-    def _validate_reconciliation(connection: sqlite3.Connection, batch: sqlite3.Row) -> None:
+    def _reconciliation_result(connection: sqlite3.Connection,
+                               batch: sqlite3.Row) -> dict[str, Any]:
         rows = connection.execute(
-            f"SELECT match_status, {EFFECTIVE_AMOUNT_SQL} AS effective_amount_cents "
-            "FROM MatterportPaymentItems "
-            "WHERE payment_batch_id = ?", (batch["payment_batch_id"],)
+            f"SELECT match_status, amount_resolution, amount_received_cents, "
+            f"{EFFECTIVE_AMOUNT_SQL} AS effective_amount_cents "
+            "FROM MatterportPaymentItems WHERE payment_batch_id = ?",
+            (batch["payment_batch_id"],),
         ).fetchall()
+        counts = {status: sum(row["match_status"] == status for row in rows)
+                  for status in PAYMENT_ITEM_STATUSES}
+        imported = sum(int(row["amount_received_cents"]) for row in rows)
+        effective = sum(int(row["effective_amount_cents"]) for row in rows)
+        payment = int(batch["payment_amount_cents"])
+        difference = payment - effective
+        errors: list[str] = []
+        if batch["batch_status"] not in {"Imported", "Needs Review"}:
+            errors.append("Batch status must be Imported or Needs Review.")
         if not rows:
-            raise ValueError("Cannot reconcile an empty payment batch")
-        effective_total = sum(int(row["effective_amount_cents"]) for row in rows)
-        if effective_total != int(batch["payment_amount_cents"]):
-            raise ValueError("Cannot reconcile: effective total does not equal payment amount")
-        statuses = [row["match_status"] for row in rows]
-        if "Missing Job" in statuses:
-            raise ValueError("Cannot reconcile: batch contains a Missing Job item")
-        if "Ambiguous" in statuses:
-            raise ValueError("Cannot reconcile: batch contains an Ambiguous item")
-        if any(status not in {"Matched", "Excluded"} for status in statuses):
-            raise ValueError("Cannot reconcile: every non-excluded item must be Matched")
+            errors.append("Payment batch contains no imported items.")
+        labels = (("Unmatched", "Unmatched items remain."),
+                  ("Missing Job", "Missing Job items remain."),
+                  ("Ambiguous", "Ambiguous Match items remain."),
+                  ("Amount Review", "Amount Review items remain."))
+        errors.extend(message for status, message in labels if counts[status])
+        if difference:
+            errors.append(f"Effective payment total differs by ${abs(difference) // 100:,}."
+                          f"{abs(difference) % 100:02d}.")
+        manual_count = sum(row["amount_resolution"] == "Manual" for row in rows)
+        warnings = []
+        if counts["Excluded"]:
+            warnings.append(f"{counts['Excluded']} excluded item(s) remain.")
+        if manual_count:
+            warnings.append(f"{manual_count} manually resolved amount difference(s).")
+        summary = {
+            "batch_id": int(batch["payment_batch_id"]),
+            "payment_date": batch["payment_date"],
+            "payment_amount_cents": payment,
+            "imported_total_cents": imported,
+            "effective_total_cents": effective,
+            "difference_cents": difference,
+            "matched_count": counts["Matched"],
+            "excluded_count": counts["Excluded"],
+            "item_count": len(rows),
+            "manual_resolution_count": manual_count,
+        }
+        return {"ready": not errors, "errors": errors, "warnings": warnings,
+                "summary": summary}
+
+    def validate_batch_reconciliation(self, payment_batch_id: int) -> dict[str, Any]:
+        """Return all reconciliation rules and financial totals as structured data."""
+        self._positive_id(payment_batch_id, "payment_batch_id")
+        with self.auth.connection() as connection:
+            return self._reconciliation_result(
+                connection, self._require_batch(connection, payment_batch_id))
+
+    def get_reconciliation_summary(self, payment_batch_id: int) -> dict[str, Any]:
+        return self.validate_batch_reconciliation(payment_batch_id)
+
+    def reconcile_batch(self, session: Session, payment_batch_id: int) -> dict[str, Any]:
+        """Certify a batch, snapshot it, and audit it in one transaction."""
+        self._require_operator(session)
+        self._positive_id(payment_batch_id, "payment_batch_id")
+        with self.auth.connection() as connection:
+            batch = self._require_batch(connection, payment_batch_id)
+            result = self._reconciliation_result(connection, batch)
+            if not result["ready"]:
+                raise ValueError("Cannot reconcile: " + " ".join(result["errors"]))
+            summary = result["summary"]
+            timestamp = utc_now_iso()
+            connection.execute(
+                "UPDATE MatterportPaymentBatches SET batch_status='Reconciled', "
+                "reconciled_at=?, reconciled_by=?, reconciled_imported_total_cents=?, "
+                "reconciled_effective_total_cents=?, reconciled_payment_amount_cents=?, "
+                "reconciled_matched_count=?, reconciled_excluded_count=?, "
+                "reconciled_difference_cents=?, updated_at=?, updated_by=? "
+                "WHERE payment_batch_id=? AND reconciled_at IS NULL",
+                (timestamp, session.user_id, summary["imported_total_cents"],
+                 summary["effective_total_cents"], summary["payment_amount_cents"],
+                 summary["matched_count"], summary["excluded_count"],
+                 summary["difference_cents"], timestamp, session.user_id, payment_batch_id))
+            audit = {"batch_id": payment_batch_id, "actor": session.user_id,
+                     "timestamp": timestamp, **summary}
+            record_event(connection, "payment_batch_reconciled",
+                         actor_user_id=session.user_id, details=audit)
+            return dict(self._require_batch(connection, payment_batch_id))
+
+    def get_batch_history(self, payment_batch_id: int) -> list[dict[str, Any]]:
+        """Read this batch's existing audit stream without duplicating storage."""
+        self._positive_id(payment_batch_id, "payment_batch_id")
+        with self.auth.connection() as connection:
+            self._require_batch(connection, payment_batch_id)
+            rows = connection.execute(
+                "SELECT a.occurred_at AS timestamp, a.action AS event, "
+                "COALESCE(u.display_name, u.username, 'System') AS user, a.details_json "
+                "FROM AuditLog a LEFT JOIN Users u ON u.id=a.actor_user_id "
+                "WHERE json_extract(a.details_json, '$.payment_batch_id') = ? "
+                "OR (a.action='payment_batch_reconciled' "
+                "AND json_extract(a.details_json, '$.batch_id') = ?) "
+                "ORDER BY a.occurred_at, a.id", (payment_batch_id, payment_batch_id)).fetchall()
+            return [dict(row) for row in rows]
 
     def create_payment_batch(self, session: Session, batch_data: dict[str, Any]) -> int:
         self._require_operator(session)
@@ -301,7 +383,7 @@ class PaymentService:
             if "batch_status" in clean:
                 self.validate_batch_status_transition(before["batch_status"], clean["batch_status"])
                 if clean["batch_status"] == "Reconciled":
-                    self._validate_reconciliation(connection, before)
+                    raise ValueError("Use reconcile_batch() to reconcile a payment batch")
             assignments = ",".join(f"{field} = ?" for field in clean)
             connection.execute(
                 f"UPDATE MatterportPaymentBatches SET {assignments}, updated_at = ?, updated_by = ? "
@@ -317,7 +399,9 @@ class PaymentService:
         self._positive_id(payment_batch_id, "payment_batch_id")
         with self.auth.connection() as connection:
             row = connection.execute(
-                "SELECT * FROM MatterportPaymentBatches WHERE payment_batch_id = ?",
+                "SELECT b.*, COALESCE(u.display_name, u.username) AS reconciled_by_name "
+                "FROM MatterportPaymentBatches b LEFT JOIN Users u ON u.id=b.reconciled_by "
+                "WHERE payment_batch_id = ?",
                 (payment_batch_id,),
             ).fetchone()
             return dict(row) if row else None

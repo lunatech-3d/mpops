@@ -184,14 +184,22 @@ class PaymentBatchDetail(tk.Toplevel):
         self.workflow_var = tk.StringVar()
         workflow = ttk.LabelFrame(outer, text="Workflow", padding=6); workflow.pack(fill="x", pady=(0, 4))
         ttk.Label(workflow, textvariable=self.workflow_var, justify="left").pack(anchor="w")
+        self.lock_var = tk.StringVar()
+        ttk.Label(workflow, textvariable=self.lock_var, justify="left",
+                  style="Section.TLabel").pack(anchor="w", pady=(4, 0))
+        self.history_var = tk.StringVar()
+        history = ttk.LabelFrame(outer, text="Financial History", padding=6)
+        history.pack(fill="x", pady=(0, 4))
+        ttk.Label(history, textvariable=self.history_var, justify="left").pack(anchor="w")
         actions = ttk.Frame(outer); actions.pack(fill="x", pady=(8, 0))
         self.save_button = ttk.Button(actions, text="Save", command=self.save)
         self.import_button = ttk.Button(actions, text="Import Tipalti Data", command=self.open_importer)
         self.match_button = ttk.Button(actions, text="Match Jobs", command=self.match_jobs)
         self.resolve_button = ttk.Button(actions, text="Resolve Exceptions", command=self.resolve_exceptions)
+        self.reconcile_button = ttk.Button(actions, text="Reconcile Batch", command=self.open_reconciliation)
         self.advance_button = ttk.Button(actions, text="Advance Status", command=self.advance)
         self.delete_button = ttk.Button(actions, text="Delete Draft", command=self.delete)
-        for button in (self.save_button, self.import_button, self.match_button, self.resolve_button, self.advance_button, self.delete_button): button.pack(side="left", padx=(0, 6))
+        for button in (self.save_button, self.import_button, self.match_button, self.resolve_button, self.reconcile_button, self.advance_button, self.delete_button): button.pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Refresh", command=self.refresh).pack(side="left")
         ttk.Button(actions, text="Close", command=self.close).pack(side="right")
         self.snapshot: dict[str, Any] = {}
@@ -221,8 +229,11 @@ class PaymentBatchDetail(tk.Toplevel):
         self.advance_button.configure(state="normal" if self.batch_id and permissions["can_advance"] else "disabled")
         exception_count = int(self.total_vars.get("exception_count", tk.StringVar(value="0")).get() or 0)
         self.resolve_button.configure(state="normal" if self.batch_id and exception_count > 0 else "disabled")
+        ready = bool(getattr(self, "reconciliation", {}).get("ready"))
+        self.reconcile_button.configure(state="normal" if self.batch_id and self.can_modify and ready else "disabled")
         next_status = next_batch_status(self.status_var.get())
-        self.advance_button.configure(text={"Imported":"Send to Review", "Needs Review":"Reconcile", "Reconciled":"Approve", "Approved":"Close Batch"}.get(self.status_var.get(), "Mark Imported") if next_status else "Advance Status")
+        self.advance_button.configure(text={"Imported":"Send to Review", "Reconciled":"Approve", "Approved":"Close Batch"}.get(self.status_var.get(), "Mark Imported") if next_status else "Advance Status")
+        if self.status_var.get() == "Needs Review": self.advance_button.configure(state="disabled")
 
     def refresh(self) -> None:
         if self.batch_id is None: return
@@ -230,6 +241,8 @@ class PaymentBatchDetail(tk.Toplevel):
             batch = self.service.get_payment_batch(self.batch_id)
             if batch is None: raise LookupError("Payment batch not found")
             items = self.service.list_payment_items(self.batch_id); totals = self.service.calculate_batch_totals(self.batch_id)
+            self.reconciliation = self.service.validate_batch_reconciliation(self.batch_id)
+            history = self.service.get_batch_history(self.batch_id)
         except Exception as exc: _show_error(self, exc); return
         self.batch = batch
         for field, var in self.vars.items():
@@ -249,7 +262,15 @@ class PaymentBatchDetail(tk.Toplevel):
                 item.get("description_raw") or "", format_cents(item.get("amount_received_cents")), f"Job #{job_id}" if job_id else "",
                 technician, item.get("match_status") or "", item.get("match_notes") or ""))
         display = totals_to_display(totals)
-        self.workflow_var.set("\n".join(workflow_summary(batch["batch_status"], totals)))
+        self.workflow_var.set("\n".join(workflow_summary(batch["batch_status"], totals,
+                                                         self.reconciliation, batch)))
+        locked = batch["batch_status"] in ("Reconciled", "Approved", "Closed")
+        self.lock_var.set("This payment batch has been reconciled.\nFinancial data is locked.\n"
+                          "To make changes a supervisor must perform an unreconcile operation (future feature)."
+                          if locked else "")
+        self.history_var.set("\n".join(
+            f"{entry['timestamp']}  |  {entry['user']}  |  {entry['event']}" for entry in history
+        ) or "No financial history available.")
         for key, var in self.total_vars.items(): var.set(display.get(key, "0"))
         self.snapshot = self._form_values(); self.apply_status_permissions(); self.title(f"Matterport Payment Batch #{self.batch_id}")
 
@@ -296,6 +317,12 @@ class PaymentBatchDetail(tk.Toplevel):
             PaymentExceptionCenter(self, self.service, self.session, self.batch_id,
                                    lambda: (self.refresh(), self.on_changed(self.batch_id)))
 
+    def open_reconciliation(self) -> None:
+        if self.batch_id:
+            PaymentBatchReconciliationDialog(
+                self, self.service, self.session, self.batch_id,
+                lambda: (self.refresh(), self.on_changed(self.batch_id)))
+
     def advance(self) -> None:
         current = self.status_var.get(); requested = next_batch_status(current)
         if not requested: return
@@ -313,3 +340,59 @@ class PaymentBatchDetail(tk.Toplevel):
     def close(self) -> None:
         if self._form_values() != self.snapshot and not messagebox.askyesno("Unsaved Changes", "Close without saving your changes?", parent=self): return
         self.destroy()
+
+
+class PaymentBatchReconciliationDialog(tk.Toplevel):
+    """Require an explicit operator certification before reconciliation."""
+
+    def __init__(self, parent, service, session, batch_id, on_reconciled):
+        super().__init__(parent)
+        self.service, self.session, self.batch_id = service, session, batch_id
+        self.on_reconciled = on_reconciled
+        self.title("Payment Batch Reconciliation")
+        self.transient(parent); self.grab_set(); self.resizable(False, False)
+        frame = ttk.Frame(self, padding=16); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="Payment Batch Reconciliation", style="Header.TLabel").pack(anchor="w")
+        result = service.validate_batch_reconciliation(batch_id)
+        summary = result["summary"]
+        batch = service.get_payment_batch(batch_id) or {}
+        operator = session.display_name or session.username
+        values = (("Batch ID", batch_id), ("Payment Date", summary["payment_date"]),
+                  ("Tipalti Payment Amount", format_cents(summary["payment_amount_cents"])),
+                  ("Imported Total", format_cents(summary["imported_total_cents"])),
+                  ("Effective Total", format_cents(summary["effective_total_cents"])),
+                  ("Difference", format_cents(summary["difference_cents"])),
+                  ("Matched Items", summary["matched_count"]),
+                  ("Excluded Items", summary["excluded_count"]),
+                  ("Imported Items", summary["item_count"]), ("Operator", operator))
+        details = ttk.Frame(frame); details.pack(fill="x", pady=10)
+        for row, (label, value) in enumerate(values):
+            ttk.Label(details, text=label + ":").grid(row=row, column=0, sticky="e", padx=5)
+            ttk.Label(details, text=str(value), style="Section.TLabel").grid(row=row, column=1, sticky="w")
+        if result["warnings"]:
+            ttk.Label(frame, text="⚠ Warning\n" + "\n".join(result["warnings"]),
+                      justify="left").pack(anchor="w", pady=5)
+        if result["errors"]:
+            ttk.Label(frame, text="❌ Cannot Reconcile\n" + "\n".join(result["errors"]),
+                      justify="left").pack(anchor="w", pady=5)
+        self.certified = tk.BooleanVar()
+        ttk.Checkbutton(frame, variable=self.certified, command=self._toggle,
+                        text="I have reviewed this payment batch and certify that it accurately\n"
+                             "represents the customer payment received.").pack(anchor="w", pady=10)
+        actions = ttk.Frame(frame); actions.pack(fill="x")
+        self.confirm = ttk.Button(actions, text="Confirm Reconciliation", command=self._confirm,
+                                  state="disabled")
+        self.confirm.pack(side="left")
+        ttk.Button(actions, text="Cancel", command=self.destroy).pack(side="right")
+        self.ready = result["ready"]
+
+    def _toggle(self):
+        self.confirm.configure(state="normal" if self.ready and self.certified.get() else "disabled")
+
+    def _confirm(self):
+        try:
+            self.service.reconcile_batch(self.session, self.batch_id)
+        except Exception as exc:
+            _show_error(self, exc); return
+        self.on_reconciled(); self.destroy()
+        messagebox.showinfo("Payment Batch Reconciliation", "Payment batch reconciled.", parent=self.master)

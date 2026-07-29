@@ -17,7 +17,7 @@ EDITABLE_FIELDS = {
     "Imported": frozenset({"payment_method", "payer_name", "source_system",
                            "source_email_subject", "source_email_received_at", "notes"}),
     "Needs Review": frozenset({"notes"}),
-    "Reconciled": frozenset({"notes"}),
+    "Reconciled": frozenset(),
     "Approved": frozenset({"notes"}),
     "Closed": frozenset(), "Cancelled": frozenset(),
 }
@@ -83,7 +83,9 @@ def import_preview_summary(batch_total_cents: int, imported_total_cents: int,
             "difference_after_import": format_cents(difference), "balances": difference == 0}
 
 
-def workflow_summary(batch_status: str, totals: dict[str, int]) -> list[str]:
+def workflow_summary(batch_status: str, totals: dict[str, int],
+                     validation: dict[str, Any] | None = None,
+                     batch: dict[str, Any] | None = None) -> list[str]:
     """Map service-derived totals to concise, presentation-only workflow lines."""
     items = totals.get("item_count", 0)
     lines = ["✓ Batch Created", f"{'✓' if items else '□'} Imported {items} Items",
@@ -98,6 +100,13 @@ def workflow_summary(batch_status: str, totals: dict[str, int]) -> list[str]:
     ready = bool(items and totals.get("difference_cents") == 0 and
                  totals.get("exception_count", 0) == 0)
     lines.append(f"{'✓' if ready or batch_status in ('Reconciled', 'Approved', 'Closed') else '□'} Ready for Reconciliation")
+    if validation and not validation["ready"] and batch_status not in ("Reconciled", "Approved", "Closed"):
+        lines.extend(f"✗ {error}" for error in validation["errors"])
+    if batch_status in ("Reconciled", "Approved", "Closed"):
+        lines.append("✓ Reconciled")
+        if batch:
+            lines.extend((f"Reconciled By: {batch.get('reconciled_by_name') or batch.get('reconciled_by') or 'Unknown'}",
+                          f"Reconciled On: {batch.get('reconciled_at') or 'Unknown'}"))
     return lines
 
 
