@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import io
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
@@ -15,9 +14,10 @@ ALIASES = {
                         "Invoice #", "Reference Number", "Reference"),
     "document_type": ("Document Type", "Type", "Payment Type"),
     "document_date": ("Document Date", "Invoice Date", "Date"),
-    "description_raw": ("Description", "Payment Description", "Details", "Memo"),
+    "description_raw": ("Description", "Payment Description", "Details", "Memo",
+                        "Invoice Subject"),
     "amount_received_cents": ("Amount", "Payment Amount", "Amount Paid", "Net Amount",
-                              "Amount Received"),
+                              "Amount Received", "Invoice Amount", "Amount Submitted"),
 }
 
 
@@ -50,6 +50,8 @@ def _amount(value: str) -> int:
     if original.startswith("(") or original.endswith(")"):
         raise ValueError("Amount is not valid currency")
     cleaned = original
+    if cleaned.upper().startswith("USD"):
+        cleaned = cleaned[3:].lstrip()
     if cleaned.startswith("$"):
         cleaned = cleaned[1:]
     if not re.fullmatch(r"(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?", cleaned):
@@ -63,30 +65,82 @@ def _amount(value: str) -> int:
     return int(amount * 100)
 
 
+def _split_row(value: str, delimiter: str) -> list[str]:
+    if delimiter == "spaces":
+        return re.split(r"\s{2,}", value.strip())
+    return next(csv.reader([value], delimiter=delimiter))
+
+
+def _horizontal_header(lines: list[tuple[int, str]]) -> tuple[int, str, list[str]] | None:
+    """Return a recognized header and its browser-dependent column delimiter."""
+    for offset, (_, line) in enumerate(lines):
+        delimiters = (["\t"] if "\t" in line else []) + \
+                     (["spaces"] if re.search(r"\s{2,}", line) else []) + [","]
+        for delimiter in delimiters:
+            fields = _split_row(line, delimiter)
+            names = [HEADER_NAMES.get(_header(value)) for value in fields]
+            if "document_number" in names and "amount_received_cents" in names:
+                return offset, delimiter, fields
+    return None
+
+
+def _payment_details_lines(raw_text: str) -> tuple[list[tuple[int, str]], bool]:
+    """Normalize browser text and isolate a Payment Details invoice section."""
+    lines = [(number, line.strip(" ")) for number, line in enumerate(
+        raw_text.replace("\r\n", "\n").replace("\r", "\n").split("\n"), 1) if line.strip()]
+    payment = next((index for index, (_, line) in enumerate(lines)
+                    if _header(line) == "payment details"), None)
+    if payment is None:
+        return lines, False
+    related = next((index for index, (_, line) in enumerate(lines[payment + 1:], payment + 1)
+                    if _header(line) == "related invoices"), None)
+    if related is None:
+        raise ValueError("The Tipalti Payment Details page does not contain a Related Invoices section.")
+    return lines[related + 1:], True
+
+
 def parse_tipalti_text(raw_text: str) -> dict[str, Any]:
-    """Parse tab- or safely quoted comma-delimited plain text without database access."""
+    """Parse table text or the Related Invoices portion of a Payment Details page."""
     if not isinstance(raw_text, str) or not raw_text.strip():
         raise ValueError("Paste Tipalti payment-detail rows before parsing.")
-    delimiter = "\t" if "\t" in raw_text else ","
-    source = list(csv.reader(io.StringIO(raw_text), delimiter=delimiter))
-    nonblank = [(number, fields) for number, fields in enumerate(source, 1)
-                if any(field.strip() for field in fields)]
-    if not nonblank:
+    lines, payment_page = _payment_details_lines(raw_text)
+    if not lines:
         raise ValueError("No payment-detail rows were detected.")
-    first_number, first = nonblank[0]
-    recognized = {index: HEADER_NAMES[_header(value)] for index, value in enumerate(first)
-                  if _header(value) in HEADER_NAMES}
-    headers = "document_number" in recognized.values() and "amount_received_cents" in recognized.values()
-    if headers:
+
+    horizontal = _horizontal_header(lines)
+    if horizontal:
+        header_offset, delimiter, header_fields = horizontal
+        recognized = {index: HEADER_NAMES[_header(value)] for index, value in enumerate(header_fields)
+                      if _header(value) in HEADER_NAMES}
         indexes = {field: index for index, field in recognized.items()}
-        data_rows = nonblank[1:]
+        data_rows = [(number, _split_row(line, delimiter))
+                     for number, line in lines[header_offset + 1:]]
+        headers = True
+    elif payment_page:
+        # Chromium may serialize every table cell on its own line.  In that case the
+        # consecutive recognized labels define both the schema and the row width.
+        header_fields = []
+        for _, line in lines:
+            if _header(line) not in HEADER_NAMES:
+                break
+            header_fields.append(line)
+        names = [HEADER_NAMES[_header(value)] for value in header_fields]
+        if "document_number" not in names or "amount_received_cents" not in names:
+            raise ValueError("The Related Invoices header could not be identified.")
+        indexes = {field: index for index, field in enumerate(names)}
+        cells = lines[len(header_fields):]
+        width = len(header_fields)
+        data_rows = [(cells[offset][0], [value for _, value in cells[offset:offset + width]])
+                     for offset in range(0, len(cells), width)]
+        headers = True
     else:
-        if delimiter != "\t" or any(len(fields) != 5 for _, fields in nonblank):
+        data_rows = [(number, _split_row(line, "\t")) for number, line in lines]
+        if any(len(fields) != 5 for _, fields in data_rows):
             raise ValueError("The pasted rows are ambiguous. Include the Tipalti header row.")
         indexes = {field: index for index, field in enumerate(
             ("document_number", "document_type", "document_date", "description_raw",
              "amount_received_cents"))}
-        data_rows = nonblank
+        headers = False
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     for source_number, fields in data_rows:

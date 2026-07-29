@@ -3,6 +3,65 @@ from app.services.tipalti_parser import mark_imported_duplicates, parse_tipalti_
 
 
 class TipaltiParserTests(unittest.TestCase):
+    def test_related_invoices_table_format(self):
+        text = ("Invoice date    Invoice number    Invoice subject    Invoice amount    Amount submitted\r\n"
+                "Jul 13, 2026    AP-xxxxx    Address...    USD 100.00    USD 100.00\r\n")
+        result = parse_tipalti_text(text)
+        self.assertTrue(result["headers_detected"])
+        self.assertEqual(result["summary"]["valid_count"], 1)
+        self.assertEqual(result["rows"][0]["document_number"], "AP-xxxxx")
+        self.assertEqual(result["rows"][0]["description_raw"], "Address...")
+        self.assertEqual(result["rows"][0]["amount_received_cents"], 10000)
+
+    def test_full_payment_details_page_with_vertical_browser_table(self):
+        text = """Payment Details\r
+Status: Paid\r
+Value date: Jul 22, 2026\r
+Payer reference code: ap-recuq1iwiwoxi\r
+Transaction reference: 104230140689214\r
+Amount submitted:\r
+USD6,089.60\r
+Transaction fee:\r
+USD0.00\r
+Net amount:\r
+USD6,089.60\r
+Amount paid:\r
+USD6,089.60\r
+\r
+Related Invoices\r
+\r
+Invoice date\r
+Invoice number\r
+Invoice subject\r
+Invoice amount\r
+Amount submitted\r
+\r
+Jul 13, 2026\r
+AP-rec-1\r
+6370 Wilcox Rd...\r
+USD 908.96\r
+USD 908.96\r
+\r
+Jul 14, 2026\r
+AP-rec-2\r
+Second invoice\r
+USD1,100.00\r
+USD1,100.00\r
+"""
+        result = parse_tipalti_text(text)
+        self.assertEqual(result["summary"], {
+            "row_count": 2, "valid_count": 2, "duplicate_count": 0,
+            "invalid_count": 0, "importable_total_cents": 200896,
+        })
+        self.assertEqual(result["rows"][0]["source_row_number"], 23)
+        self.assertEqual(result["rows"][1]["document_date"], "2026-07-14")
+
+    def test_malformed_payment_details_clipboard_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Related Invoices"):
+            parse_tipalti_text("Payment Details\nStatus: Paid\nAmount submitted:\nUSD10.00")
+        with self.assertRaisesRegex(ValueError, "header"):
+            parse_tipalti_text("Payment Details\nRelated Invoices\nInvoice date\nInvoice subject\nJul 13, 2026\nSomething")
+
     def test_tab_headers_aliases_reordered_and_normalized(self):
         result = parse_tipalti_text(" Amount Paid \tMemo\tInvoice #\tType\tInvoice Date\n$1,234.56\t Work \t 001-A \t Invoice \t7/24/2026\n")
         self.assertTrue(result["headers_detected"])
