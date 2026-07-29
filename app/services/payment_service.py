@@ -324,7 +324,7 @@ class PaymentService:
                 raise ValueError("Cannot reconcile: " + " ".join(result["errors"]))
             summary = result["summary"]
             timestamp = utc_now_iso()
-            connection.execute(
+            cursor = connection.execute(
                 "UPDATE MatterportPaymentBatches SET batch_status='Reconciled', "
                 "reconciled_at=?, reconciled_by=?, reconciled_imported_total_cents=?, "
                 "reconciled_effective_total_cents=?, reconciled_payment_amount_cents=?, "
@@ -335,6 +335,8 @@ class PaymentService:
                  summary["effective_total_cents"], summary["payment_amount_cents"],
                  summary["matched_count"], summary["excluded_count"],
                  summary["difference_cents"], timestamp, session.user_id, payment_batch_id))
+            if cursor.rowcount != 1:
+                raise ValueError("Payment batch was reconciled by another operation")
             audit = {"batch_id": payment_batch_id, "actor": session.user_id,
                      "timestamp": timestamp, **summary}
             record_event(connection, "payment_batch_reconciled",

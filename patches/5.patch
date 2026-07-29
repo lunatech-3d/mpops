@@ -1,33 +1,94 @@
-diff --git a/app/config.py b/app/config.py
+diff --git a/tests/test_compensation_service.py b/tests/test_compensation_service.py
 new file mode 100644
-index 0000000000000000000000000000000000000000..83cb85d056f04e6b7b47ba5e6f925ca25567fb99
+index 0000000000000000000000000000000000000000..a91dbab154b4c2683fd8d17fc6385dd4fa10de50
 --- /dev/null
-+++ b/app/config.py
-@@ -0,0 +1,27 @@
-+"""Application configuration with Matterport Ops-specific defaults."""
++++ b/tests/test_compensation_service.py
+@@ -0,0 +1,88 @@
++"""Compensation engine, durable ledger, and migration coverage."""
 +
-+from __future__ import annotations
-+
-+import os
-+from dataclasses import dataclass
++import json
++import tempfile
++import unittest
 +from pathlib import Path
 +
-+
-+PROJECT_ROOT = Path(__file__).resolve().parent.parent
-+
-+
-+@dataclass(frozen=True)
-+class Settings:
-+    database_path: Path
-+    schema_path: Path = PROJECT_ROOT / "database" / "schema" / "001_initial.sql"
-+    password_iterations: int = 600_000
++from app.config import Settings
++from app.security.auth import AuthService, Session
++from app.security.user_manager import AuthorizationError, UserManager
++from app.services.compensation_service import CompensationService
++from app.services.payment_service import PaymentService
 +
 +
-+def get_settings() -> Settings:
-+    """Load settings from the ``MPOPS_`` environment namespace."""
-+    database_path = Path(os.environ.get("MPOPS_DB_PATH", PROJECT_ROOT / "mpops.db"))
-+    iterations = int(os.environ.get("MPOPS_PASSWORD_ITERATIONS", "600000"))
-+    if iterations < 100_000:
-+        raise ValueError("MPOPS_PASSWORD_ITERATIONS must be at least 100000")
-+    return Settings(database_path=database_path, password_iterations=iterations)
++class CompensationServiceTests(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.auth = AuthService(Settings(Path(self.tmp.name) / "test.db", password_iterations=100_000))
++        users = UserManager(self.auth)
++        self.admin_id = users.create_user("admin", "admin-password-123", "admin")
++        self.session = self.auth.authenticate("admin", "admin-password-123")
++        self.viewer = Session(self.admin_id, "viewer", "viewer")
++        self.service = CompensationService(self.auth)
++        with self.auth.connection() as c:
++            self.tech = c.execute("INSERT INTO Techs(tech_code,first_name,last_name,created_by,default_pay_percentage) VALUES('T1','Ada','Lovelace',?,70)", (self.admin_id,)).lastrowid
++            self.job = c.execute("INSERT INTO Jobs(external_job_id,job_status,completed_at,created_by) VALUES('JOB-1','Completed','2026-07-01T12:00:00',?)", (self.admin_id,)).lastrowid
++            c.execute("INSERT INTO JobAssignments(job_id,tech_id,assignment_role,assignment_status,assigned_at,completed_at,assigned_by) VALUES (?,?,'Primary','Completed','2026-06-01','2026-07-01',?)", (self.job,self.tech,self.admin_id))
++            c.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,rule_type,rule_value,created_by) VALUES('System',NULL,'Percentage',7000,?)", (self.admin_id,))
++        payments = PaymentService(self.auth)
++        self.batch = payments.create_payment_batch(self.session,{"payment_date":"2026-07-02","payment_amount_cents":101})
++        self.item = payments.add_payment_item(self.session,self.batch,{"document_number":"JOB-1","amount_received_cents":101})
++        with self.auth.connection() as c:
++            c.execute("UPDATE MatterportPaymentItems SET job_id=?,match_status='Matched' WHERE payment_item_id=?",(self.job,self.item))
++        payments.update_payment_batch(self.session,self.batch,{"batch_status":"Imported"})
++        payments.reconcile_batch(self.session,self.batch)
 +
++    def tearDown(self): self.tmp.cleanup()
++
++    def test_preview_round_half_up_generation_trace_and_idempotency(self):
++        before = len(self.service.list_technician_earnings())
++        preview = self.service.preview_technician_earnings(self.batch)
++        self.assertEqual(len(self.service.list_technician_earnings()), before)
++        self.assertTrue(preview["ready"])
++        self.assertEqual(preview["proposed_entries"][0]["calculated_amount_cents"], 71)
++        self.assertEqual(preview["proposed_entries"][0]["rule_source"], "System Default")
++        result = self.service.generate_technician_earnings(self.session,self.batch)
++        earning = self.service.get_technician_earning(result["earning_ids"][0])
++        self.assertEqual((earning["payment_batch_id"],earning["payment_item_id"],earning["job_id"],earning["tech_id"]),(self.batch,self.item,self.job,self.tech))
++        self.assertEqual(json.loads(earning["calculation_details_json"])["rounding_method"],"ROUND_HALF_UP")
++        again = self.service.generate_technician_earnings(self.session,self.batch)
++        self.assertTrue(again["idempotent"]); self.assertEqual(again["generated_count"],0)
++
++    def test_rule_precedence_flat_and_voided_regeneration(self):
++        with self.auth.connection() as c:
++            c.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,rule_type,rule_value,created_by) VALUES('Technician',?,'Flat Amount',44,?)",(self.tech,self.admin_id))
++            c.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,rule_type,rule_value,created_by) VALUES('Job',?,'Flat Amount',55,?)",(self.job,self.admin_id))
++        preview=self.service.preview_technician_earnings(self.batch)
++        self.assertEqual((preview["proposed_entries"][0]["rule_source"],preview["proposed_entries"][0]["calculated_amount_cents"]),("Job Override",55))
++        eid=self.service.generate_technician_earnings(self.session,self.batch)["earning_ids"][0]
++        self.service.void_technician_earning(self.session,eid,"wrong assignment")
++        self.assertEqual(self.service.get_payment_batch_earnings_summary(self.batch)["entry_count"],0)
++        self.assertEqual(self.service.generate_technician_earnings(self.session,self.batch)["generated_count"],1)
++
++    def test_adjustments_authorization_validation_audit_and_immutability(self):
++        with self.assertRaises(AuthorizationError):
++            self.service.create_manual_earning_adjustment(self.viewer,self.tech,10,"bonus")
++        with self.assertRaises(ValueError): self.service.create_manual_earning_adjustment(self.session,self.tech,0,"bonus")
++        positive=self.service.create_manual_earning_adjustment(self.session,self.tech,100,"bonus",self.job)
++        negative=self.service.create_manual_earning_adjustment(self.session,self.tech,-25,"equipment",related_earning_id=positive)
++        self.assertEqual(self.service.get_technician_earning(negative)["net_earning_cents"],-25)
++        with self.assertRaisesRegex(ValueError,"immutable"):
++            self.service.update_technician_earning(self.session,positive,{"net_earning_cents":999})
++        with self.auth.connection() as c:
++            self.assertEqual(c.execute("SELECT COUNT(*) FROM AuditLog WHERE action='technician_earning_adjustment_created'").fetchone()[0],2)
++
++    def test_exceptions_status_and_void_guards(self):
++        with self.auth.connection() as c:
++            c.execute("UPDATE MatterportPaymentBatches SET batch_status='Draft' WHERE payment_batch_id=?",(self.batch,))
++        self.assertEqual(self.service.preview_technician_earnings(self.batch)["exceptions"][0]["reason_code"],"BATCH_NOT_ELIGIBLE")
++        with self.auth.connection() as c:
++            c.execute("UPDATE MatterportPaymentBatches SET batch_status='Reconciled' WHERE payment_batch_id=?",(self.batch,))
++        eid=self.service.create_manual_earning_adjustment(self.session,self.tech,5,"bonus")
++        with self.auth.connection() as c: c.execute("UPDATE TechnicianJobEarnings SET earning_status='Paid',paid_at='now' WHERE technician_earning_id=?",(eid,))
++        with self.assertRaises(ValueError): self.service.void_technician_earning(self.session,eid,"no")
++        with self.auth.connection() as c: self.assertFalse(c.execute("PRAGMA foreign_key_check").fetchall())
++
++
++if __name__ == "__main__": unittest.main()

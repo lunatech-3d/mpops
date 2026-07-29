@@ -1,3 +1,69 @@
-diff --git a/.gitkeep b/.gitkeep
-deleted file mode 100644
-index e69de29bb2d1d6434b8b29ae775ad8c2e48c5391..0000000000000000000000000000000000000000
+diff --git a/app/services/payment_service.py b/app/services/payment_service.py
+index 7b8f583b017ab99acd7d76b10a9b4c9223a8335b..dc8800533317242d34c567ea9b97b5b83096a3ff 100644
+--- a/app/services/payment_service.py
++++ b/app/services/payment_service.py
+@@ -302,61 +302,63 @@ class PaymentService:
+         }
+         return {"ready": not errors, "errors": errors, "warnings": warnings,
+                 "summary": summary}
+ 
+     def validate_batch_reconciliation(self, payment_batch_id: int) -> dict[str, Any]:
+         """Return all reconciliation rules and financial totals as structured data."""
+         self._positive_id(payment_batch_id, "payment_batch_id")
+         with self.auth.connection() as connection:
+             return self._reconciliation_result(
+                 connection, self._require_batch(connection, payment_batch_id))
+ 
+     def get_reconciliation_summary(self, payment_batch_id: int) -> dict[str, Any]:
+         return self.validate_batch_reconciliation(payment_batch_id)
+ 
+     def reconcile_batch(self, session: Session, payment_batch_id: int) -> dict[str, Any]:
+         """Certify a batch, snapshot it, and audit it in one transaction."""
+         self._require_operator(session)
+         self._positive_id(payment_batch_id, "payment_batch_id")
+         with self.auth.connection() as connection:
+             batch = self._require_batch(connection, payment_batch_id)
+             result = self._reconciliation_result(connection, batch)
+             if not result["ready"]:
+                 raise ValueError("Cannot reconcile: " + " ".join(result["errors"]))
+             summary = result["summary"]
+             timestamp = utc_now_iso()
+-            connection.execute(
++            cursor = connection.execute(
+                 "UPDATE MatterportPaymentBatches SET batch_status='Reconciled', "
+                 "reconciled_at=?, reconciled_by=?, reconciled_imported_total_cents=?, "
+                 "reconciled_effective_total_cents=?, reconciled_payment_amount_cents=?, "
+                 "reconciled_matched_count=?, reconciled_excluded_count=?, "
+                 "reconciled_difference_cents=?, updated_at=?, updated_by=? "
+                 "WHERE payment_batch_id=? AND reconciled_at IS NULL",
+                 (timestamp, session.user_id, summary["imported_total_cents"],
+                  summary["effective_total_cents"], summary["payment_amount_cents"],
+                  summary["matched_count"], summary["excluded_count"],
+                  summary["difference_cents"], timestamp, session.user_id, payment_batch_id))
++            if cursor.rowcount != 1:
++                raise ValueError("Payment batch was reconciled by another operation")
+             audit = {"batch_id": payment_batch_id, "actor": session.user_id,
+                      "timestamp": timestamp, **summary}
+             record_event(connection, "payment_batch_reconciled",
+                          actor_user_id=session.user_id, details=audit)
+             return dict(self._require_batch(connection, payment_batch_id))
+ 
+     def get_batch_history(self, payment_batch_id: int) -> list[dict[str, Any]]:
+         """Read this batch's existing audit stream without duplicating storage."""
+         self._positive_id(payment_batch_id, "payment_batch_id")
+         with self.auth.connection() as connection:
+             self._require_batch(connection, payment_batch_id)
+             rows = connection.execute(
+                 "SELECT a.occurred_at AS timestamp, a.action AS event, "
+                 "COALESCE(u.display_name, u.username, 'System') AS user, a.details_json "
+                 "FROM AuditLog a LEFT JOIN Users u ON u.id=a.actor_user_id "
+                 "WHERE json_extract(a.details_json, '$.payment_batch_id') = ? "
+                 "OR (a.action='payment_batch_reconciled' "
+                 "AND json_extract(a.details_json, '$.batch_id') = ?) "
+                 "ORDER BY a.occurred_at, a.id", (payment_batch_id, payment_batch_id)).fetchall()
+             return [dict(row) for row in rows]
+ 
+     def create_payment_batch(self, session: Session, batch_data: dict[str, Any]) -> int:
+         self._require_operator(session)
+         clean = self._clean_batch(batch_data, creating=True)
+         fields = list(clean)

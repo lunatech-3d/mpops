@@ -112,6 +112,19 @@ class PaymentReconciliationTests(unittest.TestCase):
         self.assertEqual(batch["batch_status"], "Imported")
         self.assertIsNone(batch["reconciled_at"])
 
+    def test_reconcile_guard_does_not_audit_when_update_loses_race(self):
+        batch_id, _ = self.ready_batch()
+        with self.auth.connection() as connection:
+            connection.execute("UPDATE MatterportPaymentBatches SET reconciled_at='raced' "
+                               "WHERE payment_batch_id=?", (batch_id,))
+        with self.assertRaisesRegex(ValueError, "another operation"):
+            self.service.reconcile_batch(self.session, batch_id)
+        with self.auth.connection() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM AuditLog WHERE action='payment_batch_reconciled'"
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

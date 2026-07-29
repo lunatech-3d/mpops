@@ -1,0 +1,107 @@
+"""Promote TechnicianJobEarnings into the immutable compensation ledger."""
+
+
+def _table(connection, name):
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+def migrate(connection):
+    # Rules are deliberately separate from ledger snapshots: changing a rule never
+    # changes an earning which has already been recorded.
+    connection.executescript("""
+        CREATE TABLE IF NOT EXISTS TechnicianCompensationRules (
+            compensation_rule_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT NOT NULL CHECK(scope_type IN ('Job','Technician','Market','System')),
+            scope_id INTEGER,
+            rule_type TEXT NOT NULL CHECK(rule_type IN ('Percentage','Flat Amount')),
+            rule_value INTEGER NOT NULL,
+            is_active INTEGER NOT NULL DEFAULT 1 CHECK(is_active IN (0,1)),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            created_by INTEGER REFERENCES Users(id),
+            CHECK((scope_type='System' AND scope_id IS NULL) OR
+                  (scope_type<>'System' AND scope_id IS NOT NULL)),
+            CHECK((rule_type='Percentage' AND rule_value BETWEEN 0 AND 10000) OR
+                  (rule_type='Flat Amount' AND rule_value >= 0))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_compensation_rule_active_scope
+          ON TechnicianCompensationRules(scope_type, COALESCE(scope_id, -1)) WHERE is_active=1;
+    """)
+
+    columns = {r[1] for r in connection.execute("PRAGMA table_info(TechnicianJobEarnings)")}
+    if "entry_type" not in columns:
+        if _table(connection, "TechnicianPaymentEarnings"):
+            connection.execute("ALTER TABLE TechnicianPaymentEarnings RENAME TO _legacy_payment_earnings")
+        connection.execute("ALTER TABLE TechnicianJobEarnings RENAME TO _legacy_job_earnings")
+        connection.executescript("""
+            CREATE TABLE TechnicianJobEarnings (
+                technician_earning_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                tech_id INTEGER NOT NULL REFERENCES Techs(tech_id),
+                job_id INTEGER REFERENCES Jobs(job_id),
+                payment_batch_id INTEGER REFERENCES MatterportPaymentBatches(payment_batch_id),
+                payment_item_id INTEGER REFERENCES MatterportPaymentItems(payment_item_id),
+                entry_type TEXT NOT NULL CHECK(entry_type IN ('Calculated','Manual Adjustment','Reversal')),
+                source_earning_id INTEGER REFERENCES TechnicianJobEarnings(technician_earning_id),
+                revenue_basis_cents INTEGER NOT NULL DEFAULT 0 CHECK(revenue_basis_cents >= 0),
+                compensation_rule_type TEXT CHECK(compensation_rule_type IN ('Percentage','Flat Amount')),
+                compensation_rule_value INTEGER,
+                calculated_amount_cents INTEGER NOT NULL DEFAULT 0,
+                adjustment_amount_cents INTEGER NOT NULL DEFAULT 0,
+                net_earning_cents INTEGER NOT NULL,
+                currency_code TEXT NOT NULL DEFAULT 'USD',
+                earning_status TEXT NOT NULL DEFAULT 'Pending'
+                  CHECK(earning_status IN ('Pending','Approved','Included in Payment Run','Paid','Voided')),
+                calculation_details_json TEXT NOT NULL DEFAULT '{}', reason TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_by INTEGER REFERENCES Users(id), approved_at TEXT,
+                approved_by INTEGER REFERENCES Users(id), included_in_payment_run_at TEXT,
+                included_in_payment_run_id INTEGER REFERENCES TechnicianPaymentRuns(technician_payment_run_id),
+                paid_at TEXT, voided_at TEXT, voided_by INTEGER REFERENCES Users(id), void_reason TEXT,
+                CHECK(net_earning_cents = calculated_amount_cents + adjustment_amount_cents),
+                CHECK((entry_type='Calculated' AND payment_item_id IS NOT NULL AND job_id IS NOT NULL
+                       AND adjustment_amount_cents=0 AND compensation_rule_type IS NOT NULL)
+                   OR (entry_type='Manual Adjustment' AND calculated_amount_cents=0)
+                   OR entry_type='Reversal')
+            );
+            INSERT INTO TechnicianJobEarnings (
+              technician_earning_id,tech_id,job_id,payment_batch_id,payment_item_id,entry_type,
+              revenue_basis_cents,compensation_rule_type,compensation_rule_value,
+              calculated_amount_cents,adjustment_amount_cents,net_earning_cents,earning_status,
+              calculation_details_json,reason,created_at,approved_at,approved_by)
+            SELECT e.technician_earning_id,e.tech_id,e.job_id,i.payment_batch_id,e.payment_item_id,
+              'Calculated',e.gross_job_payment_cents,'Percentage',
+              CAST(ROUND(e.pay_percentage*100) AS INTEGER),e.calculated_amount_cents,
+              e.adjustment_amount_cents,e.final_technician_amount_cents,
+              CASE e.calculation_status WHEN 'Approved' THEN 'Approved'
+                WHEN 'Included in Payment' THEN 'Included in Payment Run'
+                WHEN 'Paid' THEN 'Paid' WHEN 'Excluded' THEN 'Voided' ELSE 'Pending' END,
+              json_object('legacy',1,'percentage_source',e.percentage_source),
+              e.adjustment_reason,e.created_at,e.approved_at,e.approved_by
+            FROM _legacy_job_earnings e JOIN MatterportPaymentItems i ON i.payment_item_id=e.payment_item_id;
+            DROP TABLE _legacy_job_earnings;
+        """)
+        if _table(connection, "_legacy_payment_earnings"):
+            connection.executescript("""
+              CREATE TABLE TechnicianPaymentEarnings (
+                technician_payment_earning_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                technician_payment_id INTEGER NOT NULL REFERENCES TechnicianPayments(technician_payment_id),
+                technician_earning_id INTEGER NOT NULL REFERENCES TechnicianJobEarnings(technician_earning_id),
+                amount_applied_cents INTEGER NOT NULL CHECK(amount_applied_cents >= 0),
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, UNIQUE(technician_earning_id));
+              INSERT INTO TechnicianPaymentEarnings SELECT * FROM _legacy_payment_earnings;
+              DROP TABLE _legacy_payment_earnings;
+            """)
+    connection.executescript("""
+      CREATE INDEX IF NOT EXISTS idx_earnings_tech_status ON TechnicianJobEarnings(tech_id,earning_status);
+      CREATE INDEX IF NOT EXISTS idx_earnings_batch ON TechnicianJobEarnings(payment_batch_id);
+      CREATE INDEX IF NOT EXISTS idx_earnings_job ON TechnicianJobEarnings(job_id);
+      CREATE INDEX IF NOT EXISTS idx_TechnicianJobEarnings_payment_item ON TechnicianJobEarnings(payment_item_id);
+      CREATE INDEX IF NOT EXISTS idx_TechnicianJobEarnings_job ON TechnicianJobEarnings(job_id);
+      CREATE INDEX IF NOT EXISTS idx_TechnicianJobEarnings_tech ON TechnicianJobEarnings(tech_id);
+      CREATE INDEX IF NOT EXISTS idx_TechnicianPaymentEarnings_payment ON TechnicianPaymentEarnings(technician_payment_id);
+      CREATE INDEX IF NOT EXISTS idx_TechnicianPaymentEarnings_earning ON TechnicianPaymentEarnings(technician_earning_id);
+      CREATE UNIQUE INDEX IF NOT EXISTS ux_active_calculated_earning
+        ON TechnicianJobEarnings(payment_item_id,tech_id)
+        WHERE entry_type='Calculated' AND earning_status<>'Voided';
+    """)
