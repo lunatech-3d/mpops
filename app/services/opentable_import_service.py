@@ -199,6 +199,15 @@ class OpenTableImportService:
         return "Capture spaces: " + "; ".join(spaces) if spaces else None
 
     @classmethod
+    def _ap_invoice_number(cls, rows: list[dict[str, str]]) -> str | None:
+        """Return the first populated invoice reference from a job's source rows."""
+        for row in rows:
+            value = cls._text(row.get("AP Invoice Number"))
+            if value:
+                return value
+        return None
+
+    @classmethod
     def _build_job(cls, external_job_id: str, rows: list[dict[str, str]]) -> dict[str, Any]:
         chosen = cls._choose_job_row(rows)
         address_raw = cls._text(chosen.get("Capture Address"))
@@ -210,7 +219,7 @@ class OpenTableImportService:
             cancellation_reason = source_status
         return {
             "external_job_id": external_job_id,
-            "ap_invoice_number": cls._text(chosen.get("AP Invoice Number")),
+            "ap_invoice_number": cls._ap_invoice_number(rows),
             "project_name_source": cls._text(chosen.get("Project Name")),
             "client_name_source": cls._text(chosen.get("MP Client.")),
             "job_status": cls._status(chosen.get("Job Status")),

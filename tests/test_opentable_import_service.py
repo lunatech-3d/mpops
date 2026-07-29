@@ -157,6 +157,28 @@ class OpenTableImportServiceTests(unittest.TestCase):
             job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
         self.assertIsNone(job["ap_invoice_number"])
 
+    def test_reimport_backfills_job_invoice_from_non_parent_source_row(self):
+        parent = source_row("1001", "JOB-1", "Parent Record", invoice="")
+        child = source_row("1002", "JOB-1", "First Floor", invoice="AP-child-record")
+        self.write_rows([parent, child])
+        groups = self.service.read_csv(str(self.csv_path))
+
+        # Reproduce a job imported before AP invoice numbers were mapped. Its preserved
+        # source rows already match the CSV, so source-row change detection reports no change.
+        self.service.import_csv(self.session, str(self.csv_path))
+        with self.auth.connection() as connection:
+            connection.execute("UPDATE Jobs SET ap_invoice_number = NULL")
+
+        preview = self.service.preview(str(self.csv_path))
+        result = self.service.import_csv(self.session, str(self.csv_path))
+
+        self.assertEqual(groups[0]["job"]["ap_invoice_number"], "AP-child-record")
+        self.assertEqual(preview["counts"], {"skipped": 1})
+        self.assertEqual(result["source_rows_updated"], 0)
+        with self.auth.connection() as connection:
+            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+        self.assertEqual(job["ap_invoice_number"], "AP-child-record")
+
     def test_missing_invoice_column_is_rejected(self):
         columns = [column for column in COLUMNS if column != "AP Invoice Number"]
         self.write_rows([source_row("1001", "JOB-1", "Parent Record")], columns=columns)
