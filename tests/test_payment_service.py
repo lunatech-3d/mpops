@@ -59,14 +59,22 @@ class PaymentServiceTests(unittest.TestCase):
             self.session, batch_id, {"notes": "Tipalti receipt", "batch_status": "Imported"}
         )
         self.assertEqual(updated["notes"], "Tipalti receipt")
-        for status in ("Needs Review", "Reconciled", "Approved", "Closed"):
+        for status in ("Needs Review",):
             updated = self.service.update_payment_batch(
                 self.session, batch_id, {"batch_status": status}
             )
             self.assertEqual(updated["batch_status"], status)
-        with self.assertRaisesRegex(ValueError, "transition"):
+        with self.assertRaisesRegex(ValueError, "empty"):
             self.service.update_payment_batch(
-                self.session, batch_id, {"batch_status": "Cancelled"}
+                self.session, batch_id, {"batch_status": "Reconciled"}
+            )
+        # Cancellation remains permitted from any status except Closed.
+        self.assertEqual(self.service.update_payment_batch(
+            self.session, batch_id, {"batch_status": "Cancelled"}
+        )["batch_status"], "Cancelled")
+        with self.assertRaisesRegex(ValueError, "do not allow"):
+            self.service.update_payment_batch(
+                self.session, batch_id, {"batch_status": "Approved"}
             )
         cancellable = self.create_batch()
         self.assertEqual(self.service.update_payment_batch(
@@ -136,8 +144,10 @@ class PaymentServiceTests(unittest.TestCase):
         job_id = self.create_job("JOB-MATCH")
         self.add_item(batch_id, "job-match", 100)
         self.add_item(batch_id, "NOT-FOUND", 200)
-        self.assertEqual(self.service.match_payment_items(self.session, batch_id),
-                         {"matched_count": 1, "unmatched_count": 1})
+        self.assertEqual(self.service.match_payment_items(self.session, batch_id), {
+            "matched_count": 1, "missing_job_count": 1,
+            "ambiguous_count": 0, "unmatched_count": 1,
+        })
         matched, missing = self.service.list_payment_items(batch_id)
         self.assertEqual((matched["job_id"], matched["match_status"], matched["match_method"]),
                          (job_id, "Matched", "External Job ID"))
@@ -164,6 +174,253 @@ class PaymentServiceTests(unittest.TestCase):
             connection.execute("UPDATE Techs SET status = 'Inactive' WHERE tech_id = ?", (tech_id,))
         self.assertIsNone(self.service.get_primary_technician(job_id))
 
+    def test_primary_technician_result_distinguishes_all_assignment_cases(self):
+        job_id = self.create_job("TECH-CASES")
+        self.assertEqual(self.service.get_primary_technician_result(job_id), {
+            "status": "Missing", "technician": None, "candidate_count": 0,
+        })
+        with self.auth.connection() as connection:
+            # Exercise the service's defensive ambiguity handling even though the
+            # current schema normally prevents two active primary rows.
+            connection.execute("DROP INDEX ux_JobAssignments_active_primary")
+            tech_ids = []
+            for code, first, status in (("TC1", "One", "Active"),
+                                        ("TC2", "Two", "Active"),
+                                        ("TC3", "Inactive", "Inactive"),
+                                        ("TC4", "Historical", "Active")):
+                tech_ids.append(int(connection.execute(
+                    "INSERT INTO Techs (tech_code, first_name, last_name, status, created_by) "
+                    "VALUES (?, ?, 'Tech', ?, ?)",
+                    (code, first, status, self.session.user_id),
+                ).lastrowid))
+            connection.execute(
+                "INSERT INTO JobAssignments (job_id, tech_id, assignment_role, "
+                "assignment_status, assigned_by) VALUES (?, ?, 'Primary', 'Assigned', ?)",
+                (job_id, tech_ids[0], self.session.user_id),
+            )
+            connection.execute(
+                "INSERT INTO JobAssignments (job_id, tech_id, assignment_role, "
+                "assignment_status, assigned_by) VALUES (?, ?, 'Primary', 'Assigned', ?)",
+                (job_id, tech_ids[2], self.session.user_id),
+            )
+            connection.execute(
+                "INSERT INTO JobAssignments (job_id, tech_id, assignment_role, "
+                "assignment_status, unassigned_at, assigned_by) "
+                "VALUES (?, ?, 'Primary', 'Unassigned', '2026-01-01', ?)",
+                (job_id, tech_ids[3], self.session.user_id),
+            )
+        result = self.service.get_primary_technician_result(job_id)
+        self.assertEqual((result["status"], result["candidate_count"]), ("Found", 1))
+        self.assertEqual(result["technician"]["tech_id"], tech_ids[0])
+        with self.auth.connection() as connection:
+            connection.execute(
+                "INSERT INTO JobAssignments (job_id, tech_id, assignment_role, "
+                "assignment_status, assigned_by) VALUES (?, ?, 'Primary', 'Assigned', ?)",
+                (job_id, tech_ids[1], self.session.user_id),
+            )
+        result = self.service.get_primary_technician_result(job_id)
+        self.assertEqual(result, {
+            "status": "Ambiguous", "technician": None, "candidate_count": 2,
+        })
+        self.assertIsNone(self.service.get_primary_technician(job_id))
+
+    def test_matching_detects_ambiguous_external_job_ids(self):
+        batch_id = self.create_batch(100)
+        first = self.create_job("DUP-JOB")
+        # Rebuild this isolated test's Jobs table without its UNIQUE constraint
+        # to represent legacy/corrupt data the matching layer must not hide.
+        with self.auth.connection() as connection:
+            connection.execute("PRAGMA foreign_keys = OFF")
+            connection.execute("ALTER TABLE Jobs RENAME TO Jobs_unique")
+            connection.execute("CREATE TABLE Jobs AS SELECT * FROM Jobs_unique")
+            second = int(connection.execute(
+                "INSERT INTO Jobs (job_id, external_job_id, created_by) VALUES (?, ?, ?)",
+                (first + 1, "dup-job", self.session.user_id),
+            ).lastrowid)
+        self.add_item(batch_id, "Dup-Job", 100)
+        summary = self.service.match_payment_items(self.session, batch_id)
+        self.assertEqual(summary, {"matched_count": 0, "missing_job_count": 0,
+                                   "ambiguous_count": 1, "unmatched_count": 1})
+        item = self.service.list_payment_items(batch_id)[0]
+        self.assertIsNone(item["job_id"])
+        self.assertNotIn(item["job_id"], (first, second))
+        self.assertEqual((item["match_status"], item["match_method"]),
+                         ("Ambiguous", "External Job ID"))
+        self.assertIn("Multiple Jobs", item["match_notes"])
+        with self.auth.connection() as connection:
+            actions = [row[0] for row in connection.execute(
+                "SELECT action FROM AuditLog WHERE action = 'payment_item_match_ambiguous'")]
+        self.assertEqual(actions, ["payment_item_match_ambiguous"])
+
+    def test_matching_allowed_statuses_and_rejected_statuses(self):
+        for status in ("Draft", "Imported", "Needs Review"):
+            with self.subTest(status=status):
+                batch_id = self.create_batch(1)
+                self.add_item(batch_id, f"ALLOW-{status}", 1)
+                if status != "Draft":
+                    self.service.update_payment_batch(
+                        self.session, batch_id, {"batch_status": "Imported"})
+                if status == "Needs Review":
+                    self.service.update_payment_batch(
+                        self.session, batch_id, {"batch_status": "Needs Review"})
+                self.service.match_payment_items(self.session, batch_id)
+
+        for status in ("Reconciled", "Approved", "Closed", "Cancelled"):
+            with self.subTest(status=status):
+                batch_id = self.create_batch(1)
+                document = f"DENY-{status}"
+                self.add_item(batch_id, document, 1)
+                self.create_job(document)
+                self.service.update_payment_batch(
+                    self.session, batch_id, {"batch_status": "Imported"})
+                self.service.update_payment_batch(
+                    self.session, batch_id, {"batch_status": "Needs Review"})
+                if status == "Cancelled":
+                    self.service.update_payment_batch(
+                        self.session, batch_id, {"batch_status": "Cancelled"})
+                else:
+                    self.service.match_payment_items(self.session, batch_id)
+                    self.service.update_payment_batch(
+                        self.session, batch_id, {"batch_status": "Reconciled"})
+                    if status in {"Approved", "Closed"}:
+                        self.service.update_payment_batch(
+                            self.session, batch_id, {"batch_status": "Approved"})
+                    if status == "Closed":
+                        self.service.update_payment_batch(
+                            self.session, batch_id, {"batch_status": "Closed"})
+                with self.assertRaisesRegex(ValueError, "cannot be matched"):
+                    self.service.match_payment_items(self.session, batch_id)
+
+    def test_imported_items_cannot_supply_matching_fields(self):
+        for field, value in (("job_id", 1), ("match_status", "Matched"),
+                             ("match_method", "Manual"), ("match_notes", "bypass")):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, "matching fields"):
+                self.service.add_payment_item(
+                    self.session, self.create_batch(),
+                    {"document_number": f"BLOCK-{field}", "amount_received_cents": 1,
+                     field: value},
+                )
+        item_id = self.add_item(self.create_batch(), "CLEAN-IMPORT", 1)
+        with self.auth.connection() as connection:
+            item = connection.execute(
+                "SELECT job_id, match_status, match_method, match_notes "
+                "FROM MatterportPaymentItems WHERE payment_item_id = ?", (item_id,)
+            ).fetchone()
+        self.assertEqual(tuple(item), (None, "Unmatched", None, None))
+
+    def test_reconciliation_prerequisites_and_excluded_totals(self):
+        def needs_review(amount=100):
+            batch = self.create_batch(amount)
+            self.service.update_payment_batch(
+                self.session, batch, {"batch_status": "Imported"})
+            self.service.update_payment_batch(
+                self.session, batch, {"batch_status": "Needs Review"})
+            return batch
+
+        with self.assertRaisesRegex(ValueError, "empty"):
+            self.service.update_payment_batch(
+                self.session, needs_review(), {"batch_status": "Reconciled"})
+
+        difference = self.create_batch(100)
+        difference_item = self.add_item(difference, "DIFFERENCE", 99)
+        self.service.update_payment_item(
+            self.session, difference_item, {"match_status": "Matched"})
+        for status in ("Imported", "Needs Review"):
+            self.service.update_payment_batch(
+                self.session, difference, {"batch_status": status})
+        with self.assertRaisesRegex(ValueError, "imported total"):
+            self.service.update_payment_batch(
+                self.session, difference, {"batch_status": "Reconciled"})
+
+        for match_status, message in (("Missing Job", "Missing Job"),
+                                      ("Ambiguous", "Ambiguous"),
+                                      ("Unmatched", "non-excluded")):
+            with self.subTest(match_status=match_status):
+                batch = self.create_batch(100)
+                item = self.add_item(batch, f"STATUS-{match_status}", 100)
+                self.service.update_payment_item(
+                    self.session, item, {"match_status": match_status})
+                for status in ("Imported", "Needs Review"):
+                    self.service.update_payment_batch(
+                        self.session, batch, {"batch_status": status})
+                with self.assertRaisesRegex(ValueError, message):
+                    self.service.update_payment_batch(
+                        self.session, batch, {"batch_status": "Reconciled"})
+
+        valid = self.create_batch(100)
+        self.create_job("VALID-RECON")
+        self.add_item(valid, "VALID-RECON", 100)
+        for status in ("Imported", "Needs Review"):
+            self.service.update_payment_batch(self.session, valid, {"batch_status": status})
+        self.service.match_payment_items(self.session, valid)
+        self.assertEqual(self.service.update_payment_batch(
+            self.session, valid, {"batch_status": "Reconciled"})["batch_status"],
+            "Reconciled")
+
+        excluded = self.create_batch(100)
+        matched_item = self.add_item(excluded, "MATCH-PART", 60)
+        excluded_item = self.add_item(excluded, "EXCLUDED-PART", 40)
+        self.service.update_payment_item(
+            self.session, matched_item, {"match_status": "Matched"})
+        self.service.update_payment_item(
+            self.session, excluded_item, {"match_status": "Excluded"})
+        for status in ("Imported", "Needs Review", "Reconciled"):
+            updated = self.service.update_payment_batch(
+                self.session, excluded, {"batch_status": status})
+        self.assertEqual(updated["batch_status"], "Reconciled")
+        self.assertEqual(self.service.calculate_batch_totals(excluded)["imported_total_cents"], 100)
+
+    def test_status_mutability_policy_covers_batch_and_item_paths(self):
+        batch = self.create_batch(100)
+        item = self.add_item(batch, "MUTATE", 100)
+        self.service.update_payment_item(
+            self.session, item, {"description_raw": "draft edit"})
+        self.service.update_payment_batch(
+            self.session, batch, {"payer_name": "payer", "batch_status": "Imported"})
+        self.service.update_payment_batch(self.session, batch, {"notes": "metadata ok"})
+        for field, value in (("payment_date", "2026-08-01"),
+                             ("payment_amount_cents", 200)):
+            with self.subTest(field=field), self.assertRaisesRegex(ValueError, field):
+                self.service.update_payment_batch(self.session, batch, {field: value})
+        for operation in (
+            lambda: self.service.add_payment_item(
+                self.session, batch, {"document_number": "NO-ADD", "amount_received_cents": 1}),
+            lambda: self.service.update_payment_item(
+                self.session, item, {"description_raw": "no edit"}),
+            lambda: self.service.delete_payment_item(self.session, item),
+            lambda: self.service.delete_payment_batch(self.session, batch),
+        ):
+            with self.assertRaises(ValueError):
+                operation()
+
+        self.service.update_payment_batch(
+            self.session, batch, {"batch_status": "Needs Review"})
+        self.service.update_payment_batch(self.session, batch, {"notes": "review note"})
+        with self.assertRaisesRegex(ValueError, "payer_name"):
+            self.service.update_payment_batch(self.session, batch, {"payer_name": "new"})
+
+        # Reconcile, approve, and verify their notes-only behavior.
+        with self.auth.connection() as connection:
+            connection.execute(
+                "UPDATE MatterportPaymentItems SET match_status = 'Matched' "
+                "WHERE payment_item_id = ?", (item,))
+        self.service.update_payment_batch(
+            self.session, batch, {"batch_status": "Reconciled"})
+        self.service.update_payment_batch(self.session, batch, {"notes": "reconciled note"})
+        self.service.update_payment_batch(
+            self.session, batch, {"batch_status": "Approved"})
+        self.service.update_payment_batch(self.session, batch, {"notes": "approved note"})
+        self.service.update_payment_batch(
+            self.session, batch, {"batch_status": "Closed"})
+        with self.assertRaisesRegex(ValueError, "do not allow"):
+            self.service.update_payment_batch(self.session, batch, {"notes": "closed"})
+
+        cancelled = self.create_batch()
+        self.service.update_payment_batch(
+            self.session, cancelled, {"batch_status": "Cancelled"})
+        with self.assertRaisesRegex(ValueError, "do not allow"):
+            self.service.update_payment_batch(self.session, cancelled, {"notes": "cancelled"})
+
     def test_matching_transaction_rolls_back_all_rows_on_failure(self):
         batch_id = self.create_batch()
         self.create_job("ROLLBACK-1")
@@ -180,6 +437,14 @@ class PaymentServiceTests(unittest.TestCase):
         items = self.service.list_payment_items(batch_id)
         self.assertEqual([(row["job_id"], row["match_status"]) for row in items],
                          [(None, "Unmatched"), (None, "Unmatched")])
+        self.assertEqual(self.service.get_payment_batch(batch_id)["batch_status"], "Draft")
+        with self.auth.connection() as connection:
+            matching_audits = connection.execute(
+                "SELECT COUNT(*) FROM AuditLog WHERE action IN "
+                "('payment_item_matched', 'payment_item_unmatched', "
+                "'payment_item_match_ambiguous')"
+            ).fetchone()[0]
+        self.assertEqual(matching_audits, 0)
 
 
 if __name__ == "__main__":

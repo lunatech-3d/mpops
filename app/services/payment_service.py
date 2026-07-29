@@ -39,6 +39,20 @@ _ITEM_FIELDS = frozenset({
     "document_number", "document_type", "document_date", "description_raw",
     "amount_received_cents", "job_id", "match_status", "match_method", "match_notes",
 })
+_IMPORT_FIELDS = frozenset({
+    "document_number", "document_type", "document_date", "description_raw",
+    "amount_received_cents",
+})
+_BATCH_EDIT_FIELDS = {
+    "Draft": _BATCH_FIELDS,
+    "Imported": _BATCH_FIELDS - {"payment_date", "payment_amount_cents"},
+    "Needs Review": frozenset({"notes", "batch_status"}),
+    "Reconciled": frozenset({"notes", "batch_status"}),
+    "Approved": frozenset({"notes", "batch_status"}),
+    "Closed": frozenset(),
+    "Cancelled": frozenset(),
+}
+_MATCHABLE_BATCH_STATUSES = frozenset({"Draft", "Imported", "Needs Review"})
 _TEXT_LIMITS = {
     "payment_method": 100, "payer_name": 255, "source_system": 100,
     "source_email_subject": 1000, "notes": 4000, "document_number": 255,
@@ -209,6 +223,45 @@ class PaymentService:
         ).fetchone() is None:
             raise ValueError("Invalid Job reference")
 
+    @staticmethod
+    def _require_batch_mutation(batch: sqlite3.Row, operation: str,
+                                fields: set[str] | frozenset[str] = frozenset()) -> None:
+        """Apply the status-based mutability policy in one place."""
+        status = batch["batch_status"]
+        if operation == "update_batch":
+            disallowed = fields - _BATCH_EDIT_FIELDS[status]
+            if disallowed:
+                raise ValueError(
+                    f"{status} payment batches do not allow changes to: "
+                    f"{', '.join(sorted(disallowed))}"
+                )
+            return
+        if operation == "item" and status != "Draft":
+            raise ValueError("Payment items may only be changed in Draft batches")
+        if operation == "match" and status not in _MATCHABLE_BATCH_STATUSES:
+            raise ValueError(f"Payment items cannot be matched in {status} batches")
+        if operation == "delete" and status != "Draft":
+            raise ValueError("Only Draft payment batches may be deleted")
+
+    @staticmethod
+    def _validate_reconciliation(connection: sqlite3.Connection, batch: sqlite3.Row) -> None:
+        rows = connection.execute(
+            "SELECT match_status, amount_received_cents FROM MatterportPaymentItems "
+            "WHERE payment_batch_id = ?", (batch["payment_batch_id"],)
+        ).fetchall()
+        if not rows:
+            raise ValueError("Cannot reconcile an empty payment batch")
+        imported_total = sum(int(row["amount_received_cents"]) for row in rows)
+        if imported_total != int(batch["payment_amount_cents"]):
+            raise ValueError("Cannot reconcile: imported total does not equal payment amount")
+        statuses = [row["match_status"] for row in rows]
+        if "Missing Job" in statuses:
+            raise ValueError("Cannot reconcile: batch contains a Missing Job item")
+        if "Ambiguous" in statuses:
+            raise ValueError("Cannot reconcile: batch contains an Ambiguous item")
+        if any(status not in {"Matched", "Excluded"} for status in statuses):
+            raise ValueError("Cannot reconcile: every non-excluded item must be Matched")
+
     def create_payment_batch(self, session: Session, batch_data: dict[str, Any]) -> int:
         self._require_operator(session)
         clean = self._clean_batch(batch_data, creating=True)
@@ -232,8 +285,11 @@ class PaymentService:
         clean = self._clean_batch(changes, creating=False)
         with self.auth.connection() as connection:
             before = self._require_batch(connection, payment_batch_id)
+            self._require_batch_mutation(before, "update_batch", set(clean))
             if "batch_status" in clean:
                 self.validate_batch_status_transition(before["batch_status"], clean["batch_status"])
+                if clean["batch_status"] == "Reconciled":
+                    self._validate_reconciliation(connection, before)
             assignments = ",".join(f"{field} = ?" for field in clean)
             connection.execute(
                 f"UPDATE MatterportPaymentBatches SET {assignments}, updated_at = ?, updated_by = ? "
@@ -271,8 +327,7 @@ class PaymentService:
         self._positive_id(payment_batch_id, "payment_batch_id")
         with self.auth.connection() as connection:
             batch = self._require_batch(connection, payment_batch_id)
-            if batch["batch_status"] != "Draft":
-                raise ValueError("Only Draft payment batches may be deleted")
+            self._require_batch_mutation(batch, "delete")
             # Child rows are explicitly removed because the migration intentionally
             # uses restrictive foreign keys rather than database cascades.
             connection.execute(
@@ -301,11 +356,18 @@ class PaymentService:
     ) -> int:
         self._require_operator(session)
         self._positive_id(payment_batch_id, "payment_batch_id")
+        if not isinstance(item_data, dict):
+            raise ValueError("payment item data must be a dictionary")
+        matching_fields = set(item_data) - _IMPORT_FIELDS
+        if matching_fields:
+            raise ValueError(
+                "Imported payment items cannot set matching fields: "
+                + ", ".join(sorted(matching_fields))
+            )
         clean = self._clean_item(item_data, creating=True)
         with self.auth.connection() as connection:
             batch = self._require_batch(connection, payment_batch_id)
-            if batch["batch_status"] != "Draft":
-                raise ValueError("Payment items may only be imported into Draft batches")
+            self._require_batch_mutation(batch, "item")
             duplicate = connection.execute(
                 "SELECT payment_item_id, payment_batch_id FROM MatterportPaymentItems "
                 "WHERE document_number = ? COLLATE NOCASE", (clean["document_number"],)
@@ -315,8 +377,8 @@ class PaymentService:
                              actor_user_id=session.user_id,
                              details={"document_number": clean["document_number"],
                                       "existing_payment_item_id": duplicate["payment_item_id"]})
-                # Keep the required duplicate audit event even though validation aborts the import.
-                connection.commit()
+                # The audit and rejected import share a transaction.  Raising rolls
+                # both back rather than committing inside an ordinary operation.
                 raise ValueError("Document number has already been imported")
             self._require_job(connection, clean.get("job_id"))
             fields = list(clean)
@@ -344,8 +406,7 @@ class PaymentService:
         with self.auth.connection() as connection:
             item = self._require_item(connection, payment_item_id)
             batch = self._require_batch(connection, item["payment_batch_id"])
-            if batch["batch_status"] != "Draft":
-                raise ValueError("Payment items may only be updated in Draft batches")
+            self._require_batch_mutation(batch, "item")
             if "document_number" in clean:
                 duplicate = connection.execute(
                     "SELECT payment_item_id FROM MatterportPaymentItems "
@@ -357,7 +418,6 @@ class PaymentService:
                                  actor_user_id=session.user_id,
                                  details={"document_number": clean["document_number"],
                                           "existing_payment_item_id": duplicate[0]})
-                    connection.commit()
                     raise ValueError("Document number has already been imported")
             if "job_id" in clean:
                 self._require_job(connection, clean["job_id"])
@@ -377,8 +437,7 @@ class PaymentService:
         with self.auth.connection() as connection:
             item = self._require_item(connection, payment_item_id)
             batch = self._require_batch(connection, item["payment_batch_id"])
-            if batch["batch_status"] != "Draft":
-                raise ValueError("Payment items may only be deleted from Draft batches")
+            self._require_batch_mutation(batch, "item")
             connection.execute(
                 "DELETE FROM MatterportPaymentItems WHERE payment_item_id = ?", (payment_item_id,)
             )
@@ -399,45 +458,63 @@ class PaymentService:
         """Match every item in a batch to ``Jobs.external_job_id`` atomically."""
         self._require_operator(session)
         self._positive_id(payment_batch_id, "payment_batch_id")
-        matched = unmatched = 0
+        matched = missing = ambiguous = 0
         with self.auth.connection() as connection:
-            self._require_batch(connection, payment_batch_id)
+            batch = self._require_batch(connection, payment_batch_id)
+            self._require_batch_mutation(batch, "match")
             items = connection.execute(
                 "SELECT payment_item_id, document_number FROM MatterportPaymentItems "
                 "WHERE payment_batch_id = ? ORDER BY payment_item_id", (payment_batch_id,)
             ).fetchall()
             for item in items:
-                job = connection.execute(
+                jobs = connection.execute(
                     "SELECT job_id FROM Jobs WHERE external_job_id = ? COLLATE NOCASE",
                     (item["document_number"],),
-                ).fetchone()
-                if job:
+                ).fetchall()
+                if len(jobs) == 1:
+                    job = jobs[0]
                     connection.execute(
                         "UPDATE MatterportPaymentItems SET job_id = ?, match_status = 'Matched', "
-                        "match_method = 'External Job ID', updated_at = ? WHERE payment_item_id = ?",
+                        "match_method = 'External Job ID', match_notes = NULL, updated_at = ? "
+                        "WHERE payment_item_id = ?",
                         (job["job_id"], utc_now_iso(), item["payment_item_id"]),
                     )
                     matched += 1
                     action = "payment_item_matched"
-                else:
+                elif not jobs:
+                    job = None
                     connection.execute(
                         "UPDATE MatterportPaymentItems SET job_id = NULL, "
-                        "match_status = 'Missing Job', match_method = NULL, updated_at = ? "
+                        "match_status = 'Missing Job', match_method = NULL, match_notes = NULL, "
+                        "updated_at = ? "
                         "WHERE payment_item_id = ?", (utc_now_iso(), item["payment_item_id"])
                     )
-                    unmatched += 1
+                    missing += 1
                     action = "payment_item_unmatched"
+                else:
+                    job = None
+                    connection.execute(
+                        "UPDATE MatterportPaymentItems SET job_id = NULL, "
+                        "match_status = 'Ambiguous', match_method = 'External Job ID', "
+                        "match_notes = ?, updated_at = ? WHERE payment_item_id = ?",
+                        ("Multiple Jobs share this document number", utc_now_iso(),
+                         item["payment_item_id"]),
+                    )
+                    ambiguous += 1
+                    action = "payment_item_match_ambiguous"
                 record_event(connection, action, actor_user_id=session.user_id,
                              details={"payment_item_id": item["payment_item_id"],
                                       "document_number": item["document_number"],
                                       "job_id": int(job["job_id"]) if job else None})
-        return {"matched_count": matched, "unmatched_count": unmatched}
+        return {"matched_count": matched, "missing_job_count": missing,
+                "ambiguous_count": ambiguous, "unmatched_count": missing + ambiguous}
 
-    def get_primary_technician(self, job_id: int) -> dict[str, Any] | None:
+    def get_primary_technician_result(self, job_id: int) -> dict[str, Any]:
+        """Return whether a job has zero, one, or multiple active primary assignees."""
         self._positive_id(job_id, "job_id")
         with self.auth.connection() as connection:
             self._require_job(connection, job_id)
-            row = connection.execute(
+            rows = connection.execute(
                 """
                 SELECT t.tech_id, t.first_name, t.last_name
                 FROM JobAssignments a
@@ -445,10 +522,19 @@ class PaymentService:
                 WHERE a.job_id = ? AND a.assignment_role = 'Primary'
                   AND a.unassigned_at IS NULL AND a.assignment_status = 'Assigned'
                   AND t.status = 'Active'
-                ORDER BY a.job_assignment_id DESC LIMIT 1
+                ORDER BY a.job_assignment_id
                 """, (job_id,)
-            ).fetchone()
-            return dict(row) if row else None
+            ).fetchall()
+        count = len(rows)
+        return {
+            "status": "Found" if count == 1 else ("Missing" if count == 0 else "Ambiguous"),
+            "technician": dict(rows[0]) if count == 1 else None,
+            "candidate_count": count,
+        }
+
+    def get_primary_technician(self, job_id: int) -> dict[str, Any] | None:
+        """Compatibility wrapper returning a technician only for a unique match."""
+        return self.get_primary_technician_result(job_id)["technician"]
 
     def calculate_batch_totals(self, payment_batch_id: int) -> dict[str, int]:
         self._positive_id(payment_batch_id, "payment_batch_id")
