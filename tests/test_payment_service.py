@@ -53,6 +53,19 @@ class PaymentServiceTests(unittest.TestCase):
         self.assertEqual([row["payment_batch_id"] for row in self.service.list_payment_batches()],
                          [batch_id])
 
+    def test_batch_listing_with_totals(self):
+        older = self.service.create_payment_batch(
+            self.session, {"payment_date": "2026-07-28", "payment_amount_cents": 500}
+        )
+        newer = self.create_batch(1000)
+        self.add_item(newer, "TOTAL-1", 700)
+        rows = self.service.list_payment_batches_with_totals()
+        self.assertEqual([row["payment_batch_id"] for row in rows], [newer, older])
+        self.assertEqual(rows[0]["imported_total_cents"], 700)
+        self.assertEqual(rows[0]["difference_cents"], 300)
+        self.assertEqual(rows[0]["item_count"], 1)
+        self.assertEqual(rows[0]["exception_count"], 1)
+
     def test_batch_update_and_status_transitions(self):
         batch_id = self.create_batch()
         updated = self.service.update_payment_batch(

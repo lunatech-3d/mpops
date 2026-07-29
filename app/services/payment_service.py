@@ -322,6 +322,39 @@ class PaymentService:
                 + " ORDER BY payment_date DESC, payment_batch_id DESC", parameters
             )]
 
+    def list_payment_batches_with_totals(
+        self, batch_status: str | None = None
+    ) -> list[dict[str, Any]]:
+        """List batches and their reconciliation aggregates in one database query."""
+        parameters: tuple[Any, ...] = ()
+        where = ""
+        if batch_status is not None:
+            where = " WHERE b.batch_status = ?"
+            parameters = (self.validate_batch_status(batch_status),)
+        with self.auth.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT b.*,
+                       COALESCE(SUM(i.amount_received_cents), 0) AS imported_total_cents,
+                       b.payment_amount_cents
+                         - COALESCE(SUM(i.amount_received_cents), 0) AS difference_cents,
+                       COUNT(i.payment_item_id) AS item_count,
+                       COALESCE(SUM(i.match_status = 'Matched'), 0) AS matched_count,
+                       COALESCE(SUM(i.match_status = 'Excluded'), 0) AS excluded_count,
+                       COALESCE(SUM(i.match_status IN
+                         ('Unmatched', 'Missing Job', 'Ambiguous', 'Amount Review')), 0)
+                         AS exception_count
+                FROM MatterportPaymentBatches b
+                LEFT JOIN MatterportPaymentItems i
+                  ON i.payment_batch_id = b.payment_batch_id
+                """ + where + """
+                GROUP BY b.payment_batch_id
+                ORDER BY b.payment_date DESC, b.payment_batch_id DESC
+                """,
+                parameters,
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def delete_payment_batch(self, session: Session, payment_batch_id: int) -> bool:
         self._require_operator(session)
         self._positive_id(payment_batch_id, "payment_batch_id")
