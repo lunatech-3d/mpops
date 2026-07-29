@@ -1,6 +1,7 @@
 """Pure presentation and workflow helpers for the payment UI."""
 
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Any
 
 NEXT_STATUS = {
@@ -22,7 +23,8 @@ EDITABLE_FIELDS = {
 }
 
 MONEY_FIELDS = ("payment_amount_cents", "imported_total_cents", "difference_cents",
-                "matched_total_cents", "excluded_total_cents", "unmatched_total_cents")
+                "effective_total_cents", "matched_total_cents", "excluded_total_cents",
+                "unmatched_total_cents")
 
 
 def format_cents(cents: int | None) -> str:
@@ -35,9 +37,12 @@ def format_cents(cents: int | None) -> str:
 
 def parse_currency(text: str) -> int:
     """Parse a non-negative US dollar amount into integer cents."""
-    cleaned = str(text).strip().replace("$", "").replace(",", "")
-    if not cleaned:
+    source = str(text).strip()
+    if not source:
         raise ValueError("Payment Amount is required.")
+    if not re.fullmatch(r"\$?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?", source):
+        raise ValueError("Payment Amount must be a valid dollar amount.")
+    cleaned = source.removeprefix("$").replace(",", "")
     try:
         value = Decimal(cleaned)
     except InvalidOperation as exc:
@@ -98,5 +103,5 @@ def workflow_summary(batch_status: str, totals: dict[str, int]) -> list[str]:
 
 def visible_exception_tabs(groups: dict[str, list[dict[str, Any]]]) -> tuple[str, ...]:
     """Return only non-empty exception categories in their operational order."""
-    order = ("Missing Jobs", "Ambiguous Matches", "Amount Review", "Duplicates", "Excluded")
+    order = ("Missing Jobs", "Ambiguous Matches", "Amount Review", "Excluded")
     return tuple(name for name in order if groups.get(name))

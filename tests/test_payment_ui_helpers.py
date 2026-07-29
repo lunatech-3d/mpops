@@ -17,7 +17,7 @@ class PaymentUiHelperTests(unittest.TestCase):
         self.assertEqual(parse_currency("3640.10"), 364010)
         self.assertEqual(parse_currency("$3,640.10"), 364010)
         self.assertEqual(parse_currency("0"), 0)
-        for invalid in ("", "money", "1.001", "-0.01", "NaN"):
+        for invalid in ("", "money", "1.001", "-0.01", "NaN", "$1,2"):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 parse_currency(invalid)
 

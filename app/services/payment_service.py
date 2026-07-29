@@ -65,9 +65,11 @@ EXCEPTION_GROUPS = {
     "Missing Jobs": frozenset({"Unmatched", "Missing Job"}),
     "Ambiguous Matches": frozenset({"Ambiguous"}),
     "Amount Review": frozenset({"Amount Review"}),
-    "Duplicates": frozenset(),  # Duplicate imports are rejected by repository policy.
     "Excluded": frozenset({"Excluded"}),
 }
+
+# The single authoritative expression for money used by reconciliation.
+EFFECTIVE_AMOUNT_SQL = "COALESCE(resolved_amount_cents, amount_received_cents)"
 
 
 class PaymentService:
@@ -255,14 +257,15 @@ class PaymentService:
     @staticmethod
     def _validate_reconciliation(connection: sqlite3.Connection, batch: sqlite3.Row) -> None:
         rows = connection.execute(
-            "SELECT match_status, amount_received_cents FROM MatterportPaymentItems "
+            f"SELECT match_status, {EFFECTIVE_AMOUNT_SQL} AS effective_amount_cents "
+            "FROM MatterportPaymentItems "
             "WHERE payment_batch_id = ?", (batch["payment_batch_id"],)
         ).fetchall()
         if not rows:
             raise ValueError("Cannot reconcile an empty payment batch")
-        imported_total = sum(int(row["amount_received_cents"]) for row in rows)
-        if imported_total != int(batch["payment_amount_cents"]):
-            raise ValueError("Cannot reconcile: imported total does not equal payment amount")
+        effective_total = sum(int(row["effective_amount_cents"]) for row in rows)
+        if effective_total != int(batch["payment_amount_cents"]):
+            raise ValueError("Cannot reconcile: effective total does not equal payment amount")
         statuses = [row["match_status"] for row in rows]
         if "Missing Job" in statuses:
             raise ValueError("Cannot reconcile: batch contains a Missing Job item")
@@ -345,8 +348,13 @@ class PaymentService:
                 """
                 SELECT b.*,
                        COALESCE(SUM(i.amount_received_cents), 0) AS imported_total_cents,
+                       COALESCE(SUM(COALESCE(i.resolved_amount_cents,
+                                            i.amount_received_cents)), 0)
+                         AS effective_total_cents,
                        b.payment_amount_cents
-                         - COALESCE(SUM(i.amount_received_cents), 0) AS difference_cents,
+                         - COALESCE(SUM(COALESCE(i.resolved_amount_cents,
+                                                i.amount_received_cents)), 0)
+                         AS difference_cents,
                        COUNT(i.payment_item_id) AS item_count,
                        COALESCE(SUM(i.match_status = 'Matched'), 0) AS matched_count,
                        COALESCE(SUM(i.match_status = 'Excluded'), 0) AS excluded_count,
@@ -586,7 +594,9 @@ class PaymentService:
         with self.auth.connection() as connection:
             self._require_batch(connection, payment_batch_id)
             rows = [dict(row) for row in connection.execute(
-                "SELECT * FROM MatterportPaymentItems WHERE payment_batch_id = ? "
+                "SELECT i.*, COALESCE(u.display_name, u.username) AS amount_resolved_by_name "
+                "FROM MatterportPaymentItems i LEFT JOIN Users u ON u.id=i.amount_resolved_by "
+                "WHERE i.payment_batch_id = ? "
                 "AND match_status IN ('Unmatched','Missing Job','Ambiguous','Amount Review','Excluded') "
                 "ORDER BY payment_item_id", (payment_batch_id,))]
         return {group: [row for row in rows if row["match_status"] in statuses]
@@ -629,6 +639,48 @@ class PaymentService:
             result.append(candidate)
         return result
 
+    def search_jobs_for_payment_exception(self, search_text: str,
+                                          limit: int = 50) -> list[dict[str, Any]]:
+        """Search all operator-review fields without changing a payment item."""
+        needle = self._text("job search", search_text, required=True)
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        limit = min(limit, 50)
+        pattern = f"%{needle}%"
+        with self.auth.connection() as connection:
+            rows = connection.execute(
+                """SELECT j.job_id, j.external_job_id AS job_number,
+                          COALESCE(p.client_name, j.client_name_source) AS customer,
+                          COALESCE(p.project_name, j.project_name_source) AS project_name,
+                          COALESCE(j.capture_address_raw, j.address_1) AS property_address,
+                          COALESCE(j.completed_at, j.actual_start_at,
+                                   j.scheduled_start_at) AS capture_date,
+                          j.job_status, t.first_name, t.last_name
+                   FROM Jobs j
+                   LEFT JOIN Projects p ON p.project_id = j.project_id
+                   LEFT JOIN JobAssignments a ON a.job_id = j.job_id
+                     AND a.assignment_role = 'Primary' AND a.unassigned_at IS NULL
+                     AND a.assignment_status = 'Assigned'
+                   LEFT JOIN Techs t ON t.tech_id = a.tech_id AND t.status = 'Active'
+                   WHERE j.external_job_id LIKE ? COLLATE NOCASE
+                      OR COALESCE(j.project_name_source, '') LIKE ? COLLATE NOCASE
+                      OR COALESCE(p.project_name, '') LIKE ? COLLATE NOCASE
+                      OR COALESCE(j.client_name_source, '') LIKE ? COLLATE NOCASE
+                      OR COALESCE(p.client_name, '') LIKE ? COLLATE NOCASE
+                      OR COALESCE(j.capture_address_raw, '') LIKE ? COLLATE NOCASE
+                      OR COALESCE(j.address_1, '') LIKE ? COLLATE NOCASE
+                   ORDER BY CASE WHEN j.external_job_id = ? COLLATE NOCASE THEN 0 ELSE 1 END,
+                            j.job_id DESC LIMIT ?""",
+                (*([pattern] * 7), needle, limit),
+            ).fetchall()
+        results = []
+        for row in rows:
+            result = dict(row)
+            result["technician"] = " ".join(filter(None, (
+                result.pop("first_name"), result.pop("last_name"))))
+            results.append(result)
+        return results
+
     def assign_payment_item_job(self, session: Session, payment_item_id: int, job_id: int,
                                 notes: str | None = None) -> dict[str, Any]:
         self._require_operator(session)
@@ -664,6 +716,27 @@ class PaymentService:
                 (f"Excluded: {reason}", notes, utc_now_iso(), payment_item_id))
             self._audit_resolution(connection, "payment_item_excluded", session, item,
                                    "Excluded", notes, reason=reason)
+            return dict(self._require_item(connection, payment_item_id))
+
+    def update_payment_item_resolution_notes(self, session: Session, payment_item_id: int,
+                                             notes: str | None) -> dict[str, Any]:
+        """Edit an exclusion explanation without manufacturing another transition."""
+        self._require_operator(session)
+        self._positive_id(payment_item_id, "payment_item_id")
+        notes = self._resolution_notes(notes)
+        with self.auth.connection() as connection:
+            item = self._require_item(connection, payment_item_id)
+            if item["match_status"] != "Excluded":
+                raise ValueError("Resolution notes may only be edited for an excluded item")
+            batch = self._require_batch(connection, item["payment_batch_id"])
+            self._require_batch_mutation(batch, "match")
+            connection.execute(
+                "UPDATE MatterportPaymentItems SET match_notes=?, updated_at=? "
+                "WHERE payment_item_id=?", (notes, utc_now_iso(), payment_item_id))
+            self._audit_resolution(
+                connection, "payment_item_resolution_notes_updated", session, item,
+                item["match_status"], notes, previous_notes=item["match_notes"],
+                new_notes=notes)
             return dict(self._require_item(connection, payment_item_id))
 
     def restore_payment_item(self, session: Session, payment_item_id: int,
@@ -705,35 +778,23 @@ class PaymentService:
                 raise ValueError("Payment item is not awaiting amount review")
             status = "Matched" if item["job_id"] else "Missing Job"
             amount = item["amount_received_cents"] if decision == "imported" else job_amount_cents
+            expected = item["expected_job_amount_cents"]
+            if decision == "job":
+                expected = job_amount_cents
+            resolved_at = utc_now_iso()
             connection.execute(
-                "UPDATE MatterportPaymentItems SET amount_received_cents=?, match_status=?, "
-                "match_method=?, match_notes=?, updated_at=? WHERE payment_item_id=?",
-                (amount, status, f"Amount override: accepted {decision} amount", notes,
-                 utc_now_iso(), payment_item_id))
+                "UPDATE MatterportPaymentItems SET expected_job_amount_cents=?, "
+                "resolved_amount_cents=?, amount_resolution=?, amount_resolution_notes=?, "
+                "amount_resolved_at=?, amount_resolved_by=?, match_status=?, match_method=?, "
+                "match_notes=?, updated_at=? WHERE payment_item_id=?",
+                (expected, amount, decision.title(), notes, resolved_at, session.user_id,
+                 status, f"Accepted {decision} amount", notes, resolved_at, payment_item_id))
             self._audit_resolution(connection, "payment_amount_override", session, item,
                                    status, notes, decision=decision,
-                                   previous_amount_cents=item["amount_received_cents"],
-                                   new_amount_cents=amount)
+                                   original_amount_cents=item["amount_received_cents"],
+                                   expected_amount_cents=expected,
+                                   resolved_amount_cents=amount)
             return dict(self._require_item(connection, payment_item_id))
-
-    def resolve_duplicate_payment(self, session: Session, payment_item_id: int, decision: str,
-                                  notes: str | None = None) -> dict[str, Any]:
-        """Apply repository duplicate policy; importing anyway is intentionally forbidden."""
-        if decision == "import_anyway":
-            raise ValueError("Repository policy does not allow importing duplicate payments")
-        if decision not in {"keep_existing", "exclude_duplicate"}:
-            raise ValueError("Invalid duplicate resolution")
-        result = self.exclude_payment_item(session, payment_item_id, notes, "Duplicate payment")
-        # Record the specific financial decision in addition to the exclusion transition.
-        with self.auth.connection() as connection:
-            item = self._require_item(connection, payment_item_id)
-            record_event(connection, "payment_duplicate_resolved", actor_user_id=session.user_id,
-                         details={"payment_item_id": payment_item_id,
-                                  "payment_batch_id": item["payment_batch_id"],
-                                  "previous_status": result["match_status"],
-                                  "new_status": "Excluded", "decision": decision,
-                                  "notes": self._resolution_notes(notes)})
-        return result
 
     def match_payment_items(self, session: Session, payment_batch_id: int) -> dict[str, int]:
         """Match every item in a batch to ``Jobs.external_job_id`` atomically."""
@@ -824,13 +885,15 @@ class PaymentService:
             totals = connection.execute(
                 """
                 SELECT COALESCE(SUM(amount_received_cents), 0) AS imported_total_cents,
+                       COALESCE(SUM(COALESCE(resolved_amount_cents, amount_received_cents)), 0)
+                           AS effective_total_cents,
                        COALESCE(SUM(CASE WHEN match_status = 'Matched'
-                                        THEN amount_received_cents ELSE 0 END), 0)
+                                        THEN COALESCE(resolved_amount_cents, amount_received_cents) ELSE 0 END), 0)
                            AS matched_total_cents,
                        COALESCE(SUM(CASE WHEN match_status IN
                                              ('Unmatched', 'Missing Job', 'Ambiguous',
                                               'Amount Review')
-                                        THEN amount_received_cents ELSE 0 END), 0)
+                                        THEN COALESCE(resolved_amount_cents, amount_received_cents) ELSE 0 END), 0)
                            AS unmatched_total_cents,
                        COALESCE(SUM(CASE WHEN match_status = 'Matched' THEN 1 ELSE 0 END), 0)
                            AS matched_count,
@@ -845,13 +908,14 @@ class PaymentService:
                        COALESCE(SUM(CASE WHEN match_status = 'Excluded' THEN 1 ELSE 0 END), 0)
                            AS excluded_count,
                        COALESCE(SUM(CASE WHEN match_status = 'Excluded'
-                                        THEN amount_received_cents ELSE 0 END), 0)
+                                        THEN COALESCE(resolved_amount_cents, amount_received_cents) ELSE 0 END), 0)
                            AS excluded_total_cents,
                        COUNT(*) AS item_count
                 FROM MatterportPaymentItems WHERE payment_batch_id = ?
                 """, (payment_batch_id,)
             ).fetchone()
             imported = int(totals["imported_total_cents"])
+            effective = int(totals["effective_total_cents"])
             payment = int(batch["payment_amount_cents"])
             matched_count = int(totals["matched_count"])
             excluded_count = int(totals["excluded_count"])
@@ -862,7 +926,7 @@ class PaymentService:
             return {
                 "payment_amount_cents": payment,
                 "imported_total_cents": imported,
-                "difference_cents": payment - imported,
+                "difference_cents": payment - effective,
                 "matched_total_cents": int(totals["matched_total_cents"]),
                 "unmatched_total_cents": int(totals["unmatched_total_cents"]),
                 "matched_count": matched_count,

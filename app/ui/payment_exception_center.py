@@ -5,7 +5,7 @@ from tkinter import messagebox, simpledialog, ttk
 from typing import Callable
 
 from app.services.payment_service import PaymentService
-from app.ui.payment_helpers import format_cents, visible_exception_tabs
+from app.ui.payment_helpers import format_cents, parse_currency, visible_exception_tabs
 
 
 class PaymentExceptionCenter(tk.Toplevel):
@@ -48,12 +48,17 @@ class PaymentExceptionCenter(tk.Toplevel):
                                                        format_cents(item.get("amount_received_cents")), item.get("match_status") or ""))
         tree.pack(fill="both", expand=True)
         details = tk.Text(right, height=12, wrap="word", state="disabled"); details.pack(fill="x")
-        candidates = ttk.Treeview(right, columns=("job", "customer", "address", "date", "tech", "confidence"), show="headings", height=9)
-        for key, title in zip(("job", "customer", "address", "date", "tech", "confidence"),
-                              ("Job Number", "Customer", "Property Address", "Capture Date", "Technician", "Confidence")):
+        search_frame = ttk.LabelFrame(right, text="Search All Jobs", padding=6)
+        search_text = ttk.Entry(search_frame)
+        search_text.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        candidates = ttk.Treeview(right, columns=("job", "customer", "project", "address", "date", "tech", "status"), show="headings", height=9)
+        for key, title in zip(("job", "customer", "project", "address", "date", "tech", "status"),
+                              ("Job Number", "Customer", "Project Name", "Property Address", "Capture Date", "Technician", "Job Status")):
             candidates.heading(key, text=title); candidates.column(key, width=105)
         candidate_ids = {}
-        if name in {"Missing Jobs", "Ambiguous Matches"}: candidates.pack(fill="both", expand=True, pady=8)
+        if name in {"Missing Jobs", "Ambiguous Matches"}:
+            search_frame.pack(fill="x", pady=(8, 0))
+            candidates.pack(fill="both", expand=True, pady=8)
         actions = ttk.Frame(right); actions.pack(fill="x", pady=6)
 
         def selected():
@@ -63,10 +68,22 @@ class PaymentExceptionCenter(tk.Toplevel):
             item = selected()
             if not item: return
             details.configure(state="normal"); details.delete("1.0", "end")
-            details.insert("1.0", "\n".join((f"Document Number: {item.get('document_number') or ''}",
-                f"Description: {item.get('description_raw') or ''}", f"Amount: {format_cents(item.get('amount_received_cents'))}",
+            expected = item.get("expected_job_amount_cents")
+            imported = item.get("amount_received_cents")
+            resolution = item.get("amount_resolution")
+            detail_lines = [f"Document Number: {item.get('document_number') or ''}",
+                f"Description: {item.get('description_raw') or ''}",
+                f"Tipalti Amount: {format_cents(imported)}",
+                f"Expected Job Amount: {format_cents(expected) if expected is not None else 'Not available'}",
+                f"Difference: {format_cents(imported - expected) if expected is not None else 'Not available'}",
+                f"Resolved Amount: {format_cents(item.get('resolved_amount_cents')) if item.get('resolved_amount_cents') is not None else 'Not resolved'}",
                 f"Import Date: {item.get('created_at') or ''}", f"Match Notes: {item.get('match_notes') or ''}",
-                f"Existing Suggestions: {'See candidates below' if name in {'Missing Jobs', 'Ambiguous Matches'} else 'None'}")))
+                f"Existing Suggestions: {'See candidates below' if name in {'Missing Jobs', 'Ambiguous Matches'} else 'None'}"]
+            if resolution:
+                detail_lines.extend((f"Resolution: Accepted {resolution} Amount",
+                    f"Resolved By: {item.get('amount_resolved_by_name') or ''}",
+                    f"Resolved On: {item.get('amount_resolved_at') or ''}"))
+            details.insert("1.0", "\n".join(detail_lines))
             details.configure(state="disabled")
             if name in {"Missing Jobs", "Ambiguous Matches"}: load_candidates(item)
         def load_candidates(item=None):
@@ -76,8 +93,22 @@ class PaymentExceptionCenter(tk.Toplevel):
             for candidate in self.service.list_exception_candidates(item["payment_item_id"]):
                 iid = str(candidate["job_id"]); candidate_ids[iid] = candidate["job_id"]
                 candidates.insert("", "end", iid=iid, values=(candidate["job_number"], candidate.get("customer") or "",
-                    candidate.get("property_address") or "", candidate.get("capture_date") or "", candidate.get("technician") or "",
-                    f"{candidate['confidence']}%"))
+                    candidate.get("project_name") or "", candidate.get("property_address") or "",
+                    candidate.get("capture_date") or "", candidate.get("technician") or "",
+                    candidate.get("job_status") or ""))
+        def search_jobs():
+            try: results = self.service.search_jobs_for_payment_exception(search_text.get())
+            except Exception as exc: messagebox.showerror(self.title(), str(exc), parent=self); return
+            candidates.delete(*candidates.get_children()); candidate_ids.clear()
+            for candidate in results:
+                iid = str(candidate["job_id"]); candidate_ids[iid] = candidate["job_id"]
+                candidates.insert("", "end", iid=iid, values=(candidate["job_number"],
+                    candidate.get("customer") or "", candidate.get("project_name") or "",
+                    candidate.get("property_address") or "", candidate.get("capture_date") or "",
+                    candidate.get("technician") or "", candidate.get("job_status") or ""))
+        def clear_search():
+            search_text.delete(0, "end")
+            load_candidates()
         def notes(): return simpledialog.askstring("Resolution Notes", "Optional notes (maximum 500 characters):", parent=self)
         def act(callback):
             item = selected()
@@ -92,17 +123,20 @@ class PaymentExceptionCenter(tk.Toplevel):
                 if not choice: raise ValueError("Select a suggested job first, or use Search Jobs.")
                 self.service.assign_payment_item_job(self.session, item["payment_item_id"], candidate_ids[choice[0]], notes())
             ttk.Button(actions, text="Assign Selected Job", command=lambda: act(assign), state=state).pack(side="left", padx=3)
-            ttk.Button(actions, text="Search Jobs", command=lambda: load_candidates(), state=state).pack(side="left", padx=3)
-            ttk.Button(actions, text="Refresh Suggestions", command=lambda: load_candidates()).pack(side="left", padx=3)
+            ttk.Button(search_frame, text="Search", command=search_jobs).pack(side="left", padx=3)
+            ttk.Button(search_frame, text="Clear", command=clear_search).pack(side="left", padx=3)
+            ttk.Button(actions, text="Refresh Suggested Jobs", command=lambda: load_candidates()).pack(side="left", padx=3)
         elif name == "Amount Review":
             ttk.Button(actions, text="Accept Imported Amount", command=lambda: act(lambda i: self.service.accept_amount_difference(self.session, i["payment_item_id"], "imported", notes())), state=state).pack(side="left", padx=3)
             def accept_job(item):
-                value = simpledialog.askinteger("Job Amount", "Matched Job Amount (cents):", parent=self, minvalue=0)
-                if value is not None: self.service.accept_amount_difference(self.session, item["payment_item_id"], "job", notes(), value)
+                value = simpledialog.askstring("Job Amount", "Enter amount ($):", parent=self)
+                if value is not None:
+                    self.service.accept_amount_difference(self.session, item["payment_item_id"],
+                                                          "job", notes(), parse_currency(value))
             ttk.Button(actions, text="Accept Job Amount", command=lambda: act(accept_job), state=state).pack(side="left", padx=3)
             ttk.Button(actions, text="Exclude Payment", command=lambda: act(lambda i: self.service.exclude_payment_item(self.session, i["payment_item_id"], notes(), "Amount difference")), state=state).pack(side="left", padx=3)
         elif name == "Excluded":
             ttk.Button(actions, text="Restore", command=lambda: act(lambda i: self.service.restore_payment_item(self.session, i["payment_item_id"], notes())), state=state).pack(side="left", padx=3)
-            ttk.Button(actions, text="Edit Notes", command=lambda: act(lambda i: self.service.exclude_payment_item(self.session, i["payment_item_id"], notes(), "Operator decision")), state=state).pack(side="left", padx=3)
+            ttk.Button(actions, text="Edit Notes", command=lambda: act(lambda i: self.service.update_payment_item_resolution_notes(self.session, i["payment_item_id"], notes())), state=state).pack(side="left", padx=3)
         tree.bind("<<TreeviewSelect>>", load)
         if records: tree.selection_set(str(records[0]["payment_item_id"])); load()

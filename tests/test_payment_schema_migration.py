@@ -10,6 +10,7 @@ from app.security.auth import AuthService
 
 
 MIGRATION = "011_add_payment_payout_schema.py"
+RESOLUTION_MIGRATION = "012_payment_amount_resolution.py"
 TABLES = {
     "MatterportPaymentBatches", "MatterportPaymentItems", "TechnicianJobEarnings",
     "TechnicianPaymentRuns", "TechnicianPayments", "TechnicianPaymentEarnings",
@@ -43,8 +44,16 @@ class PaymentSchemaMigrationTests(unittest.TestCase):
             self.assertTrue(TABLES <= tables)
             self.assertTrue(INDEXES <= indexes)
             self.assertIn("default_pay_percentage", columns)
+            payment_columns = {row[1] for row in connection.execute(
+                "PRAGMA table_info(MatterportPaymentItems)")}
+            self.assertTrue({"expected_job_amount_cents", "resolved_amount_cents",
+                             "amount_resolution", "amount_resolution_notes",
+                             "amount_resolved_at", "amount_resolved_by"} <= payment_columns)
             self.assertEqual(connection.execute(
                 "SELECT count(*) FROM SchemaMigrations WHERE name=?", (MIGRATION,)
+            ).fetchone()[0], 1)
+            self.assertEqual(connection.execute(
+                "SELECT count(*) FROM SchemaMigrations WHERE name=?", (RESOLUTION_MIGRATION,)
             ).fetchone()[0], 1)
             self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
 

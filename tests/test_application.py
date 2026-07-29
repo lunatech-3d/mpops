@@ -231,7 +231,8 @@ class MigrationTests(unittest.TestCase):
                 applied = {row[0] for row in connection.execute("SELECT name FROM SchemaMigrations")}
                 self.assertEqual(applied, {"002_reconcile_legacy.py", "003_expand_technicians.py",
                                            "004_add_jobs.py", "010_create_markets.sql",
-                                           "011_add_payment_payout_schema.py"})
+                                           "011_add_payment_payout_schema.py",
+                                           "012_payment_amount_resolution.py"})
 
     def test_failed_migration_is_not_recorded(self):
         with tempfile.TemporaryDirectory() as directory:

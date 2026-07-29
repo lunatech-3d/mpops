@@ -64,7 +64,9 @@ class TipaltiImportDialog(tk.Toplevel):
         self.tree.delete(*self.tree.get_children())
         for row in self.result["rows"]:
             self.tree.insert("", "end", values=(row["source_row_number"], row["document_number"], row["document_type"] or "",
-                row["document_date"] or "", row["description_raw"] or "", format_cents(row["amount_received_cents"]), row["status"], row["message"] or ""))
+                row["document_date"] or "", row["description_raw"] or "", format_cents(row["amount_received_cents"]), row["status"],
+                ("This document number has already been imported and cannot be imported again."
+                 if row["status"] == "Duplicate" else row["message"] or "")))
         summary = self.result["summary"]
         self.summary_var.set(f"Rows detected: {summary['row_count']}    Valid rows: {summary['valid_count']}    Duplicate rows: {summary['duplicate_count']}    Invalid rows: {summary['invalid_count']}    Importable amount: {format_cents(summary['importable_total_cents'])}")
         proposal = import_preview_summary(self.batch["payment_amount_cents"], self.totals["imported_total_cents"], summary["importable_total_cents"])

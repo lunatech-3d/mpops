@@ -286,8 +286,9 @@ class PaymentServiceTests(unittest.TestCase):
         self.assertEqual(self.service.restore_payment_item(self.session, missing)["match_status"], "Matched")
         accepted = self.service.accept_amount_difference(
             self.session, amount, "job", "Use contract", 175)
-        self.assertEqual((accepted["amount_received_cents"], accepted["match_status"]),
-                         (175, "Matched"))
+        self.assertEqual((accepted["amount_received_cents"], accepted["resolved_amount_cents"],
+                          accepted["amount_resolution"], accepted["match_status"]),
+                         (200, 175, "Job", "Matched"))
         with self.auth.connection() as connection:
             rows = connection.execute(
                 "SELECT action, details_json FROM AuditLog WHERE action IN "
@@ -314,8 +315,7 @@ class PaymentServiceTests(unittest.TestCase):
         viewer = Session(999, "viewer", "viewer")
         with self.assertRaisesRegex(Exception, "operator"):
             self.service.assign_payment_item_job(viewer, item_id, exact_job)
-        with self.assertRaisesRegex(ValueError, "does not allow"):
-            self.service.resolve_duplicate_payment(self.session, item_id, "import_anyway")
+        self.assertFalse(hasattr(self.service, "resolve_duplicate_payment"))
 
     def test_active_primary_technician_lookup(self):
         job_id = self.create_job("TECH-JOB")
@@ -491,9 +491,63 @@ class PaymentServiceTests(unittest.TestCase):
         for status in ("Imported", "Needs Review"):
             self.service.update_payment_batch(
                 self.session, difference, {"batch_status": status})
-        with self.assertRaisesRegex(ValueError, "imported total"):
+        with self.assertRaisesRegex(ValueError, "effective total"):
             self.service.update_payment_batch(
                 self.session, difference, {"batch_status": "Reconciled"})
+
+    def test_general_job_search_reviews_fields_limit_and_sql_safety(self):
+        with self.auth.connection() as connection:
+            for index in range(55):
+                connection.execute(
+                    "INSERT INTO Jobs (external_job_id, project_name_source, "
+                    "client_name_source, capture_address_raw, job_status, created_by) "
+                    "VALUES (?, ?, ?, ?, 'Completed', ?)",
+                    (f"SEARCH-{index}", f"Museum Renovation {index}", "Acme Client",
+                     f"{index} Main Street", self.session.user_id))
+        self.assertEqual(self.service.search_jobs_for_payment_exception(" SEARCH-7 ")[0]
+                         ["job_number"], "SEARCH-7")
+        self.assertTrue(self.service.search_jobs_for_payment_exception("museum renovation"))
+        self.assertTrue(self.service.search_jobs_for_payment_exception("Acme Client"))
+        self.assertTrue(self.service.search_jobs_for_payment_exception("Main Street"))
+        self.assertEqual(len(self.service.search_jobs_for_payment_exception("SEARCH", 500)), 50)
+        self.assertEqual(self.service.search_jobs_for_payment_exception("'; DROP TABLE Jobs;--"), [])
+        self.assertEqual(len(self.service.search_jobs_for_payment_exception("SEARCH-", 3)), 3)
+
+    def test_amount_source_is_immutable_and_effective_total_is_authoritative(self):
+        batch = self.create_batch(175)
+        job = self.create_job("AMOUNT-SOURCE")
+        item = self.add_item(batch, "AMOUNT-SOURCE", 200)
+        self.service.update_payment_item(
+            self.session, item, {"match_status": "Amount Review", "job_id": job})
+        resolved = self.service.accept_amount_difference(
+            self.session, item, "job", "Contract amount", 175)
+        self.assertEqual(resolved["amount_received_cents"], 200)
+        self.assertEqual(resolved["expected_job_amount_cents"], 175)
+        self.assertEqual(resolved["resolved_amount_cents"], 175)
+        self.assertEqual(resolved["amount_resolution"], "Job")
+        self.assertEqual(resolved["amount_resolved_by"], self.session.user_id)
+        self.assertTrue(resolved["amount_resolved_at"])
+        totals = self.service.calculate_batch_totals(batch)
+        self.assertEqual((totals["imported_total_cents"], totals["difference_cents"]), (200, 0))
+
+    def test_exclusion_note_edit_preserves_state_reason_and_audits(self):
+        batch = self.create_batch(100)
+        item = self.add_item(batch, "EXCLUDED-NOTES", 100)
+        excluded = self.service.exclude_payment_item(self.session, item, "old", "Duplicate source")
+        edited = self.service.update_payment_item_resolution_notes(self.session, item, "new")
+        self.assertEqual((edited["match_status"], edited["match_method"]),
+                         (excluded["match_status"], excluded["match_method"]))
+        with self.assertRaisesRegex(Exception, "operator"):
+            self.service.update_payment_item_resolution_notes(
+                Session(999, "viewer", "viewer"), item, "not allowed")
+        with self.assertRaisesRegex(ValueError, "500"):
+            self.service.update_payment_item_resolution_notes(self.session, item, "x" * 501)
+        with self.auth.connection() as connection:
+            audit = connection.execute(
+                "SELECT details_json FROM AuditLog WHERE action = "
+                "'payment_item_resolution_notes_updated'"
+            ).fetchone()
+        self.assertEqual(json.loads(audit["details_json"])["previous_notes"], "old")
 
         for match_status, message in (("Missing Job", "Missing Job"),
                                       ("Ambiguous", "Ambiguous"),
