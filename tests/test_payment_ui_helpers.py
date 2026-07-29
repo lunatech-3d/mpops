@@ -3,7 +3,7 @@
 import unittest
 
 from app.ui.payment_helpers import (format_cents, next_batch_status, parse_currency,
-                                    status_permissions, totals_to_display)
+                                    status_permissions, totals_to_display, import_preview_summary, workflow_summary)
 
 
 class PaymentUiHelperTests(unittest.TestCase):
@@ -43,6 +43,16 @@ class PaymentUiHelperTests(unittest.TestCase):
         self.assertEqual(display["difference_cents"], "-$0.05")
         self.assertEqual(display["item_count"], "3")
         self.assertEqual(display["matched_count"], "0")
+
+
+    def test_import_preview_and_workflow_summary(self):
+        preview = import_preview_summary(1000, 200, 700)
+        self.assertEqual(preview["difference_after_import"], "$1.00")
+        self.assertFalse(preview["balances"])
+        lines = workflow_summary("Draft", {"item_count": 2, "missing_job_count": 1,
+            "ambiguous_count": 0, "difference_cents": 0, "exception_count": 1})
+        self.assertIn("⚠ 1 missing jobs", lines)
+        self.assertEqual(lines[-1], "□ Ready to reconcile")
 
 
 if __name__ == "__main__":

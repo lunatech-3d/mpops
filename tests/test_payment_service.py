@@ -136,6 +136,43 @@ class PaymentServiceTests(unittest.TestCase):
                 self.session, {"payment_amount_cents": 100}
             )
 
+    def test_bulk_import_is_atomic_and_audited(self):
+        batch_id = self.create_batch(300)
+        result = self.service.import_payment_items(self.session, batch_id, [
+            {"document_number": "BULK-1", "amount_received_cents": 100},
+            {"document_number": "BULK-2", "amount_received_cents": 200},
+        ])
+        self.assertEqual(result["imported_count"], 2)
+        self.assertEqual(result["imported_total_cents"], 300)
+        self.assertEqual(len(result["payment_item_ids"]), 2)
+        with self.auth.connection() as connection:
+            audit = connection.execute("SELECT action FROM AuditLog WHERE action = 'tipalti_payment_items_imported'").fetchall()
+        self.assertEqual(len(audit), 1)
+
+    def test_bulk_duplicate_conflict_rolls_back_everything(self):
+        existing = self.create_batch(); self.add_item(existing, "TAKEN", 1)
+        target = self.create_batch()
+        with self.assertRaisesRegex(ValueError, "already been imported"):
+            self.service.import_payment_items(self.session, target, [
+                {"document_number": "NEW", "amount_received_cents": 10},
+                {"document_number": "taken", "amount_received_cents": 20},
+            ])
+        self.assertEqual(self.service.list_payment_items(target), [])
+        with self.auth.connection() as connection:
+            self.assertEqual(connection.execute("SELECT COUNT(*) FROM AuditLog WHERE action = 'tipalti_payment_items_imported'").fetchone()[0], 0)
+
+    def test_bulk_import_rejects_status_permissions_and_matching_fields(self):
+        batch_id = self.create_batch()
+        self.service.update_payment_batch(self.session, batch_id, {"batch_status": "Imported"})
+        with self.assertRaisesRegex(ValueError, "Draft"):
+            self.service.import_payment_items(self.session, batch_id, [{"document_number": "A", "amount_received_cents": 1}])
+        draft = self.create_batch()
+        with self.assertRaisesRegex(ValueError, "matching fields"):
+            self.service.import_payment_items(self.session, draft, [{"document_number": "A", "amount_received_cents": 1, "job_id": 1}])
+        from app.security.auth import Session
+        with self.assertRaises(Exception):
+            self.service.import_payment_items(Session(999, "viewer", "viewer"), draft, [{"document_number": "A", "amount_received_cents": 1}])
+
     def test_batch_totals_use_integer_cents(self):
         batch_id = self.create_batch(1000)
         self.add_item(batch_id, "MATCHED", 625)

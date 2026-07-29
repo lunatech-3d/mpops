@@ -68,3 +68,26 @@ def totals_to_display(totals: dict[str, int]) -> dict[str, str]:
                 "amount_review_count"):
         result[key] = str(totals.get(key, 0))
     return result
+
+
+def import_preview_summary(batch_total_cents: int, imported_total_cents: int,
+                           importable_total_cents: int) -> dict[str, Any]:
+    difference = batch_total_cents - imported_total_cents - importable_total_cents
+    return {"batch_amount": format_cents(batch_total_cents),
+            "importable_amount": format_cents(importable_total_cents),
+            "difference_after_import": format_cents(difference), "balances": difference == 0}
+
+
+def workflow_summary(batch_status: str, totals: dict[str, int]) -> list[str]:
+    """Map service-derived totals to concise, presentation-only workflow lines."""
+    items = totals.get("item_count", 0)
+    lines = ["✓ Batch created", f"{'✓' if items else '□'} {items} items imported"]
+    for count, label in ((totals.get("missing_job_count", 0), "missing jobs"),
+                         (totals.get("ambiguous_count", 0), "ambiguous matches")):
+        lines.append(f"{'⚠' if count else '✓'} {count} {label}")
+    lines.append(f"{'✓' if totals.get('difference_cents') == 0 else '⚠'} Payment totals "
+                 f"{'balance' if totals.get('difference_cents') == 0 else 'do not balance'}")
+    ready = bool(items and totals.get("difference_cents") == 0 and
+                 totals.get("exception_count", 0) == 0)
+    lines.append(f"{'✓' if ready or batch_status in ('Reconciled', 'Approved', 'Closed') else '□'} Ready to reconcile")
+    return lines

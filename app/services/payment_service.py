@@ -384,6 +384,68 @@ class PaymentService:
             ).fetchone()
             return dict(row) if row else None
 
+    def find_duplicate_documents(self, document_numbers: list[str]) -> set[str]:
+        """Return existing document numbers case-insensitively in one query."""
+        cleaned = [self._text("document_number", value, required=True)
+                   for value in document_numbers]
+        if not cleaned:
+            return set()
+        placeholders = ",".join("?" for _ in cleaned)
+        with self.auth.connection() as connection:
+            rows = connection.execute(
+                f"SELECT document_number FROM MatterportPaymentItems "
+                f"WHERE document_number COLLATE NOCASE IN ({placeholders})", cleaned).fetchall()
+        return {row["document_number"] for row in rows}
+
+    def import_payment_items(self, session: Session, payment_batch_id: int,
+                             items: list[dict[str, Any]]) -> dict[str, Any]:
+        """Validate and insert a set of imported items in one atomic transaction."""
+        self._require_operator(session)
+        self._positive_id(payment_batch_id, "payment_batch_id")
+        if not isinstance(items, list) or not items:
+            raise ValueError("At least one payment item is required")
+        clean_items = []
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("payment item data must be a dictionary")
+            matching_fields = set(item) - _IMPORT_FIELDS
+            if matching_fields:
+                raise ValueError("Imported payment items cannot set matching fields: "
+                                 + ", ".join(sorted(matching_fields)))
+            clean_items.append(self._clean_item(item, creating=True))
+        folded = [item["document_number"].casefold() for item in clean_items]
+        if len(folded) != len(set(folded)):
+            raise ValueError("Duplicate document number in submitted payment items")
+        ids = []
+        with self.auth.connection() as connection:
+            batch = self._require_batch(connection, payment_batch_id)
+            self._require_batch_mutation(batch, "item")
+            for clean in clean_items:
+                duplicate = connection.execute(
+                    "SELECT payment_item_id FROM MatterportPaymentItems "
+                    "WHERE document_number = ? COLLATE NOCASE", (clean["document_number"],)
+                ).fetchone()
+                if duplicate:
+                    raise ValueError("Document number has already been imported")
+                fields = list(clean)
+                try:
+                    cursor = connection.execute(
+                        f"INSERT INTO MatterportPaymentItems "
+                        f"(payment_batch_id,{','.join(fields)},created_at) "
+                        f"VALUES (?,{','.join('?' for _ in fields)},?)",
+                        [payment_batch_id, *clean.values(), utc_now_iso()])
+                except sqlite3.IntegrityError as exc:
+                    raise ValueError("Payment item conflicts with an existing record") from exc
+                ids.append(int(cursor.lastrowid))
+            total = sum(item["amount_received_cents"] for item in clean_items)
+            record_event(connection, "tipalti_payment_items_imported",
+                         actor_user_id=session.user_id,
+                         details={"payment_batch_id": payment_batch_id,
+                                  "imported_count": len(ids), "imported_total_cents": total,
+                                  "document_numbers": [i["document_number"] for i in clean_items[:50]]})
+        return {"imported_count": len(ids), "imported_total_cents": total,
+                "payment_item_ids": ids}
+
     def add_payment_item(
         self, session: Session, payment_batch_id: int, item_data: dict[str, Any]
     ) -> int:

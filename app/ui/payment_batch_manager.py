@@ -12,8 +12,9 @@ from typing import Any, Callable
 from app.security.user_manager import AuthorizationError
 from app.services.payment_service import BATCH_STATUSES, PaymentService
 from app.ui.payment_helpers import (format_cents, next_batch_status, parse_currency,
-                                    status_permissions, totals_to_display)
+                                    status_permissions, totals_to_display, workflow_summary)
 from app.ui.styles import PADDING
+from app.ui.tipalti_import_dialog import TipaltiImportDialog
 
 LOGGER = logging.getLogger(__name__)
 EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
@@ -179,9 +180,12 @@ class PaymentBatchDetail(tk.Toplevel):
             ttk.Label(totals, text=label + ":").grid(row=row, column=col, sticky="e", padx=(5, 2), pady=2)
             style = "Section.TLabel" if key == "difference_cents" else "TLabel"
             ttk.Label(totals, textvariable=var, style=style).grid(row=row, column=col + 1, sticky="w", padx=(0, 8))
+        self.workflow_var = tk.StringVar()
+        workflow = ttk.LabelFrame(outer, text="Workflow", padding=6); workflow.pack(fill="x", pady=(0, 4))
+        ttk.Label(workflow, textvariable=self.workflow_var, justify="left").pack(anchor="w")
         actions = ttk.Frame(outer); actions.pack(fill="x", pady=(8, 0))
         self.save_button = ttk.Button(actions, text="Save", command=self.save)
-        self.import_button = ttk.Button(actions, text="Import Tipalti Data", state="disabled")
+        self.import_button = ttk.Button(actions, text="Import Tipalti Data", command=self.open_importer)
         self.match_button = ttk.Button(actions, text="Match Jobs", command=self.match_jobs)
         self.advance_button = ttk.Button(actions, text="Advance Status", command=self.advance)
         self.delete_button = ttk.Button(actions, text="Delete Draft", command=self.delete)
@@ -209,6 +213,7 @@ class PaymentBatchDetail(tk.Toplevel):
         for field, entry in self.entries.items(): entry.configure(state="normal" if field in editable else "disabled")
         self.notes.configure(state="normal" if "notes" in editable else "disabled")
         self.save_button.configure(state="normal" if (self.batch_id is None and self.can_modify) or permissions["can_save"] else "disabled")
+        self.import_button.configure(state="normal" if self.status_var.get() == "Draft" and self.can_modify else "disabled")
         self.match_button.configure(state="normal" if self.batch_id and permissions["can_match"] else "disabled")
         self.delete_button.configure(state="normal" if self.batch_id and permissions["can_delete"] else "disabled")
         self.advance_button.configure(state="normal" if self.batch_id and permissions["can_advance"] else "disabled")
@@ -240,6 +245,7 @@ class PaymentBatchDetail(tk.Toplevel):
                 item.get("description_raw") or "", format_cents(item.get("amount_received_cents")), f"Job #{job_id}" if job_id else "",
                 technician, item.get("match_status") or "", item.get("match_notes") or ""))
         display = totals_to_display(totals)
+        self.workflow_var.set("\n".join(workflow_summary(batch["batch_status"], totals)))
         for key, var in self.total_vars.items(): var.set(display.get(key, "0"))
         self.snapshot = self._form_values(); self.apply_status_permissions(); self.title(f"Matterport Payment Batch #{self.batch_id}")
 
@@ -262,6 +268,18 @@ class PaymentBatchDetail(tk.Toplevel):
                 self.service.update_payment_batch(self.session, self.batch_id, changed)
         except Exception as exc: _show_error(self, exc); return
         self.on_changed(self.batch_id); self.refresh(); messagebox.showinfo("Matterport Payments", "Payment batch saved.", parent=self)
+
+    def open_importer(self) -> None:
+        if self.batch_id is None:
+            messagebox.showwarning("Tipalti Import", "Save the payment batch before importing Tipalti data.", parent=self); return
+        if self.status_var.get() != "Draft": return
+        try:
+            totals = self.service.calculate_batch_totals(self.batch_id)
+            TipaltiImportDialog(self, self.service, self.session, self.batch_id, self.batch, totals, self._after_import)
+        except Exception as exc: _show_error(self, exc)
+
+    def _after_import(self) -> None:
+        self.refresh(); self.on_changed(self.batch_id)
 
     def match_jobs(self) -> None:
         try: result = self.service.match_payment_items(self.session, self.batch_id)
