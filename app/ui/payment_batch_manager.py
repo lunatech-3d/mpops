@@ -15,6 +15,7 @@ from app.ui.payment_helpers import (format_cents, next_batch_status, parse_curre
                                     status_permissions, totals_to_display, workflow_summary)
 from app.ui.payment_exception_center import PaymentExceptionCenter
 from app.ui.styles import PADDING
+from app.ui.matterport_email_import_dialog import MatterportEmailImportDialog
 from app.ui.tipalti_import_dialog import TipaltiImportDialog
 
 LOGGER = logging.getLogger(__name__)
@@ -193,13 +194,18 @@ class PaymentBatchDetail(tk.Toplevel):
         ttk.Label(history, textvariable=self.history_var, justify="left").pack(anchor="w")
         actions = ttk.Frame(outer); actions.pack(fill="x", pady=(8, 0))
         self.save_button = ttk.Button(actions, text="Save", command=self.save)
-        self.import_button = ttk.Button(actions, text="Import Tipalti Data", command=self.open_importer)
+        self.import_button = ttk.Button(actions, text="Import Payment Email", command=self.open_importer)
+        self.metadata_button = ttk.Button(actions, text="Import Tipalti Metadata",
+                                          command=self.open_metadata_importer)
         self.match_button = ttk.Button(actions, text="Match Jobs", command=self.match_jobs)
         self.resolve_button = ttk.Button(actions, text="Review Exceptions", command=self.resolve_exceptions)
         self.reconcile_button = ttk.Button(actions, text="Reconcile Batch", command=self.open_reconciliation)
         self.advance_button = ttk.Button(actions, text="Advance Status", command=self.advance)
         self.delete_button = ttk.Button(actions, text="Delete Draft", command=self.delete)
-        for button in (self.save_button, self.import_button, self.match_button, self.resolve_button, self.reconcile_button, self.advance_button, self.delete_button): button.pack(side="left", padx=(0, 6))
+        for button in (self.save_button, self.import_button, self.metadata_button, self.match_button,
+                       self.resolve_button, self.reconcile_button, self.advance_button,
+                       self.delete_button):
+            button.pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Refresh", command=self.refresh).pack(side="left")
         ttk.Button(actions, text="Close", command=self.close).pack(side="right")
         self.snapshot: dict[str, Any] = {}
@@ -208,7 +214,7 @@ class PaymentBatchDetail(tk.Toplevel):
 
     def _load_new(self) -> None:
         defaults = {"payment_date": date.today().isoformat(), "payment_amount_cents": "0.00",
-                    "payment_method": "ACH", "payer_name": "Matterport", "source_system": "Tipalti",
+                    "payment_method": "ACH", "payer_name": "Matterport", "source_system": "Matterport Email",
                     "source_email_subject": "", "source_email_received_at": ""}
         for field, value in defaults.items(): self.vars[field].set(value)
         self.status_var.set("Draft"); self.snapshot = self._form_values(); self.apply_status_permissions()
@@ -224,6 +230,7 @@ class PaymentBatchDetail(tk.Toplevel):
         self.notes.configure(state="normal" if "notes" in editable else "disabled")
         self.save_button.configure(state="normal" if (self.batch_id is None and self.can_modify) or permissions["can_save"] else "disabled")
         self.import_button.configure(state="normal" if self.status_var.get() == "Draft" and self.can_modify else "disabled")
+        self.metadata_button.configure(state="normal" if self.status_var.get() == "Draft" and self.can_modify else "disabled")
         self.match_button.configure(state="normal" if self.batch_id and permissions["can_match"] else "disabled")
         self.delete_button.configure(state="normal" if self.batch_id and permissions["can_delete"] else "disabled")
         self.advance_button.configure(state="normal" if self.batch_id and permissions["can_advance"] else "disabled")
@@ -298,12 +305,29 @@ class PaymentBatchDetail(tk.Toplevel):
 
     def open_importer(self) -> None:
         if self.batch_id is None:
-            messagebox.showwarning("Tipalti Import", "Save the payment batch before importing Tipalti data.", parent=self); return
+            messagebox.showwarning("Payment Email Import", "Save the payment batch before importing a payment email.", parent=self); return
         if self.status_var.get() != "Draft": return
         try:
             totals = self.service.calculate_batch_totals(self.batch_id)
-            TipaltiImportDialog(self, self.service, self.session, self.batch_id, self.batch, totals, self._after_import)
+            MatterportEmailImportDialog(self, self.service, self.session, self.batch_id,
+                                        self.batch, totals, self._after_import)
         except Exception as exc: _show_error(self, exc)
+
+    def open_metadata_importer(self) -> None:
+        """Retain the legacy Tipalti clipboard importer as an optional path."""
+        if self.batch_id is None:
+            messagebox.showwarning("Tipalti Metadata Import",
+                                   "Save the payment batch before importing Tipalti metadata.",
+                                   parent=self)
+            return
+        if self.status_var.get() != "Draft":
+            return
+        try:
+            totals = self.service.calculate_batch_totals(self.batch_id)
+            TipaltiImportDialog(self, self.service, self.session, self.batch_id,
+                                self.batch, totals, self._after_import)
+        except Exception as exc:
+            _show_error(self, exc)
 
     def _after_import(self) -> None:
         self.refresh(); self.on_changed(self.batch_id)
