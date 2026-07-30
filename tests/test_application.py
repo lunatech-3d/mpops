@@ -176,7 +176,8 @@ class ApplicationServiceTests(unittest.TestCase):
                          {"Users", "AuditLog", "Techs", "TechAddresses", "SchemaMigrations",
                           "Projects", "Jobs", "JobSourceRecords", "JobAssignments", "Markets",
                           "MatterportPaymentBatches", "MatterportPaymentItems", "TechnicianJobEarnings",
-                          "TechnicianPaymentRuns", "TechnicianPayments", "TechnicianPaymentEarnings"})
+                          "TechnicianPaymentRuns", "TechnicianPayments", "TechnicianPaymentEarnings",
+                          "TechnicianCompensationRules", "JobFinancials"})
         with self.auth.connection() as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(Users)")}
             self.assertEqual(columns, {"id", "username", "password_hash", "display_name", "role",
@@ -232,7 +233,36 @@ class MigrationTests(unittest.TestCase):
                 self.assertEqual(applied, {"002_reconcile_legacy.py", "003_expand_technicians.py",
                                            "004_add_jobs.py", "010_create_markets.sql",
                                            "011_add_payment_payout_schema.py",
-                                           "012_payment_amount_resolution.py"})
+                                           "012_payment_amount_resolution.py",
+                                           "013_payment_batch_reconciliation.py",
+                                           "014_compensation_ledger.py",
+                                           "015_add_job_financials.py"})
+
+    def test_job_financial_migration_has_pre_drop_column_fallback(self):
+        import importlib.util
+
+        migration_path = PROJECT_ROOT / "database" / "migrations" / "015_add_job_financials.py"
+        spec = importlib.util.spec_from_file_location("migration_015_test", migration_path)
+        migration = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(migration)
+        connection = sqlite3.connect(":memory:")
+        try:
+            connection.executescript("""
+                CREATE TABLE Sample (
+                    id INTEGER PRIMARY KEY,
+                    retained TEXT NOT NULL,
+                    obsolete TEXT
+                );
+                INSERT INTO Sample VALUES (7, 'keep me', 'remove me');
+            """)
+            migration._drop_columns_compat(connection, "Sample", ("obsolete",))
+            self.assertEqual(
+                [row[1] for row in connection.execute("PRAGMA table_info(Sample)")],
+                ["id", "retained"],
+            )
+            self.assertEqual(connection.execute("SELECT * FROM Sample").fetchone(), (7, "keep me"))
+        finally:
+            connection.close()
 
     def test_failed_migration_is_not_recorded(self):
         with tempfile.TemporaryDirectory() as directory:

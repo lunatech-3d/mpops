@@ -5,3 +5,7 @@ recorded in `SchemaMigrations` only after its transaction and foreign-key check 
 `002_reconcile_legacy.py` normalizes the supported historical schema variants; fresh
 databases already contain the final schema and mark that compatibility migration as
 applied in `001_initial.sql`.
+
+Migrations must not rely on `ALTER TABLE ... DROP COLUMN`. Some deployed Python
+installations bundle SQLite versions older than 3.35. When columns must be removed,
+migrations must provide a transactional table-rebuild fallback for those versions.
