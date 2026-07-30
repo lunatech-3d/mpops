@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.date_utils import display_date_to_iso, format_display_date
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog
 from app.ui.styles import PADDING
 
@@ -56,7 +57,10 @@ def show_technician_form(parent, technician: dict | None = None, *, is_admin=Tru
     def fields(frame, specs):
         for row, (name, label, kind) in enumerate(specs):
             ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=6)
-            variables[name] = tk.StringVar(value=(technician or {}).get(name) or "")
+            stored = (technician or {}).get(name)
+            variables[name] = tk.StringVar(value=(format_display_date(stored)
+                                                   if name in {"hire_date", "termination_date", "date_of_birth"}
+                                                   else stored or ""))
             if kind == "suffix":
                 widget = ttk.Combobox(frame, textvariable=variables[name],
                                       values=("", "Jr.", "Sr.", "II", "III", "IV", "V"))
@@ -73,8 +77,8 @@ def show_technician_form(parent, technician: dict | None = None, *, is_admin=Tru
     engagement = tab("Engagement")
     fields(engagement, (("company_name", "Company Name", "entry"),
                         ("contractor_type", "Contractor Type", "entry"),
-                        ("hire_date", "Hire Date (YYYY-MM-DD)", "entry"),
-                        ("termination_date", "Termination Date (YYYY-MM-DD)", "entry"),
+                        ("hire_date", "Hire Date (MM/DD/YYYY)", "entry"),
+                        ("termination_date", "Termination Date (MM/DD/YYYY)", "entry"),
                         ("inactive_reason", "Inactive Reason", "entry")))
     ttk.Label(engagement, text="Status").grid(row=5, column=0, sticky="w", pady=6)
     status = tk.StringVar(value=(technician or {}).get("status") or "Active")
@@ -90,7 +94,7 @@ def show_technician_form(parent, technician: dict | None = None, *, is_admin=Tru
                            ("emergency_contact_relationship", "Relationship", "entry"),
                            ("emergency_contact_phone", "Phone", "entry")))
         restricted = tab("Restricted")
-        fields(restricted, (("date_of_birth", "Date of Birth (YYYY-MM-DD)", "entry"),
+        fields(restricted, (("date_of_birth", "Date of Birth (MM/DD/YYYY)", "entry"),
                             ("ssn_last4", "SSN — Last 4 Digits", "entry"),
                             ("drivers_license_number", "Driver’s License Number", "entry"),
                             ("drivers_license_state", "Driver’s License State", "entry")))
@@ -113,7 +117,10 @@ def show_technician_form(parent, technician: dict | None = None, *, is_admin=Tru
         # A non-admin form never receives sensitive values and therefore cannot submit them.
         if not is_admin:
             values.update({name: (technician or {}).get(name) or "" for name in RESTRICTED_FIELDS})
-        try: result = technician_form_data(values)
+        try:
+            for field in {"hire_date", "termination_date", "date_of_birth"} & values.keys():
+                values[field] = display_date_to_iso(values[field]) or ""
+            result = technician_form_data(values)
         except ValueError as exc:
             messagebox.showerror("Invalid technician", str(exc), parent=dialog); return
         close_modal(dialog)

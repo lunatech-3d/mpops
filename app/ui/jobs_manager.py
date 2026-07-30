@@ -6,6 +6,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, ttk
 
+from app.date_utils import format_display_datetime
 from app.security.user_manager import AuthorizationError
 from app.services.jobs_service import JobsService
 from app.ui.job_form import changed_fields, show_job_form
@@ -74,19 +75,7 @@ def format_currency(value):
         return "$0.00"
 
 
-def format_datetime(value):
-    """Format an ISO database date/time for display without changing storage."""
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return text
-    if parsed.hour == 0 and parsed.minute == 0 and "T" not in text and " " not in text:
-        return parsed.strftime("%m-%d-%Y")
-    hour = parsed.strftime("%I").lstrip("0") or "12"
-    return f"{parsed.strftime('%m-%d-%Y')} {hour}:{parsed.strftime('%M %p')}"
+format_datetime = format_display_datetime
 
 
 def natural_sort_key(value):

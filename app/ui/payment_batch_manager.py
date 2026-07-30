@@ -9,6 +9,8 @@ from datetime import date
 from tkinter import messagebox, ttk
 from typing import Any, Callable
 
+from app.date_utils import (display_date_to_iso, display_datetime_to_iso,
+                            format_display_date, format_display_datetime)
 from app.security.user_manager import AuthorizationError
 from app.services.payment_service import BATCH_STATUSES, PaymentService
 from app.ui.payment_helpers import (format_cents, next_batch_status, parse_currency,
@@ -86,7 +88,7 @@ class PaymentBatchManager(ttk.Frame):
         self.tree.delete(*self.tree.get_children()); self.rows.clear()
         for row in rows:
             batch_id = int(row["payment_batch_id"]); iid = f"batch-{batch_id}"; self.rows[iid] = row
-            self.tree.insert("", "end", iid=iid, values=(row["payment_date"], format_cents(row["payment_amount_cents"]),
+            self.tree.insert("", "end", iid=iid, values=(format_display_date(row["payment_date"]), format_cents(row["payment_amount_cents"]),
                 format_cents(row["imported_total_cents"]), format_cents(row["difference_cents"]), row["item_count"],
                 row["matched_count"], row["excluded_count"], row["exception_count"], row["batch_status"]))
         iid = f"batch-{selection}" if selection else ""
@@ -225,7 +227,7 @@ class PaymentBatchDetail(tk.Toplevel):
         else: self.refresh()
 
     def _load_new(self) -> None:
-        defaults = {"payment_date": date.today().isoformat(), "payment_amount_cents": "0.00",
+        defaults = {"payment_date": format_display_date(date.today()), "payment_amount_cents": "0.00",
                     "payment_method": "ACH", "payer_name": "Matterport", "source_system": "Matterport Email",
                     "source_email_subject": "", "source_email_received_at": ""}
         for field, value in defaults.items(): self.vars[field].set(value)
@@ -268,7 +270,10 @@ class PaymentBatchDetail(tk.Toplevel):
         self.batch = batch
         for field, var in self.vars.items():
             value = batch.get(field) or ""
-            var.set(format_cents(value).replace("$", "") if field == "payment_amount_cents" else value)
+            if field == "payment_amount_cents": value = format_cents(value).replace("$", "")
+            elif field == "payment_date": value = format_display_date(value)
+            elif field == "source_email_received_at": value = format_display_datetime(value)
+            var.set(value)
         self.notes.configure(state="normal"); self.notes.delete("1.0", "end"); self.notes.insert("1.0", batch.get("notes") or "")
         self.status_var.set(batch["batch_status"]); self.items.delete(*self.items.get_children())
         for item in items:
@@ -279,7 +284,7 @@ class PaymentBatchDetail(tk.Toplevel):
                     tech = result["technician"]; technician = " ".join(filter(None, (tech.get("first_name"), tech.get("last_name"))))
                 elif result["status"] == "Missing": technician = "No primary technician"
                 else: technician = "Multiple primary technicians"
-            self.items.insert("", "end", values=(item.get("document_number") or "", item.get("document_date") or "",
+            self.items.insert("", "end", values=(item.get("document_number") or "", format_display_date(item.get("document_date")),
                 item.get("description_raw") or "", format_cents(item.get("amount_received_cents")), f"Job #{job_id}" if job_id else "",
                 technician, item.get("match_status") or "", item.get("match_notes") or ""))
         display = totals_to_display(totals)
@@ -290,7 +295,7 @@ class PaymentBatchDetail(tk.Toplevel):
                           "To make changes a supervisor must perform an unreconcile operation (future feature)."
                           if locked else "")
         self.history_var.set("\n".join(
-            f"{entry['timestamp']}  |  {entry['user']}  |  {entry['event']}" for entry in history
+            f"{format_display_datetime(entry['timestamp'])}  |  {entry['user']}  |  {entry['event']}" for entry in history
         ) or "No financial history available.")
         for key, var in self.total_vars.items(): var.set(display.get(key, "0"))
         self.snapshot = self._form_values(); self.apply_status_permissions(); self.title(f"Matterport Payment Batch #{self.batch_id}")
@@ -298,6 +303,8 @@ class PaymentBatchDetail(tk.Toplevel):
     def _submitted(self) -> dict[str, Any]:
         values = self._form_values()
         if not values["payment_date"]: raise ValueError("Payment Date is required.")
+        values["payment_date"] = display_date_to_iso(values["payment_date"])
+        values["source_email_received_at"] = display_datetime_to_iso(values["source_email_received_at"])
         values["payment_amount_cents"] = parse_currency(values["payment_amount_cents"])
         return {key: (value or None) for key, value in values.items()}
 
@@ -395,7 +402,7 @@ class PaymentBatchReconciliationDialog(tk.Toplevel):
         summary = result["summary"]
         batch = service.get_payment_batch(batch_id) or {}
         operator = session.display_name or session.username
-        values = (("Batch ID", batch_id), ("Payment Date", summary["payment_date"]),
+        values = (("Batch ID", batch_id), ("Payment Date", format_display_date(summary["payment_date"])),
                   ("Tipalti Payment Amount", format_cents(summary["payment_amount_cents"])),
                   ("Imported Total", format_cents(summary["imported_total_cents"])),
                   ("Effective Total", format_cents(summary["effective_total_cents"])),

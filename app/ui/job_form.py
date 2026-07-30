@@ -3,6 +3,7 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.date_utils import display_datetime_to_iso, format_display_datetime
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog
 from app.ui.styles import PADDING
 
@@ -81,7 +82,7 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
         (PRIMARY_TECHNICIAN_FIELD, "Technician"),
         ("client_name_source", "Client"),
         ("project_name_source", "Project"),
-        ("scheduled_start_at", "Scheduled Start"),
+        ("scheduled_start_at", "Scheduled Start (MM/DD/YYYY h:mm AM/PM)"),
         ("capture_address_raw", "Capture Address"),
         ("city", "City"),
         ("state", "State"),
@@ -93,7 +94,9 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     )
 
     variables = {
-        name: tk.StringVar(value="" if (job or {}).get(name) is None else str((job or {}).get(name)))
+        name: tk.StringVar(value=(format_display_datetime((job or {}).get(name))
+                                  if name == "scheduled_start_at"
+                                  else "" if (job or {}).get(name) is None else str((job or {}).get(name))))
         for name in JOB_FORM_FIELDS if name not in {"internal_notes", "market_id"}
     }
     market_id_to_display = {
@@ -206,6 +209,7 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
         )
         values["internal_notes"] = notes.get("1.0", "end-1c")
         try:
+            values["scheduled_start_at"] = display_datetime_to_iso(values["scheduled_start_at"]) or ""
             result = job_form_data(values)
         except ValueError as exc:
             messagebox.showerror("Invalid Job", str(exc), parent=dialog)

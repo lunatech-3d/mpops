@@ -3,6 +3,7 @@ import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.date_utils import display_date_to_iso, format_display_date
 from app.security.user_manager import AuthorizationError
 from app.services.technician_service import TechnicianService
 from app.ui.address_form import ADDRESS_FIELDS, address_form_data, show_address_form
@@ -192,16 +193,18 @@ def show_deactivation_dialog(parent, name, technician):
     result = None
     window = tk.Toplevel(parent); window.withdraw(); window.title(f"Deactivate {name}")
     body = ttk.Frame(window, padding=PADDING); body.pack(fill="both", expand=True)
-    date_var = tk.StringVar(value=technician.get("termination_date") or "")
+    date_var = tk.StringVar(value=format_display_date(technician.get("termination_date")))
     reason_var = tk.StringVar(value=technician.get("inactive_reason") or "")
-    for row, (label, variable) in enumerate((("Termination Date (YYYY-MM-DD)", date_var),
+    for row, (label, variable) in enumerate((("Termination Date (MM/DD/YYYY)", date_var),
                                              ("Inactive Reason", reason_var))):
         ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=5)
         ttk.Entry(body, textvariable=variable, width=40).grid(row=row, column=1, pady=5)
     def cancel(_event=None): close_modal(window)
     def submit():
         nonlocal result
-        result = (date_var.get().strip() or None, reason_var.get().strip() or None); close_modal(window)
+        try: termination_date = display_date_to_iso(date_var.get())
+        except ValueError as exc: messagebox.showerror("Invalid date", str(exc), parent=window); return
+        result = (termination_date, reason_var.get().strip() or None); close_modal(window)
     buttons = ttk.Frame(body); buttons.grid(row=2, column=0, columnspan=2, sticky="e", pady=(10, 0))
     ttk.Button(buttons, text="Deactivate", command=submit).pack(side="left", padx=3)
     ttk.Button(buttons, text="Cancel", command=cancel).pack(side="left", padx=3)
@@ -246,7 +249,10 @@ class TechnicianDetails:
             section = ttk.LabelFrame(profile, text=title, padding=6)
             section.grid(row=column // 3, column=column % 3, sticky="nsew", padx=3, pady=3)
             for label, field in values:
-                ttk.Label(section, text=f"{label}: {technician.get(field) or '—'}",
+                value = (format_display_date(technician.get(field), "—")
+                         if field in {"hire_date", "termination_date", "date_of_birth"}
+                         else technician.get(field) or "—")
+                ttk.Label(section, text=f"{label}: {value}",
                           wraplength=285).pack(anchor="w")
         for column in range(3): profile.columnconfigure(column, weight=1)
         ttk.Label(body, text="Addresses", style="Header.TLabel").pack(anchor="w")
@@ -267,7 +273,9 @@ class TechnicianDetails:
         self.tree.delete(*self.tree.get_children()); self.rows.clear()
         for row in rows:
             iid=f"address-{row['address_id']}"; self.rows[iid]=row
-            values=[("Yes" if row.get(c) else "") if c == "is_primary" else row.get(c) or ""
+            values=[("Yes" if row.get(c) else "") if c == "is_primary"
+                    else format_display_date(row.get(c)) if c in {"effective_date", "end_date"}
+                    else row.get(c) or ""
                     for c in self.COLUMNS]
             self.tree.insert("","end",iid=iid,values=values)
         self.status.set(f"{len(rows)} address(es)." if rows else "No addresses found.")

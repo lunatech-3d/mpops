@@ -8,6 +8,7 @@ import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.date_utils import format_display_datetime
 from app.security.user_manager import AuthorizationError
 from app.services.jobs_service import JobsService
 from app.ui.job_form import changed_fields, show_job_form
@@ -261,7 +262,7 @@ class OperationsCenter(ttk.Frame):
                 row.get("external_job_id") or "",
                 _client(row),
                 _project(row),
-                row.get("scheduled_start_at") or "",
+                format_display_datetime(row.get("scheduled_start_at")),
                 _technician(row),
                 row.get("job_status") or "",
                 _address(row),
@@ -288,8 +289,10 @@ class OperationsCenter(ttk.Frame):
             self.sort_column, self.sort_reverse = column, False
         items = list(self.tree.get_children())
         index = self.COLUMNS.index(column)
-        items.sort(key=lambda iid: str(self.tree.item(iid, "values")[index]).lower(),
-                   reverse=self.sort_reverse)
+        items.sort(key=lambda iid: (
+            str(self.rows[iid].get("scheduled_start_at") or "") if column == "scheduled"
+            else str(self.tree.item(iid, "values")[index]).lower()
+        ), reverse=self.sort_reverse)
         for position, iid in enumerate(items):
             self.tree.move(iid, "", position)
 
@@ -311,7 +314,7 @@ class OperationsCenter(ttk.Frame):
         lines = [
             f"Client: {_client(job) or '—'}",
             f"Project: {_project(job) or '—'}",
-            f"Scheduled: {job.get('scheduled_start_at') or '—'}",
+            f"Scheduled: {format_display_datetime(job.get('scheduled_start_at'), '—')}",
             f"Technician: {_technician(job)}",
             f"Address: {_address(job) or '—'}",
             "",

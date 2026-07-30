@@ -2,6 +2,7 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.date_utils import display_date_to_iso, format_display_date
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog
 from app.ui.styles import PADDING
 
@@ -29,9 +30,11 @@ def show_address_form(parent, address: dict | None = None) -> dict | None:
     body = ttk.Frame(dialog, padding=PADDING); body.pack()
     labels = (("address_1", "Address 1 *"), ("address_2", "Address 2"),
               ("city", "City *"), ("state", "State *"), ("zip_code", "ZIP Code *"),
-              ("effective_date", "Effective Date (YYYY-MM-DD)"),
-              ("end_date", "End Date (YYYY-MM-DD)"))
-    variables = {name: tk.StringVar(value=(address or {}).get(name) or "") for name, _ in labels}
+              ("effective_date", "Effective Date (MM/DD/YYYY)"),
+              ("end_date", "End Date (MM/DD/YYYY)"))
+    variables = {name: tk.StringVar(value=(format_display_date((address or {}).get(name))
+                                            if name in {"effective_date", "end_date"}
+                                            else (address or {}).get(name) or "")) for name, _ in labels}
     primary = tk.BooleanVar(value=bool((address or {}).get("is_primary", False)))
     first = None
     for row, (name, label) in enumerate(labels):
@@ -47,6 +50,8 @@ def show_address_form(parent, address: dict | None = None) -> dict | None:
         try:
             values = {name: value.get() for name, value in variables.items()}
             values["is_primary"] = primary.get()
+            for field in ("effective_date", "end_date"):
+                values[field] = display_date_to_iso(values[field]) or ""
             result = address_form_data(values)
         except ValueError as exc:
             messagebox.showerror("Invalid address", str(exc), parent=dialog); return

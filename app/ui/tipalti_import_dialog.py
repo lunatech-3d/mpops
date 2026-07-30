@@ -5,6 +5,7 @@ import logging
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.date_utils import format_display_date
 from app.services.tipalti_parser import mark_imported_duplicates, parse_tipalti_text
 from app.ui.payment_helpers import format_cents, import_preview_summary
 from app.ui.styles import PADDING
@@ -64,7 +65,7 @@ class TipaltiImportDialog(tk.Toplevel):
         self.tree.delete(*self.tree.get_children())
         for row in self.result["rows"]:
             self.tree.insert("", "end", values=(row["source_row_number"], row["document_number"], row["document_type"] or "",
-                row["document_date"] or "", row["description_raw"] or "", format_cents(row["amount_received_cents"]), row["status"],
+                format_display_date(row["document_date"]), row["description_raw"] or "", format_cents(row["amount_received_cents"]), row["status"],
                 ("This document number has already been imported and cannot be imported again."
                  if row["status"] == "Duplicate" else row["message"] or "")))
         summary = self.result["summary"]

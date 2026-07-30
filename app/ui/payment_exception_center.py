@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import messagebox, simpledialog, ttk
 from typing import Callable
 
+from app.date_utils import format_display_datetime
 from app.services.payment_service import PaymentService
 from app.ui.payment_helpers import format_cents, parse_currency, visible_exception_tabs
 
@@ -77,12 +78,12 @@ class PaymentExceptionCenter(tk.Toplevel):
                 f"Expected Job Amount: {format_cents(expected) if expected is not None else 'Not available'}",
                 f"Difference: {format_cents(imported - expected) if expected is not None else 'Not available'}",
                 f"Resolved Amount: {format_cents(item.get('resolved_amount_cents')) if item.get('resolved_amount_cents') is not None else 'Not resolved'}",
-                f"Import Date: {item.get('created_at') or ''}", f"Match Notes: {item.get('match_notes') or ''}",
+                f"Import Date: {format_display_datetime(item.get('created_at'))}", f"Match Notes: {item.get('match_notes') or ''}",
                 f"Existing Suggestions: {'See candidates below' if name in {'Missing Jobs', 'Ambiguous Matches'} else 'None'}"]
             if resolution:
                 detail_lines.extend((f"Resolution: Accepted {resolution} Amount",
                     f"Resolved By: {item.get('amount_resolved_by_name') or ''}",
-                    f"Resolved On: {item.get('amount_resolved_at') or ''}"))
+                    f"Resolved On: {format_display_datetime(item.get('amount_resolved_at'))}"))
             details.insert("1.0", "\n".join(detail_lines))
             details.configure(state="disabled")
             if name in {"Missing Jobs", "Ambiguous Matches"}: load_candidates(item)
@@ -94,7 +95,7 @@ class PaymentExceptionCenter(tk.Toplevel):
                 iid = str(candidate["job_id"]); candidate_ids[iid] = candidate["job_id"]
                 candidates.insert("", "end", iid=iid, values=(candidate["job_number"], candidate.get("customer") or "",
                     candidate.get("project_name") or "", candidate.get("property_address") or "",
-                    candidate.get("capture_date") or "", candidate.get("technician") or "",
+                    format_display_datetime(candidate.get("capture_date")), candidate.get("technician") or "",
                     candidate.get("job_status") or ""))
         def search_jobs():
             try: results = self.service.search_jobs_for_payment_exception(search_text.get())
@@ -104,7 +105,7 @@ class PaymentExceptionCenter(tk.Toplevel):
                 iid = str(candidate["job_id"]); candidate_ids[iid] = candidate["job_id"]
                 candidates.insert("", "end", iid=iid, values=(candidate["job_number"],
                     candidate.get("customer") or "", candidate.get("project_name") or "",
-                    candidate.get("property_address") or "", candidate.get("capture_date") or "",
+                    candidate.get("property_address") or "", format_display_datetime(candidate.get("capture_date")),
                     candidate.get("technician") or "", candidate.get("job_status") or ""))
         def clear_search():
             search_text.delete(0, "end")

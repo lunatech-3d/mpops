@@ -4,6 +4,7 @@ import sqlite3
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from app.date_utils import format_display_datetime
 from app.security.user_manager import AuthorizationError
 from app.services.opentable_import_service import OpenTableImportService
 from app.ui.styles import PADDING
@@ -153,7 +154,7 @@ class OpenTableImportWindow(tk.Toplevel):
                 item.get("client_name", ""),
                 item.get("project_name", ""),
                 item.get("job_status", ""),
-                item.get("scheduled_start_at", ""),
+                format_display_datetime(item.get("scheduled_start_at")),
                 item.get("source_row_count", 0),
                 item.get("changed_source_rows", 0),
                 parent_status,

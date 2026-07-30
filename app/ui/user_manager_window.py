@@ -1,6 +1,8 @@
 """Administrator user-management window."""
 import tkinter as tk
 from tkinter import messagebox, ttk
+
+from app.date_utils import format_display_datetime
 from app.security.user_manager import AuthorizationError, UserManager
 from app.ui.password_reset import show_password_reset
 from app.ui.user_form import show_user_form
@@ -37,7 +39,10 @@ def open_user_manager(parent, auth, session):
         active = {"All": None, "Active": True, "Inactive": False}[status.get()]
         for user in manager.list_users(session, search.get(), active):
             tree.insert("", "end", iid=str(user["id"]), values=(user["username"], user["display_name"] or "", user["role"],
-                "Yes" if user["is_active"] else "No", user["created_at"], user["last_login_at"] or "—", user["updated_at"] or "—"))
+                "Yes" if user["is_active"] else "No",
+                format_display_datetime(user["created_at"]),
+                format_display_datetime(user["last_login_at"], "—"),
+                format_display_datetime(user["updated_at"], "—")))
 
     def user_form(user=None):
         values = show_user_form(window, user)

@@ -4,6 +4,8 @@ from decimal import Decimal, InvalidOperation
 import re
 from typing import Any
 
+from app.date_utils import format_display_datetime
+
 NEXT_STATUS = {
     "Draft": "Imported", "Imported": "Needs Review",
     "Needs Review": "Reconciled", "Reconciled": "Approved",
@@ -106,7 +108,7 @@ def workflow_summary(batch_status: str, totals: dict[str, int],
         lines.append("✓ Reconciled")
         if batch:
             lines.extend((f"Reconciled By: {batch.get('reconciled_by_name') or batch.get('reconciled_by') or 'Unknown'}",
-                          f"Reconciled On: {batch.get('reconciled_at') or 'Unknown'}"))
+                          f"Reconciled On: {format_display_datetime(batch.get('reconciled_at'), 'Unknown')}"))
     return lines
 
 
