@@ -7,7 +7,7 @@ from app.config import Settings
 from app.security.auth import AuthService
 from app.security.user_manager import UserManager
 from app.services.jobs_service import JobsService
-from app.ui.job_form import job_form_data
+from app.ui.job_form import job_form_data, technicians_by_first_name
 
 
 class JobTechnicianAssignmentTests(unittest.TestCase):
@@ -99,6 +99,18 @@ class JobTechnicianAssignmentTests(unittest.TestCase):
         })
 
         self.assertEqual(payload["primary_technician_id"], self.active_id)
+
+    def test_job_form_technicians_are_sorted_by_first_name_without_changing_ids(self):
+        technicians = [
+            {"tech_id": 12, "first_name": "Ryan", "last_name": "Young"},
+            {"tech_id": 7, "first_name": "ali", "last_name": "Zulu"},
+            {"tech_id": 3, "first_name": "Ali", "last_name": "Able"},
+        ]
+
+        options = technicians_by_first_name(technicians)
+
+        self.assertEqual([option["tech_id"] for option in options], [3, 7, 12])
+        self.assertEqual([option["tech_id"] for option in technicians], [12, 7, 3])
 
     def test_inactive_technician_cannot_be_newly_assigned_and_job_rolls_back(self):
         with self.assertRaisesRegex(ValueError, "active technicians"):

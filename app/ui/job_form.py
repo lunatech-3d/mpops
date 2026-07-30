@@ -5,6 +5,7 @@ from tkinter import messagebox, ttk
 
 from app.date_utils import display_datetime_to_iso, format_display_datetime
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog
+from app.ui.scrollable_frame import ScrollableFrame
 from app.ui.styles import PADDING
 
 
@@ -20,6 +21,22 @@ STATUS_VALUES = (
     "Requested", "Scheduling", "Scheduled", "Assigned", "In Progress",
     "Completed", "Cancelled", "On Hold",
 )
+
+JOB_FORM_DEFAULT_WIDTH = 700
+JOB_FORM_DEFAULT_HEIGHT = 800
+JOB_FORM_SCREEN_MARGIN = 100
+
+
+def technicians_by_first_name(technicians):
+    """Return UI options alphabetized by first name without changing their IDs."""
+    return sorted(
+        technicians,
+        key=lambda technician: (
+            str(technician.get("first_name") or "").casefold(),
+            str(technician.get("last_name") or "").casefold(),
+            technician.get("tech_id") or 0,
+        ),
+    )
 
 
 def job_form_data(values: dict) -> dict:
@@ -68,11 +85,22 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     dialog = tk.Toplevel(parent)
     dialog.withdraw()
     dialog.title("Edit Job" if job else "Add Job")
-    dialog.geometry("650x650")
+    # Use the full form height when the display permits it, while leaving room
+    # for desktop chrome on smaller displays.  The scrollable content below
+    # keeps every field reachable when the height must be constrained.
+    initial_height = min(
+        JOB_FORM_DEFAULT_HEIGHT,
+        max(580, dialog.winfo_screenheight() - JOB_FORM_SCREEN_MARGIN),
+    )
+    dialog.geometry(f"{JOB_FORM_DEFAULT_WIDTH}x{initial_height}")
     dialog.minsize(600, 580)
 
-    outer = ttk.Frame(dialog, padding=PADDING)
-    outer.pack(fill="both", expand=True)
+    shell = ttk.Frame(dialog)
+    shell.pack(fill="both", expand=True)
+    scrollable = ScrollableFrame(shell)
+    scrollable.pack(fill="both", expand=True)
+    outer = scrollable.content
+    outer.configure(padding=PADDING)
     outer.columnconfigure(1, weight=1)
 
     labels = (
@@ -109,9 +137,10 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     market_var = tk.StringVar(
         value=market_id_to_display.get((job or {}).get("market_id"), "")
     )
+    sorted_technicians = technicians_by_first_name(technicians)
     technician_id_to_display = {
         technician["tech_id"]: f"{technician['first_name']} {technician['last_name']}"
-        for technician in technicians
+        for technician in sorted_technicians
     }
     technician_display_to_id = {
         display: tech_id for tech_id, display in technician_id_to_display.items()
@@ -216,10 +245,12 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
             return
         close_modal(dialog)
 
-    buttons = ttk.Frame(outer)
-    buttons.grid(row=row, column=0, columnspan=2, sticky="e", pady=(12, 0))
-    ttk.Button(buttons, text="Save", command=save).pack(side="left", padx=3)
-    ttk.Button(buttons, text="Cancel", command=cancel).pack(side="left", padx=3)
+    # Keep primary actions outside the scrolling region so they remain visible
+    # at every supported window height.
+    buttons = ttk.Frame(shell, padding=(PADDING, 8, PADDING, PADDING))
+    buttons.pack(fill="x")
+    ttk.Button(buttons, text="Cancel", command=cancel).pack(side="right", padx=3)
+    ttk.Button(buttons, text="Save", command=save).pack(side="right", padx=3)
 
     dialog.bind("<Escape>", cancel)
     dialog.protocol("WM_DELETE_WINDOW", cancel)
