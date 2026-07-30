@@ -653,12 +653,28 @@ class PaymentService:
             return True
 
     def list_payment_items(self, payment_batch_id: int) -> list[dict[str, Any]]:
+        """Return items enriched with typed values used by the batch detail grid."""
         self._positive_id(payment_batch_id, "payment_batch_id")
         with self.auth.connection() as connection:
             self._require_batch(connection, payment_batch_id)
             return [dict(row) for row in connection.execute(
-                "SELECT * FROM MatterportPaymentItems WHERE payment_batch_id = ? "
-                "ORDER BY payment_item_id", (payment_batch_id,)
+                """SELECT i.*, b.payment_date, j.client_name_source AS customer,
+                          COALESCE(j.capture_address_raw,j.address_1,'') AS address,
+                          COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at) AS job_date,
+                          a.tech_id, TRIM(COALESCE(t.preferred_name,t.first_name,'') || ' ' ||
+                               COALESCE(t.last_name,'')) AS technician
+                   FROM MatterportPaymentItems i
+                   JOIN MatterportPaymentBatches b ON b.payment_batch_id=i.payment_batch_id
+                   LEFT JOIN Jobs j ON j.job_id=i.job_id
+                   LEFT JOIN JobAssignments a ON a.job_assignment_id=(
+                     SELECT a2.job_assignment_id FROM JobAssignments a2
+                     WHERE a2.job_id=i.job_id AND a2.assignment_role='Primary'
+                       AND (a2.assignment_status='Completed' OR
+                            (a2.assignment_status='Assigned' AND a2.unassigned_at IS NULL))
+                     ORDER BY CASE WHEN a2.assignment_status='Completed' THEN 0 ELSE 1 END,
+                              a2.job_assignment_id DESC LIMIT 1)
+                   LEFT JOIN Techs t ON t.tech_id=a.tech_id
+                   WHERE i.payment_batch_id=? ORDER BY i.payment_item_id""", (payment_batch_id,)
             )]
 
     @staticmethod

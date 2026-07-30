@@ -1,5 +1,6 @@
 """Pure presentation and workflow helpers for the payment UI."""
 
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 import re
 from typing import Any
@@ -35,6 +36,37 @@ def format_cents(cents: int | None) -> str:
     sign = "-" if value < 0 else ""
     value = abs(value)
     return f"{sign}${value // 100:,}.{value % 100:02d}"
+
+
+def payment_item_sort_key(row, column):
+    """Return a typed sort key instead of sorting formatted grid text."""
+    value = row.get(column)
+    if column == "amount_received_cents":
+        return (value is None, int(value or 0))
+    if column in {"payment_date", "job_date"}:
+        if not value:
+            return (True, datetime.min)
+        try:
+            parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+            return (False, parsed.replace(tzinfo=None))
+        except ValueError:
+            return (False, datetime.min)
+    return (value in (None, ""), str(value or "").casefold())
+
+
+def technician_revenue_subtotals(rows):
+    """Aggregate effective imported revenue by technician."""
+    result = {}
+    for row in rows:
+        name = row.get("technician") or "Unassigned"
+        key = ("tech", row["tech_id"]) if row.get("tech_id") else ("name", name.casefold())
+        bucket = result.setdefault(key, {"technician": name, "job_count": 0,
+                                          "revenue_cents": 0, "tech_id": row.get("tech_id")})
+        bucket["job_count"] += 1
+        bucket["revenue_cents"] += int(row.get("resolved_amount_cents")
+                                       if row.get("resolved_amount_cents") is not None
+                                       else row.get("amount_received_cents") or 0)
+    return sorted(result.values(), key=lambda item: item["technician"].casefold())
 
 
 def parse_currency(text: str) -> int:

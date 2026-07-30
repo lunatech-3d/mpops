@@ -832,3 +832,29 @@ are rebuilt, and require `PRAGMA foreign_key_check` to return no rows.
 Resolved historical issues include lowercase authentication table names,
 `username_key`, PascalCase technician fields, invalid `Users(UserID)` references,
 missing audit storage/indexes, and unenforced primary-address uniqueness.
+
+---
+
+# Technician compensation architecture
+
+Compensation policy is intentionally separated from technician identity and immutable
+calculation results. `Techs.default_pay_percentage` is retained only for schema compatibility; authoritative
+component-aware policy is stored in `TechnicianCompensationRules`.
+
+Each active rule has a scope (`Job`, `Technician`, `Market`, or `System`), a component
+(`Overall`, `Base`, `Travel`, or `Off Hours`), and either a percentage in basis points or
+a flat amount in cents. Resolution is Job override, Technician default, Market default,
+then System default. A component-specific rule wins over an `Overall` rule at the same
+scope. This supports independent CT rate, travel, and off-hours percentages without
+adding financial columns to the technician identity table.
+
+`TechnicianJobEarnings` is the immutable calculation ledger. It snapshots the revenue
+basis, resolved rules, component calculation detail, rounding, and resulting amount so
+later policy changes cannot rewrite history. Manual corrections are new adjustment or
+reversal entries, never edits to a posted calculation.
+
+Future disbursement naturally uses `TechnicianPaymentRuns`, `TechnicianPayments`, and
+the `TechnicianPaymentEarnings` allocation table. Those tables provide payment date,
+method, batch/run, settlement status, confirmation/check/ACH reference, and the exact
+earnings included in a technician payment without conflating customer receipts with
+technician disbursements.

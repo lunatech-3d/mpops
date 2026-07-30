@@ -13,8 +13,11 @@ from app.date_utils import (display_date_to_iso, display_datetime_to_iso,
                             format_display_date, format_display_datetime)
 from app.security.user_manager import AuthorizationError
 from app.services.payment_service import BATCH_STATUSES, PaymentService
+from app.services.compensation_service import CompensationService
 from app.ui.payment_helpers import (format_cents, next_batch_status, parse_currency,
-                                    status_permissions, totals_to_display, workflow_summary)
+                                    payment_item_sort_key, status_permissions,
+                                    technician_revenue_subtotals, totals_to_display,
+                                    workflow_summary)
 from app.ui.payment_exception_center import PaymentExceptionCenter
 from app.ui.styles import PADDING
 from app.ui.scrollable_frame import ScrollableFrame
@@ -144,6 +147,8 @@ class PaymentBatchDetail(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.vars = {field: tk.StringVar() for field in FIELDS if field != "notes"}
         self.status_var = tk.StringVar(value="Draft"); self.total_vars: dict[str, tk.StringVar] = {}
+        self.item_rows: list[dict[str, Any]] = []
+        self.item_sort_column, self.item_sort_descending = "technician", False
         # Keep workflow actions outside the scrolling form so they remain
         # reachable as the window shrinks or more detail sections are added.
         outer = ttk.Frame(self)
@@ -174,14 +179,33 @@ class PaymentBatchDetail(tk.Toplevel):
         self.notes = tk.Text(header, height=3, wrap="word"); self.notes.grid(row=2, column=1, columnspan=7, sticky="ew", pady=4)
         for col in (1, 3, 5, 7): header.columnconfigure(col, weight=1)
         items_frame = ttk.LabelFrame(content, text="Payment Items", padding=6); items_frame.pack(fill="both", expand=True, pady=8)
-        columns = ("document_number", "document_date", "description_raw", "amount", "job", "technician", "match_status", "match_notes")
-        headings = ("Document Number", "Document Date", "Description", "Amount", "Job", "Technician", "Match Status", "Match Notes")
+        columns = ("technician", "address", "customer", "document_number", "amount_received_cents",
+                   "match_status", "payment_date", "job_date")
+        headings = ("Technician", "Address", "Customer", "Invoice Number", "Amount", "Status",
+                    "Payment Date", "Job Date")
         self.items = ttk.Treeview(items_frame, columns=columns, show="headings", selectmode="browse")
-        for key, heading in zip(columns, headings): self.items.heading(key, text=heading); self.items.column(key, width=125, anchor="e" if key == "amount" else "w")
+        self.item_headings = dict(zip(columns, headings))
+        for key, heading in zip(columns, headings):
+            self.items.heading(key, text=heading, command=lambda column=key: self.sort_items(column))
+            self.items.column(key, width=145 if key in {"address", "customer"} else 115,
+                              anchor="e" if key == "amount_received_cents" else "w")
         ybar = ttk.Scrollbar(items_frame, orient="vertical", command=self.items.yview); xbar = ttk.Scrollbar(items_frame, orient="horizontal", command=self.items.xview)
         self.items.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.items.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
         items_frame.rowconfigure(0, weight=1); items_frame.columnconfigure(0, weight=1)
+        compensation = ttk.LabelFrame(content, text="Technician Revenue & Compensation", padding=6)
+        compensation.pack(fill="x", pady=(0, 8))
+        summary_columns = ("technician", "jobs", "revenue", "rate", "payout", "paid", "override")
+        self.technician_summary = ttk.Treeview(compensation, columns=summary_columns,
+                                               show="headings", height=4)
+        for key, heading, width in (("technician", "Technician", 180), ("jobs", "Jobs", 55),
+                                    ("revenue", "Billed", 100), ("rate", "Effective Rate", 105),
+                                    ("payout", "Calculated Payout", 125), ("paid", "Paid?", 70),
+                                    ("override", "Overrides", 85)):
+            self.technician_summary.heading(key, text=heading)
+            self.technician_summary.column(key, width=width,
+                anchor="e" if key in {"jobs", "revenue", "payout"} else "w")
+        self.technician_summary.pack(fill="x")
         totals = ttk.LabelFrame(content, text="Reconciliation", padding=6); totals.pack(fill="x")
         specs = (("Payment Amount", "payment_amount_cents"), ("Imported Total", "imported_total_cents"),
                  ("Difference", "difference_cents"), ("Matched Total", "matched_total_cents"),
@@ -275,18 +299,8 @@ class PaymentBatchDetail(tk.Toplevel):
             elif field == "source_email_received_at": value = format_display_datetime(value)
             var.set(value)
         self.notes.configure(state="normal"); self.notes.delete("1.0", "end"); self.notes.insert("1.0", batch.get("notes") or "")
-        self.status_var.set(batch["batch_status"]); self.items.delete(*self.items.get_children())
-        for item in items:
-            technician = ""; job_id = item.get("job_id")
-            if job_id:
-                result = self.service.get_primary_technician_result(int(job_id))
-                if result["status"] == "Found":
-                    tech = result["technician"]; technician = " ".join(filter(None, (tech.get("first_name"), tech.get("last_name"))))
-                elif result["status"] == "Missing": technician = "No primary technician"
-                else: technician = "Multiple primary technicians"
-            self.items.insert("", "end", values=(item.get("document_number") or "", format_display_date(item.get("document_date")),
-                item.get("description_raw") or "", format_cents(item.get("amount_received_cents")), f"Job #{job_id}" if job_id else "",
-                technician, item.get("match_status") or "", item.get("match_notes") or ""))
+        self.status_var.set(batch["batch_status"]); self.item_rows = items
+        self._render_items(); self._render_technician_summary()
         display = totals_to_display(totals)
         self.workflow_var.set("\n".join(workflow_summary(batch["batch_status"], totals,
                                                          self.reconciliation, batch)))
@@ -299,6 +313,58 @@ class PaymentBatchDetail(tk.Toplevel):
         ) or "No financial history available.")
         for key, var in self.total_vars.items(): var.set(display.get(key, "0"))
         self.snapshot = self._form_values(); self.apply_status_permissions(); self.title(f"Matterport Payment Batch #{self.batch_id}")
+
+    def sort_items(self, column: str) -> None:
+        """Toggle typed sorting while retaining the selected payment item."""
+        self.item_sort_descending = (not self.item_sort_descending
+                                     if column == self.item_sort_column else False)
+        self.item_sort_column = column
+        self._render_items()
+
+    def _render_items(self) -> None:
+        selected = self.items.selection()
+        selected_id = selected[0] if selected else None
+        rows = sorted(self.item_rows,
+                      key=lambda row: payment_item_sort_key(row, self.item_sort_column),
+                      reverse=self.item_sort_descending)
+        self.items.delete(*self.items.get_children())
+        for key, heading in self.item_headings.items():
+            marker = (" ▼" if self.item_sort_descending else " ▲") if key == self.item_sort_column else ""
+            self.items.heading(key, text=heading + marker)
+        for item in rows:
+            iid = f"item-{item['payment_item_id']}"
+            self.items.insert("", "end", iid=iid, values=(item.get("technician") or "Unassigned",
+                item.get("address") or "", item.get("customer") or "", item.get("document_number") or "",
+                format_cents(item.get("amount_received_cents")), item.get("match_status") or "",
+                format_display_date(item.get("payment_date")), format_display_datetime(item.get("job_date"))))
+        if selected_id and self.items.exists(selected_id):
+            self.items.selection_set(selected_id); self.items.see(selected_id)
+
+    def _render_technician_summary(self) -> None:
+        self.technician_summary.delete(*self.technician_summary.get_children())
+        earnings = {}
+        paid_status = {}
+        if self.batch_id and self.batch.get("batch_status") in ("Reconciled", "Approved", "Closed"):
+            compensation = CompensationService(self.service.auth)
+            preview = compensation.preview_technician_earnings(self.batch_id)
+            for posted in compensation.list_technician_earnings(payment_batch_id=self.batch_id):
+                paid_status.setdefault(posted["tech_id"], []).append(posted["earning_status"])
+            for entry in preview["proposed_entries"]:
+                bucket = earnings.setdefault(entry["technician_id"],
+                    {"amount": 0, "rates": set(), "override": False})
+                bucket["amount"] += entry["calculated_amount_cents"]
+                bucket["rates"].add(entry.get("effective_rate_display") or
+                    (f"{entry['rule_value'] / 100:.2f}%" if entry["rule_type"] == "Percentage" else "Flat"))
+                bucket["override"] |= "Override" in entry["rule_source"]
+        for subtotal in technician_revenue_subtotals(self.item_rows):
+            earning = earnings.get(subtotal["tech_id"])
+            statuses = paid_status.get(subtotal["tech_id"], [])
+            paid = "Yes" if statuses and all(status == "Paid" for status in statuses) else (
+                "Pending" if statuses else "No")
+            self.technician_summary.insert("", "end", values=(subtotal["technician"], subtotal["job_count"],
+                format_cents(subtotal["revenue_cents"]), ", ".join(sorted(earning["rates"])) if earning else "Not calculated",
+                format_cents(earning["amount"]) if earning else "—", paid,
+                "Yes" if earning and earning["override"] else "No"))
 
     def _submitted(self) -> dict[str, Any]:
         values = self._form_values()

@@ -75,7 +75,7 @@ class CompensationService:
                 r["assignment_status"] == "Assigned"]
 
     @staticmethod
-    def _rule(connection: sqlite3.Connection, job: sqlite3.Row, tech_id: int):
+    def _rule(connection: sqlite3.Connection, job: sqlite3.Row, tech_id: int, component="Overall"):
         choices = (("Job", job["job_id"], "Job Override"),
                    ("Technician", tech_id, "Technician Default"),
                    ("Market", job["market_id"], "Market Default"),
@@ -85,7 +85,9 @@ class CompensationService:
                 continue
             row = connection.execute(
                 "SELECT * FROM TechnicianCompensationRules WHERE scope_type=? "
-                "AND scope_id IS ? AND is_active=1", (scope, scope_id)).fetchone()
+                "AND scope_id IS ? AND compensation_component IN (?,'Overall') AND is_active=1 "
+                "ORDER BY CASE WHEN compensation_component=? THEN 0 ELSE 1 END LIMIT 1",
+                (scope, scope_id, component, component)).fetchone()
             if row:
                 return row, label
         return None, None
@@ -120,13 +122,37 @@ class CompensationService:
                                "Multiple eligible primary technician assignments found.")
                     exceptions.append({**base, "reason_code": code, "message": message}); continue
                 tech = techs[0]
-                rule, source = self._rule(connection, item, tech["tech_id"])
-                if not rule:
-                    exceptions.append({**base, "reason_code": "NO_COMPENSATION_RULE",
-                                       "message": "No valid compensation rule could be resolved."}); continue
                 revenue = int(item["resolved_amount_cents"] if item["resolved_amount_cents"] is not None
                               else item["amount_received_cents"])
-                amount = self.calculate_amount(revenue, rule["rule_type"], int(rule["rule_value"]))
+                financial = connection.execute("""SELECT
+                    COALESCE(SUM(ct_rate),0), COALESCE(SUM(ct_travel_payout),0),
+                    COALESCE(SUM(ct_off_hours_payout),0)
+                    FROM JobFinancials WHERE job_id=?""", (item["job_id"],)).fetchone()
+                component_revenue = [("Base", int(Decimal(str(financial[0])) * 100)),
+                                     ("Travel", int(Decimal(str(financial[1])) * 100)),
+                                     ("Off Hours", int(Decimal(str(financial[2])) * 100))]
+                # Imported receipts remain the safe basis for older jobs which do not
+                # yet have component financial records.
+                if not any(value for _, value in component_revenue):
+                    component_revenue = [("Overall", revenue)]
+                components, amount, missing_rule = [], 0, None
+                for component, basis in component_revenue:
+                    if not basis:
+                        continue
+                    rule, source = self._rule(connection, item, tech["tech_id"], component)
+                    if not rule:
+                        missing_rule = component; break
+                    calculated = self.calculate_amount(basis, rule["rule_type"], int(rule["rule_value"]))
+                    amount += calculated
+                    components.append({"component": component, "revenue_basis_cents": basis,
+                        "rule_type": rule["rule_type"], "rule_value": int(rule["rule_value"]),
+                        "rule_source": source, "calculated_amount_cents": calculated})
+                if missing_rule:
+                    exceptions.append({**base, "reason_code": "NO_COMPENSATION_RULE",
+                        "message": f"No valid {missing_rule} compensation rule could be resolved."}); continue
+                rule = components[0]
+                sources = {part["rule_source"] for part in components}
+                source = next(iter(sources)) if len(sources) == 1 else "Mixed Component Rules"
                 existing = connection.execute("SELECT technician_earning_id FROM TechnicianJobEarnings "
                     "WHERE payment_item_id=? AND tech_id=? AND entry_type='Calculated' "
                     "AND earning_status<>'Voided'", (item["payment_item_id"], tech["tech_id"])).fetchone()
@@ -135,6 +161,9 @@ class CompensationService:
                     (tech["preferred_name"] or tech["first_name"], tech["last_name"]))),
                     "revenue_basis_cents": revenue, "rule_type": rule["rule_type"],
                     "rule_value": int(rule["rule_value"]), "rule_source": source,
+                    "components": components,
+                    "effective_rate_display": (f"{(Decimal(amount) * 100 / Decimal(revenue)):.2f}%"
+                                               if revenue else "—"),
                     "calculated_amount_cents": amount,
                     "existing_earning_id": int(existing[0]) if existing else None})
         proposed = [e for e in entries if e["existing_earning_id"] is None]
@@ -167,7 +196,8 @@ class CompensationService:
             for entry in new_entries:
                 details = {"revenue_basis_cents": entry["revenue_basis_cents"],
                     "rule_type": entry["rule_type"], "rule_source": entry["rule_source"],
-                    "rounding_method": "ROUND_HALF_UP", "calculated_amount_cents": entry["calculated_amount_cents"]}
+                    "rounding_method": "ROUND_HALF_UP", "components": entry.get("components", []),
+                    "calculated_amount_cents": entry["calculated_amount_cents"]}
                 details["rule_value_basis_points" if entry["rule_type"] == "Percentage" else
                         "rule_value_cents"] = entry["rule_value"]
                 cursor = connection.execute("""INSERT INTO TechnicianJobEarnings
