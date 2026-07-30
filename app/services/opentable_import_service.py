@@ -199,33 +199,6 @@ class OpenTableImportService:
         return "Capture spaces: " + "; ".join(spaces) if spaces else None
 
     @classmethod
-    def _ap_invoice_number(cls, rows: list[dict[str, str]]) -> str | None:
-        """Choose the job's representative invoice without discarding row invoices.
-
-        ``Jobs.ap_invoice_number`` is a compatibility field used by older screens.  A
-        source row is the authoritative home of each invoice reference.  Prefer the
-        payout-bearing (and, secondarily, parent) row for the compatibility value.
-        """
-        def has_payout(row: dict[str, str]) -> bool:
-            return any(cls._money(row.get(field)) != 0 for field in (
-                "CT Rate", "CT Travel Payout", "CT Off Hours Payout",
-            ))
-
-        ordered = sorted(
-            enumerate(rows),
-            key=lambda item: (
-                not has_payout(item[1]),
-                not cls._is_parent(item[1]),
-                item[0],
-            ),
-        )
-        for _, row in ordered:
-            value = cls._text(row.get("AP Invoice Number"))
-            if value:
-                return value
-        return None
-
-    @classmethod
     def _build_job(cls, external_job_id: str, rows: list[dict[str, str]]) -> dict[str, Any]:
         chosen = cls._choose_job_row(rows)
         address_raw = cls._text(chosen.get("Capture Address"))
@@ -237,7 +210,6 @@ class OpenTableImportService:
             cancellation_reason = source_status
         return {
             "external_job_id": external_job_id,
-            "ap_invoice_number": cls._ap_invoice_number(rows),
             "project_name_source": cls._text(chosen.get("Project Name")),
             "client_name_source": cls._text(chosen.get("MP Client.")),
             "job_status": cls._status(chosen.get("Job Status")),
@@ -298,7 +270,7 @@ class OpenTableImportService:
             existing_jobs = {
                 row["external_job_id"].casefold(): row
                 for row in connection.execute(
-                    "SELECT job_id, external_job_id, ap_invoice_number FROM Jobs"
+                    "SELECT job_id, external_job_id FROM Jobs"
                 )
             }
             existing_records = {
@@ -324,12 +296,7 @@ class OpenTableImportService:
                 if existing_records[record_number] != self._source_row_json(row):
                     changed += 1
 
-            invoice_backfill = (
-                existing_job is not None
-                and self._text(existing_job["ap_invoice_number"]) is None
-                and group["job"].get("ap_invoice_number") is not None
-            )
-            if imported == group["source_row_count"] and changed == 0 and not invoice_backfill:
+            if imported == group["source_row_count"] and changed == 0:
                 action = "Skipped"
             elif existing_job is not None:
                 action = "Updated"
@@ -368,14 +335,12 @@ class OpenTableImportService:
             "source_rows_added": 0,
             "source_rows_updated": 0,
             "job_ids": [],
-            "ap_invoice_conflicts": 0,
         }
         with self.auth.connection() as connection:
             for group in preview["groups"]:
                 external_job_id = group["external_job_id"]
                 existing = connection.execute(
-                    "SELECT job_id, ap_invoice_number FROM Jobs "
-                    "WHERE external_job_id = ? COLLATE NOCASE",
+                    "SELECT job_id FROM Jobs WHERE external_job_id = ? COLLATE NOCASE",
                     (external_job_id,),
                 ).fetchone()
                 job_data = group["job"]
@@ -396,25 +361,6 @@ class OpenTableImportService:
                         for field, value in job_data.items()
                         if field != "external_job_id" and value is not None
                     }
-                    imported_invoice = changes.pop("ap_invoice_number", None)
-                    existing_invoice = self._text(existing["ap_invoice_number"])
-                    if imported_invoice and existing_invoice is None:
-                        changes["ap_invoice_number"] = imported_invoice
-                        job_changed = True
-                    elif imported_invoice and imported_invoice != existing_invoice:
-                        result["ap_invoice_conflicts"] += 1
-                        record_event(
-                            connection,
-                            "opentable_ap_invoice_conflict",
-                            actor_user_id=session.user_id,
-                            details={
-                                "job_id": job_id,
-                                "external_job_id": external_job_id,
-                                "existing_ap_invoice_number": existing_invoice,
-                                "imported_ap_invoice_number": imported_invoice,
-                                "file_name": os.path.basename(file_path),
-                            },
-                        )
                     assignments = ",".join(f"{field} = ?" for field in changes)
                     if assignments:
                         connection.execute(
@@ -439,10 +385,6 @@ class OpenTableImportService:
                         self._text(row.get("Floor/Unit/Suite")),
                         int(self._is_parent(row)),
                         self._number(row.get("Capture Size - Requested")),
-                        self._money(row.get("CT Rate")),
-                        self._money(row.get("CT Travel Payout")),
-                        self._money(row.get("CT Off Hours Payout")),
-                        self._text(row.get("AP Invoice Number")),
                         source_json,
                         now,
                         os.path.basename(file_path),
@@ -454,10 +396,9 @@ class OpenTableImportService:
                             INSERT INTO JobSourceRecords (
                                 job_id, source_system, external_record_number,
                                 record_description, is_parent_record, requested_capture_size,
-                                ct_rate, ct_travel_payout, ct_off_hours_payout,
-                                ap_invoice_number, source_row_json, imported_at,
+                                source_row_json, imported_at,
                                 source_file_name, source_row_number, created_at
-                            ) VALUES (?, 'OpenTable', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ) VALUES (?, 'OpenTable', ?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """,
                             (job_id, record_number, *values[1:], now),
                         )
@@ -468,9 +409,8 @@ class OpenTableImportService:
                             """
                             UPDATE JobSourceRecords SET
                                 job_id = ?, record_description = ?, is_parent_record = ?,
-                                requested_capture_size = ?, ct_rate = ?, ct_travel_payout = ?,
-                                ct_off_hours_payout = ?, ap_invoice_number = ?,
-                                source_row_json = ?, imported_at = ?, source_file_name = ?,
+                                requested_capture_size = ?, source_row_json = ?,
+                                imported_at = ?, source_file_name = ?,
                                 source_row_number = ?
                             WHERE job_source_record_id = ?
                             """,
@@ -478,6 +418,37 @@ class OpenTableImportService:
                         )
                         result["source_rows_updated"] += 1
                         changed_for_job += 1
+
+                    source_record_id = int(
+                        connection.execute(
+                            "SELECT job_source_record_id FROM JobSourceRecords "
+                            "WHERE source_system = 'OpenTable' AND external_record_number = ?",
+                            (record_number,),
+                        ).fetchone()["job_source_record_id"]
+                    )
+                    financial_values = (
+                        job_id,
+                        self._text(row.get("AP Invoice Number")),
+                        self._money(row.get("CT Rate")),
+                        self._money(row.get("CT Travel Payout")),
+                        self._money(row.get("CT Off Hours Payout")),
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO JobFinancials (
+                            job_id, job_source_record_id, ap_invoice_number, ct_rate,
+                            ct_travel_payout, ct_off_hours_payout, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(job_source_record_id) DO UPDATE SET
+                            job_id = excluded.job_id,
+                            ap_invoice_number = excluded.ap_invoice_number,
+                            ct_rate = excluded.ct_rate,
+                            ct_travel_payout = excluded.ct_travel_payout,
+                            ct_off_hours_payout = excluded.ct_off_hours_payout,
+                            updated_at = excluded.created_at
+                        """,
+                        (financial_values[0], source_record_id, *financial_values[1:], now),
+                    )
 
                 if changed_for_job == 0 and existing is not None and not job_changed:
                     result["skipped"] += 1
@@ -495,7 +466,6 @@ class OpenTableImportService:
                     "skipped": result["skipped"],
                     "source_rows_added": result["source_rows_added"],
                     "source_rows_updated": result["source_rows_updated"],
-                    "ap_invoice_conflicts": result["ap_invoice_conflicts"],
                 },
             )
         return result

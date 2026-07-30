@@ -15,7 +15,7 @@ from app.security.user_manager import AuthorizationError
 
 
 _JOB_FIELDS = frozenset({
-    "project_id", "market_id", "external_job_id", "ap_invoice_number", "project_name_source", "client_name_source",
+    "project_id", "market_id", "external_job_id", "project_name_source", "client_name_source",
     "job_status", "request_received_at", "scheduled_start_at", "actual_start_at",
     "completed_at", "cancelled_at", "capture_address_raw", "address_1", "address_2",
     "city", "state", "postal_code", "county", "country", "requested_capture_size",
@@ -53,9 +53,9 @@ _JOB_SUMMARY_SELECT = """
         t.first_name AS primary_tech_first_name,
         t.last_name AS primary_tech_last_name,
         COALESCE((
-            SELECT SUM(sr.ct_rate + sr.ct_travel_payout + sr.ct_off_hours_payout)
-            FROM JobSourceRecords sr
-            WHERE sr.job_id = j.job_id
+            SELECT SUM(jf.ct_rate + jf.ct_travel_payout + jf.ct_off_hours_payout)
+            FROM JobFinancials jf
+            WHERE jf.job_id = j.job_id
         ), 0) AS expected_payout
     FROM Jobs j
     LEFT JOIN Markets m ON m.market_id = j.market_id
@@ -364,7 +364,16 @@ class JobsService:
             row = connection.execute(
                 _JOB_SUMMARY_SELECT + " WHERE j.job_id = ?", (job_id,)
             ).fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            job = dict(row)
+            job["financial_records"] = [dict(financial) for financial in connection.execute(
+                "SELECT job_financial_id, ap_invoice_number, ct_rate, "
+                "ct_travel_payout, ct_off_hours_payout FROM JobFinancials "
+                "WHERE job_id = ? ORDER BY job_financial_id",
+                (job_id,),
+            )]
+            return job
 
     def get_job_by_external_id(self, external_job_id: str) -> dict[str, Any] | None:
         external_job_id = self._clean_text(

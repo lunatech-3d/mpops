@@ -111,11 +111,14 @@ class OpenTableImportServiceTests(unittest.TestCase):
         with self.auth.connection() as connection:
             job = connection.execute("SELECT * FROM Jobs WHERE external_job_id = 'JOB-1'").fetchone()
             records = connection.execute(
-                "SELECT * FROM JobSourceRecords WHERE job_id = ? ORDER BY external_record_number",
+                "SELECT sr.*, jf.ap_invoice_number, jf.ct_rate, jf.ct_travel_payout, "
+                "jf.ct_off_hours_payout FROM JobSourceRecords sr "
+                "JOIN JobFinancials jf ON jf.job_source_record_id = sr.job_source_record_id "
+                "WHERE sr.job_id = ? ORDER BY sr.external_record_number",
                 (job["job_id"],),
             ).fetchall()
         self.assertEqual(job["job_status"], "Scheduled")
-        self.assertEqual(job["ap_invoice_number"], "INV-100")
+        self.assertNotIn("ap_invoice_number", job.keys())
         self.assertEqual(len(records), 2)
         self.assertEqual(records[0]["is_parent_record"], 1)
         self.assertAlmostEqual(records[0]["ct_rate"], 200.80)
@@ -154,7 +157,7 @@ class OpenTableImportServiceTests(unittest.TestCase):
         self.service.import_csv(self.session, str(self.csv_path))
 
         with self.auth.connection() as connection:
-            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+            job = connection.execute("SELECT ap_invoice_number FROM JobFinancials").fetchone()
         self.assertIsNone(job["ap_invoice_number"])
 
     def test_reimport_backfills_job_invoice_from_non_parent_source_row(self):
@@ -167,18 +170,21 @@ class OpenTableImportServiceTests(unittest.TestCase):
         # source rows already match the CSV, so only the job-level backfill needs an update.
         self.service.import_csv(self.session, str(self.csv_path))
         with self.auth.connection() as connection:
-            connection.execute("UPDATE Jobs SET ap_invoice_number = NULL")
+            connection.execute("UPDATE JobFinancials SET ap_invoice_number = NULL")
 
         preview = self.service.preview(str(self.csv_path))
         result = self.service.import_csv(self.session, str(self.csv_path))
 
-        self.assertEqual(groups[0]["job"]["ap_invoice_number"], "AP-child-record")
-        self.assertEqual(preview["counts"], {"updated": 1})
-        self.assertEqual(result["updated"], 1)
-        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(groups[0]["source_rows"][1]["AP Invoice Number"], "AP-child-record")
+        self.assertEqual(preview["counts"], {"skipped": 1})
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(result["skipped"], 1)
         self.assertEqual(result["source_rows_updated"], 0)
         with self.auth.connection() as connection:
-            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+            job = connection.execute(
+                "SELECT ap_invoice_number FROM JobFinancials "
+                "WHERE ap_invoice_number IS NOT NULL"
+            ).fetchone()
         self.assertEqual(job["ap_invoice_number"], "AP-child-record")
 
     def test_duplicate_job_prefers_parent_payout_invoice_and_preserves_zero_row(self):
@@ -198,11 +204,12 @@ class OpenTableImportServiceTests(unittest.TestCase):
         with self.auth.connection() as connection:
             job = connection.execute("SELECT * FROM Jobs").fetchone()
             records = connection.execute(
-                "SELECT record_description, ct_rate, ct_travel_payout, "
-                "ct_off_hours_payout, ap_invoice_number FROM JobSourceRecords "
-                "ORDER BY external_record_number"
+                "SELECT sr.record_description, jf.ct_rate, jf.ct_travel_payout, "
+                "jf.ct_off_hours_payout, jf.ap_invoice_number FROM JobSourceRecords sr "
+                "JOIN JobFinancials jf ON jf.job_source_record_id = sr.job_source_record_id "
+                "ORDER BY sr.external_record_number"
             ).fetchall()
-        self.assertEqual(job["ap_invoice_number"], "AP-rec862qmpezHT0y6K")
+        self.assertNotIn("ap_invoice_number", job.keys())
         self.assertEqual([tuple(row) for row in records], [
             ("LensCrafters", 0, 0, 0, "AP-recEHBEkre6fJnsqX"),
             ("Parent Record", 200.8, 10.25, 5.5, "AP-rec862qmpezHT0y6K"),
@@ -223,9 +230,8 @@ class OpenTableImportServiceTests(unittest.TestCase):
         result = self.service.import_csv(self.session, str(self.csv_path))
 
         self.assertEqual(result["skipped"], 1)
-        self.assertEqual(result["ap_invoice_conflicts"], 0)
         with self.auth.connection() as connection:
-            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+            job = connection.execute("SELECT ap_invoice_number FROM JobFinancials").fetchone()
         self.assertEqual(job["ap_invoice_number"], "AP-rec1ZrtnPyo5sE9a5")
 
     def test_changed_invoice_is_logged_and_does_not_overwrite_job(self):
@@ -237,16 +243,12 @@ class OpenTableImportServiceTests(unittest.TestCase):
 
         result = self.service.import_csv(self.session, str(self.csv_path))
 
-        self.assertEqual(result["ap_invoice_conflicts"], 1)
+        self.assertEqual(result["source_rows_updated"], 1)
         with self.auth.connection() as connection:
-            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
-            event = connection.execute(
-                "SELECT details_json FROM AuditLog "
-                "WHERE action = 'opentable_ap_invoice_conflict'"
+            financial = connection.execute(
+                "SELECT ap_invoice_number FROM JobFinancials"
             ).fetchone()
-        self.assertEqual(job["ap_invoice_number"], "AP-original")
-        self.assertEqual(json.loads(event["details_json"])["imported_ap_invoice_number"],
-                         "AP-changed")
+        self.assertEqual(financial["ap_invoice_number"], "AP-changed")
 
     def test_invoice_number_whitespace_is_trimmed(self):
         self.write_rows([source_row("1001", "JOB-1", "Parent Record",
@@ -255,16 +257,15 @@ class OpenTableImportServiceTests(unittest.TestCase):
         self.service.import_csv(self.session, str(self.csv_path))
 
         with self.auth.connection() as connection:
-            job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
+            job = connection.execute("SELECT ap_invoice_number FROM JobFinancials").fetchone()
         self.assertEqual(job["ap_invoice_number"], "AP-rec1ZrtnPyo5sE9a5")
 
-    def test_job_validation_accepts_and_normalizes_invoice_number(self):
-        clean = JobsService._clean_job(
-            {"external_job_id": "JOB-1", "ap_invoice_number": "  AP-rec1  "},
-            creating=True,
-        )
-
-        self.assertEqual(clean["ap_invoice_number"], "AP-rec1")
+    def test_job_validation_rejects_financial_fields(self):
+        with self.assertRaisesRegex(ValueError, "ap_invoice_number"):
+            JobsService._clean_job(
+                {"external_job_id": "JOB-1", "ap_invoice_number": "AP-rec1"},
+                creating=True,
+            )
 
     def test_existing_job_receives_only_new_source_record(self):
         self.write_rows([source_row("1001", "JOB-1", "Parent Record", rate="200.80")])
@@ -305,7 +306,9 @@ class OpenTableImportServiceTests(unittest.TestCase):
         self.assertEqual(result["source_rows_updated"], 1)
         with self.auth.connection() as connection:
             record = connection.execute(
-                "SELECT * FROM JobSourceRecords WHERE external_record_number = '1001'"
+                "SELECT sr.*, jf.ct_rate FROM JobSourceRecords sr "
+                "JOIN JobFinancials jf ON jf.job_source_record_id = sr.job_source_record_id "
+                "WHERE sr.external_record_number = '1001'"
             ).fetchone()
         self.assertAlmostEqual(record["ct_rate"], 225.50)
         self.assertEqual(record["requested_capture_size"], 5500.0)

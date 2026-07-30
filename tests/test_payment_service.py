@@ -41,11 +41,15 @@ class PaymentServiceTests(unittest.TestCase):
 
     def create_job(self, external_id):
         with self.auth.connection() as connection:
-            return int(connection.execute(
-                "INSERT INTO Jobs (external_job_id, ap_invoice_number, created_by) "
-                "VALUES (?, ?, ?)",
-                (external_id, external_id, self.session.user_id),
+            job_id = int(connection.execute(
+                "INSERT INTO Jobs (external_job_id, created_by) VALUES (?, ?)",
+                (external_id, self.session.user_id),
             ).lastrowid)
+            connection.execute(
+                "INSERT INTO JobFinancials (job_id, ap_invoice_number) VALUES (?, ?)",
+                (job_id, external_id),
+            )
+            return job_id
 
     def test_fresh_batch_creation_retrieval_and_listing(self):
         batch_id = self.create_batch()
@@ -398,10 +402,14 @@ class PaymentServiceTests(unittest.TestCase):
             connection.execute("ALTER TABLE Jobs RENAME TO Jobs_unique")
             connection.execute("CREATE TABLE Jobs AS SELECT * FROM Jobs_unique")
             second = int(connection.execute(
-                "INSERT INTO Jobs (job_id, external_job_id, ap_invoice_number, created_by) "
-                "VALUES (?, ?, ?, ?)",
-                (first + 1, "other-job", "DUP-JOB", self.session.user_id),
+                "INSERT INTO Jobs (job_id, external_job_id, created_by) "
+                "VALUES (?, ?, ?)",
+                (first + 1, "other-job", self.session.user_id),
             ).lastrowid)
+            connection.execute(
+                "INSERT INTO JobFinancials (job_id, ap_invoice_number) VALUES (?, ?)",
+                (second, "DUP-JOB"),
+            )
         self.add_item(batch_id, "DUP-JOB", 100)
         summary = self.service.match_payment_items(self.session, batch_id)
         self.assertEqual(summary, {"matched_count": 0, "missing_job_count": 0,
@@ -421,10 +429,13 @@ class PaymentServiceTests(unittest.TestCase):
         batch_id = self.create_batch(100)
         with self.auth.connection() as connection:
             job_id = int(connection.execute(
-                "INSERT INTO Jobs (external_job_id, ap_invoice_number, created_by) "
-                "VALUES (?, ?, ?)",
-                ("UNRELATED-JOB-ID", "AP-rec1ZrtnPyo5sE9a5", self.session.user_id),
+                "INSERT INTO Jobs (external_job_id, created_by) VALUES (?, ?)",
+                ("UNRELATED-JOB-ID", self.session.user_id),
             ).lastrowid)
+            connection.execute(
+                "INSERT INTO JobFinancials (job_id, ap_invoice_number) VALUES (?, ?)",
+                (job_id, "AP-rec1ZrtnPyo5sE9a5"),
+            )
         self.add_item(batch_id, "AP-rec1ZrtnPyo5sE9a5", 100)
 
         with self.assertLogs("app.services.payment_service", level="INFO") as logs:
@@ -442,14 +453,12 @@ class PaymentServiceTests(unittest.TestCase):
         batch_id = self.create_batch(100)
         with self.auth.connection() as connection:
             job_id = int(connection.execute(
-                "INSERT INTO Jobs (external_job_id, ap_invoice_number, created_by) "
-                "VALUES (?, ?, ?)", ("JOB-MULTI", "AP-parent", self.session.user_id)
+                "INSERT INTO Jobs (external_job_id, created_by) VALUES (?, ?)",
+                ("JOB-MULTI", self.session.user_id),
             ).lastrowid)
-            connection.execute(
-                "INSERT INTO JobSourceRecords "
-                "(job_id, external_record_number, record_description, ap_invoice_number) "
-                "VALUES (?, ?, ?, ?)",
-                (job_id, "child-1", "LensCrafters", "AP-child"),
+            connection.executemany(
+                "INSERT INTO JobFinancials (job_id, ap_invoice_number) VALUES (?, ?)",
+                ((job_id, "AP-parent"), (job_id, "AP-child")),
             )
         self.add_item(batch_id, "AP-child", 100)
 
@@ -461,10 +470,13 @@ class PaymentServiceTests(unittest.TestCase):
     def test_matching_does_not_fall_back_to_external_job_id(self):
         batch_id = self.create_batch(100)
         with self.auth.connection() as connection:
+            job_id = connection.execute(
+                "INSERT INTO Jobs (external_job_id, created_by) VALUES (?, ?)",
+                ("AP-external-only", self.session.user_id),
+            ).lastrowid
             connection.execute(
-                "INSERT INTO Jobs (external_job_id, ap_invoice_number, created_by) "
-                "VALUES (?, ?, ?)",
-                ("AP-external-only", "AP-different", self.session.user_id),
+                "INSERT INTO JobFinancials (job_id, ap_invoice_number) VALUES (?, ?)",
+                (job_id, "AP-different"),
             )
         self.add_item(batch_id, "AP-external-only", 100)
 

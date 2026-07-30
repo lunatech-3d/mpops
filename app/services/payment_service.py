@@ -21,15 +21,8 @@ from app.security.user_manager import AuthorizationError
 LOGGER = logging.getLogger(__name__)
 _AP_INVOICE_LOOKUP_SQL = """
     SELECT job_id, MIN(ap_invoice_number) AS ap_invoice_number
-    FROM (
-        SELECT job_id, ap_invoice_number
-        FROM Jobs
-        WHERE ap_invoice_number = ?
-        UNION ALL
-        SELECT job_id, ap_invoice_number
-        FROM JobSourceRecords
-        WHERE source_system = 'OpenTable' AND ap_invoice_number = ?
-    ) invoice_matches
+    FROM JobFinancials
+    WHERE ap_invoice_number = ? COLLATE NOCASE
     GROUP BY job_id
 """
 
@@ -916,7 +909,7 @@ class PaymentService:
                 # not introduce fuzzy matching or transform the deterministic key.
                 lookup_value = item["document_number"]
                 jobs = connection.execute(
-                    _AP_INVOICE_LOOKUP_SQL, (lookup_value, lookup_value)
+                    _AP_INVOICE_LOOKUP_SQL, (lookup_value,)
                 ).fetchall()
                 LOGGER.info(
                     "Payment match diagnostic | Invoice Number: %r | Lookup Value: %r | "

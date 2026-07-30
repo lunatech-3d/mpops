@@ -431,7 +431,11 @@ class JobDetails:
         sections = (
             ("Identifiers", (
                 ("External Job ID", job.get("external_job_id")),
-                ("AP Invoice Number", job.get("ap_invoice_number")),
+                ("AP Invoice Number", ", ".join(
+                    record["ap_invoice_number"]
+                    for record in job.get("financial_records", [])
+                    if record.get("ap_invoice_number")
+                )),
             )),
             ("Project", (
                 ("Project Code", job.get("project_code")),
@@ -477,6 +481,31 @@ class JobDetails:
                 ).pack(anchor="w", pady=1)
         grid.columnconfigure(0, weight=1)
         grid.columnconfigure(1, weight=1)
+
+        financial_frame = ttk.LabelFrame(body, text="Financial Information", padding=8)
+        financial_frame.pack(fill="x", padx=4, pady=(8, 4))
+        financial_grid = ttk.Treeview(
+            financial_frame,
+            columns=("invoice", "rate", "travel", "off_hours"),
+            show="headings",
+            height=min(max(len(job.get("financial_records", [])), 1), 5),
+        )
+        for column, heading, width in (
+            ("invoice", "AP Invoice Number", 180),
+            ("rate", "CT Rate", 110),
+            ("travel", "CT Travel Payout", 130),
+            ("off_hours", "CT Off Hours Payout", 145),
+        ):
+            financial_grid.heading(column, text=heading)
+            financial_grid.column(column, width=width, anchor="w" if column == "invoice" else "e")
+        for record in job.get("financial_records", []):
+            financial_grid.insert("", "end", values=(
+                record.get("ap_invoice_number") or "—",
+                format_currency(record.get("ct_rate")),
+                format_currency(record.get("ct_travel_payout")),
+                format_currency(record.get("ct_off_hours_payout")),
+            ))
+        financial_grid.pack(fill="x")
 
         notes_frame = ttk.LabelFrame(body, text="Internal Notes", padding=8)
         notes_frame.pack(fill="both", expand=True, padx=4, pady=(8, 4))

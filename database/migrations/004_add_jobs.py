@@ -107,9 +107,6 @@ def migrate(connection):
 
         CREATE INDEX IF NOT EXISTS idx_JobSourceRecords_job_id
             ON JobSourceRecords(job_id);
-        CREATE INDEX IF NOT EXISTS idx_JobSourceRecords_ap_invoice
-            ON JobSourceRecords(ap_invoice_number);
-
         CREATE TABLE IF NOT EXISTS JobAssignments (
             job_assignment_id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id INTEGER NOT NULL,

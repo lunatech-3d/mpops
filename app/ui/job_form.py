@@ -76,6 +76,7 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
 
     labels = (
         ("external_job_id", "External Job ID *"),
+        ("ap_invoice_number", "AP Invoice Number"),
         ("market_id", "Market"),
         (PRIMARY_TECHNICIAN_FIELD, "Technician"),
         ("client_name_source", "Client"),
@@ -120,7 +121,17 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     row = 0
     for name, label in labels:
         ttk.Label(outer, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
-        if name == "market_id":
+        if name == "ap_invoice_number":
+            invoices = ", ".join(
+                record["ap_invoice_number"]
+                for record in (job or {}).get("financial_records", [])
+                if record.get("ap_invoice_number")
+            )
+            entry = ttk.Entry(outer, state="readonly")
+            entry.configure(state="normal")
+            entry.insert(0, invoices)
+            entry.configure(state="readonly")
+        elif name == "market_id":
             entry = ttk.Combobox(
                 outer,
                 textvariable=market_var,
@@ -148,6 +159,31 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     if not variables["job_status"].get():
         variables["job_status"].set("Requested")
     row += 1
+
+    if job is not None:
+        financial_frame = ttk.LabelFrame(outer, text="Financial Information", padding=6)
+        financial_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+        financial_grid = ttk.Treeview(
+            financial_frame,
+            columns=("rate", "travel", "off_hours"),
+            show="headings",
+            height=min(max(len(job.get("financial_records", [])), 1), 4),
+        )
+        for column, heading in (
+            ("rate", "CT Rate"),
+            ("travel", "CT Travel Payout"),
+            ("off_hours", "CT Off Hours Payout"),
+        ):
+            financial_grid.heading(column, text=heading)
+            financial_grid.column(column, width=160, anchor="e")
+        for record in job.get("financial_records", []):
+            financial_grid.insert("", "end", values=(
+                record.get("ct_rate") or 0,
+                record.get("ct_travel_payout") or 0,
+                record.get("ct_off_hours_payout") or 0,
+            ))
+        financial_grid.pack(fill="x")
+        row += 1
 
     ttk.Label(outer, text="Internal Notes").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=4)
     notes = tk.Text(outer, height=8, wrap="word")
