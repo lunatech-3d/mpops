@@ -200,8 +200,26 @@ class OpenTableImportService:
 
     @classmethod
     def _ap_invoice_number(cls, rows: list[dict[str, str]]) -> str | None:
-        """Return the first populated invoice reference from a job's source rows."""
-        for row in rows:
+        """Choose the job's representative invoice without discarding row invoices.
+
+        ``Jobs.ap_invoice_number`` is a compatibility field used by older screens.  A
+        source row is the authoritative home of each invoice reference.  Prefer the
+        payout-bearing (and, secondarily, parent) row for the compatibility value.
+        """
+        def has_payout(row: dict[str, str]) -> bool:
+            return any(cls._money(row.get(field)) != 0 for field in (
+                "CT Rate", "CT Travel Payout", "CT Off Hours Payout",
+            ))
+
+        ordered = sorted(
+            enumerate(rows),
+            key=lambda item: (
+                not has_payout(item[1]),
+                not cls._is_parent(item[1]),
+                item[0],
+            ),
+        )
+        for _, row in ordered:
             value = cls._text(row.get("AP Invoice Number"))
             if value:
                 return value

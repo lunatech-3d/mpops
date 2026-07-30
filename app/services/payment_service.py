@@ -19,7 +19,19 @@ from app.security.user_manager import AuthorizationError
 
 
 LOGGER = logging.getLogger(__name__)
-_AP_INVOICE_LOOKUP_SQL = "SELECT job_id, ap_invoice_number FROM Jobs WHERE ap_invoice_number = ?"
+_AP_INVOICE_LOOKUP_SQL = """
+    SELECT job_id, MIN(ap_invoice_number) AS ap_invoice_number
+    FROM (
+        SELECT job_id, ap_invoice_number
+        FROM Jobs
+        WHERE ap_invoice_number = ?
+        UNION ALL
+        SELECT job_id, ap_invoice_number
+        FROM JobSourceRecords
+        WHERE source_system = 'OpenTable' AND ap_invoice_number = ?
+    ) invoice_matches
+    GROUP BY job_id
+"""
 
 BATCH_STATUSES = (
     "Draft", "Imported", "Needs Review", "Reconciled", "Approved", "Closed", "Cancelled"
@@ -887,7 +899,7 @@ class PaymentService:
             return dict(self._require_item(connection, payment_item_id))
 
     def match_payment_items(self, session: Session, payment_batch_id: int) -> dict[str, int]:
-        """Match each imported invoice number to ``Jobs.ap_invoice_number`` atomically."""
+        """Match invoice numbers to job or preserved source-row invoices atomically."""
         self._require_operator(session)
         self._positive_id(payment_batch_id, "payment_batch_id")
         matched = missing = ambiguous = 0
@@ -903,7 +915,9 @@ class PaymentService:
                 # Both importers trim these values at ingestion, so deliberately do
                 # not introduce fuzzy matching or transform the deterministic key.
                 lookup_value = item["document_number"]
-                jobs = connection.execute(_AP_INVOICE_LOOKUP_SQL, (lookup_value,)).fetchall()
+                jobs = connection.execute(
+                    _AP_INVOICE_LOOKUP_SQL, (lookup_value, lookup_value)
+                ).fetchall()
                 LOGGER.info(
                     "Payment match diagnostic | Invoice Number: %r | Lookup Value: %r | "
                     "SQL: %s | Matching Job Found: %s | Matching Job Value(s): %r",

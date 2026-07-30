@@ -438,6 +438,26 @@ class PaymentServiceTests(unittest.TestCase):
         self.assertIn("Matching Job Found: Yes", diagnostic)
         self.assertIn("Matching Job Value(s): ['AP-rec1ZrtnPyo5sE9a5']", diagnostic)
 
+    def test_matching_uses_invoice_preserved_on_duplicate_job_source_row(self):
+        batch_id = self.create_batch(100)
+        with self.auth.connection() as connection:
+            job_id = int(connection.execute(
+                "INSERT INTO Jobs (external_job_id, ap_invoice_number, created_by) "
+                "VALUES (?, ?, ?)", ("JOB-MULTI", "AP-parent", self.session.user_id)
+            ).lastrowid)
+            connection.execute(
+                "INSERT INTO JobSourceRecords "
+                "(job_id, external_record_number, record_description, ap_invoice_number) "
+                "VALUES (?, ?, ?, ?)",
+                (job_id, "child-1", "LensCrafters", "AP-child"),
+            )
+        self.add_item(batch_id, "AP-child", 100)
+
+        result = self.service.match_payment_items(self.session, batch_id)
+
+        self.assertEqual(result["matched_count"], 1)
+        self.assertEqual(self.service.list_payment_items(batch_id)[0]["job_id"], job_id)
+
     def test_matching_does_not_fall_back_to_external_job_id(self):
         batch_id = self.create_batch(100)
         with self.auth.connection() as connection:

@@ -164,11 +164,7 @@ class OpenTableImportServiceTests(unittest.TestCase):
         groups = self.service.read_csv(str(self.csv_path))
 
         # Reproduce a job imported before AP invoice numbers were mapped. Its preserved
-<<<<<<< ours
-        # source rows already match the CSV, so source-row change detection reports no change.
-=======
         # source rows already match the CSV, so only the job-level backfill needs an update.
->>>>>>> theirs
         self.service.import_csv(self.session, str(self.csv_path))
         with self.auth.connection() as connection:
             connection.execute("UPDATE Jobs SET ap_invoice_number = NULL")
@@ -177,17 +173,40 @@ class OpenTableImportServiceTests(unittest.TestCase):
         result = self.service.import_csv(self.session, str(self.csv_path))
 
         self.assertEqual(groups[0]["job"]["ap_invoice_number"], "AP-child-record")
-<<<<<<< ours
-        self.assertEqual(preview["counts"], {"skipped": 1})
-=======
         self.assertEqual(preview["counts"], {"updated": 1})
         self.assertEqual(result["updated"], 1)
         self.assertEqual(result["skipped"], 0)
->>>>>>> theirs
         self.assertEqual(result["source_rows_updated"], 0)
         with self.auth.connection() as connection:
             job = connection.execute("SELECT ap_invoice_number FROM Jobs").fetchone()
         self.assertEqual(job["ap_invoice_number"], "AP-child-record")
+
+    def test_duplicate_job_prefers_parent_payout_invoice_and_preserves_zero_row(self):
+        zero_row = source_row(
+            "1001", "JobID6595104381421649357", "LensCrafters",
+            rate="0.00", invoice="AP-recEHBEkre6fJnsqX",
+        )
+        parent = source_row(
+            "1002", "JobID6595104381421649357", "Parent Record",
+            rate="200.80", invoice="AP-rec862qmpezHT0y6K",
+        )
+        self.write_rows([zero_row, parent])
+
+        result = self.service.import_csv(self.session, str(self.csv_path))
+
+        self.assertEqual((result["created"], result["source_rows_added"]), (1, 2))
+        with self.auth.connection() as connection:
+            job = connection.execute("SELECT * FROM Jobs").fetchone()
+            records = connection.execute(
+                "SELECT record_description, ct_rate, ct_travel_payout, "
+                "ct_off_hours_payout, ap_invoice_number FROM JobSourceRecords "
+                "ORDER BY external_record_number"
+            ).fetchall()
+        self.assertEqual(job["ap_invoice_number"], "AP-rec862qmpezHT0y6K")
+        self.assertEqual([tuple(row) for row in records], [
+            ("LensCrafters", 0, 0, 0, "AP-recEHBEkre6fJnsqX"),
+            ("Parent Record", 200.8, 10.25, 5.5, "AP-rec862qmpezHT0y6K"),
+        ])
 
     def test_missing_invoice_column_is_rejected(self):
         columns = [column for column in COLUMNS if column != "AP Invoice Number"]
