@@ -1,4 +1,4 @@
-"""Main Matterport Ops application shell."""
+"""Main LunaTech 3D Ops application shell."""
 from tkinter import messagebox, ttk
 from app.security.auth import Session
 from app.ui.dashboard import build_dashboard
@@ -18,10 +18,13 @@ class MainWindow:
         # repeated login/logout cycles.
         for child in root.winfo_children():
             child.destroy()
-        root.title("Matterport Ops"); root.geometry("1100x700"); root.minsize(850, 550); root.deiconify()
+        # The Jobs grid needs enough room for all ten columns alongside the
+        # navigation rail.  Keep the existing column widths and give the
+        # expanding content area an appropriately sized initial window.
+        root.title("LunaTech 3D Ops"); root.geometry("1500x800"); root.minsize(1200, 650); root.deiconify()
         self.secondary_windows = []
         header=ttk.Frame(root,padding=PADDING);header.pack(fill="x")
-        ttk.Label(header,text="Matterport Ops",style="Header.TLabel").pack(side="left")
+        ttk.Label(header,text="LunaTech 3D Ops",style="Header.TLabel").pack(side="left")
         ttk.Label(header,text=f"Signed in as: {session.display_name or session.username} | Role: {session.role.title()}").pack(side="right")
         body=ttk.Frame(root);body.pack(fill="both",expand=True)
         nav=ttk.Frame(body,padding=PADDING);nav.pack(side="left",fill="y")

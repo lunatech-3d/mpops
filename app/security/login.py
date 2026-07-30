@@ -9,10 +9,10 @@ from app.ui.dialog_utils import close_modal, prepare_modal_dialog
 def show_login(root: tk.Tk, auth: AuthService | None = None) -> Session | None:
     auth = auth or AuthService()
     result = None
-    dialog = tk.Toplevel(root); dialog.title("Matterport Ops Login"); dialog.resizable(False, False)
+    dialog = tk.Toplevel(root); dialog.title("LunaTech 3D Ops Login"); dialog.resizable(False, False)
     frame=ttk.Frame(dialog,padding=PADDING*2);frame.pack()
     username,password=tk.StringVar(),tk.StringVar()
-    ttk.Label(frame,text="Matterport Ops",style="Header.TLabel").grid(row=0,column=0,sticky="w",pady=(0,12))
+    ttk.Label(frame,text="LunaTech 3D Ops",style="Header.TLabel").grid(row=0,column=0,sticky="w",pady=(0,12))
     ttk.Label(frame,text="Username").grid(row=1,column=0,sticky="w"); user_entry=ttk.Entry(frame,textvariable=username,width=32);user_entry.grid(row=2,column=0,pady=(2,10))
     ttk.Label(frame,text="Password").grid(row=3,column=0,sticky="w");ttk.Entry(frame,textvariable=password,width=32,show="•").grid(row=4,column=0,pady=(2,14))
     def submit():
@@ -33,7 +33,7 @@ def show_login(root: tk.Tk, auth: AuthService | None = None) -> Session | None:
 
 def main():
     root=tk.Tk();root.withdraw();session=show_login(root)
-    if session: messagebox.showinfo("Matterport Ops",f"Authenticated as {session.username}.",parent=root)
+    if session: messagebox.showinfo("LunaTech 3D Ops",f"Authenticated as {session.username}.",parent=root)
     root.destroy()
 
 if __name__ == "__main__": main()

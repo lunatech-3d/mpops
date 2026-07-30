@@ -11,7 +11,7 @@ from app.ui.styles import PADDING
 def show_initial_admin_dialog(root: tk.Tk, manager: UserManager) -> bool:
     created = False
     dialog = tk.Toplevel(root)
-    dialog.title("Matterport Ops — Create Initial Administrator")
+    dialog.title("LunaTech 3D Ops — Create Initial Administrator")
     dialog.resizable(False, False)
     body = ttk.Frame(dialog, padding=PADDING * 2); body.pack()
     ttk.Label(body, text="Create Initial Administrator", style="Header.TLabel").grid(row=0, columnspan=2, sticky="w", pady=(0, 12))
@@ -31,7 +31,7 @@ def show_initial_admin_dialog(root: tk.Tk, manager: UserManager) -> bool:
         except (ValueError, AuthorizationError, sqlite3.Error) as exc:
             messagebox.showerror("Unable to create administrator", str(exc), parent=dialog); return
         created = True
-        messagebox.showinfo("Matterport Ops", "The initial administrator was created successfully.", parent=dialog)
+        messagebox.showinfo("LunaTech 3D Ops", "The initial administrator was created successfully.", parent=dialog)
         close_modal(dialog)
     buttons = ttk.Frame(body); buttons.grid(row=5, columnspan=2, sticky="e", pady=(12, 0))
     ttk.Button(buttons, text="Create", command=save).pack(side="left", padx=3)

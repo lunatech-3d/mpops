@@ -27,7 +27,7 @@ def launch(auth: AuthService | None = None) -> None:
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror(
-            "Matterport Ops",
+            "LunaTech 3D Ops",
             "The database could not be initialized.\n\n"
             f"{type(error).__name__}: {error}\n\n"
             "Run 'python -m app.verify_database' for database diagnostics.",

@@ -15,7 +15,7 @@ def open_user_manager(parent, auth, session):
         return None
     manager = UserManager(auth)
     window = tk.Toplevel(parent)
-    window.title("Matterport Ops — Users")
+    window.title("LunaTech 3D Ops — Users")
     window.geometry("980x520")
     controls = ttk.Frame(window, padding=PADDING); controls.pack(fill="x")
     search, status = tk.StringVar(), tk.StringVar(value="All")
