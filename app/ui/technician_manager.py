@@ -54,6 +54,8 @@ class TechnicianController:
 class TechnicianManager(ttk.Frame):
     COLUMNS = ("first_name", "last_name", "status", "email", "mobile_phone")
     HEADINGS = ("First Name", "Last Name", "Status", "Primary Email", "Mobile Phone")
+    DEFAULT_SORT_COLUMN = "first_name"
+    DEFAULT_SORT_DESCENDING = False
 
     def __init__(self, parent, auth, session, service=None):
         super().__init__(parent, padding=PADDING, style="App.TFrame")
@@ -63,8 +65,8 @@ class TechnicianManager(ttk.Frame):
         self.bind("<Destroy>", self._restore_window_geometry)
         self.controller = TechnicianController(service or TechnicianService(auth), session)
         self.rows = {}
-        self.sort_column = None
-        self.sort_descending = False
+        self.sort_column = self.DEFAULT_SORT_COLUMN
+        self.sort_descending = self.DEFAULT_SORT_DESCENDING
         ttk.Label(self, text="Technicians", style="Header.TLabel").pack(anchor="w", pady=(0, 10))
         filters = ttk.Frame(self); filters.pack(fill="x", pady=(0, 8))
         self.search_var = tk.StringVar(); self.inactive_var = tk.BooleanVar(value=False)
@@ -79,7 +81,9 @@ class TechnicianManager(ttk.Frame):
         self.tree = ttk.Treeview(table, columns=self.COLUMNS, show="headings", selectmode="browse")
         widths = (120, 130, 80, 190, 125)
         for name, heading, width in zip(self.COLUMNS, self.HEADINGS, widths):
-            self.tree.heading(name, text=heading, command=lambda column=name: self.sort_by(column))
+            marker = " ▲" if name == self.sort_column else ""
+            self.tree.heading(name, text=heading + marker,
+                              command=lambda column=name: self.sort_by(column))
             self.tree.column(name, width=width, minwidth=50, stretch=True)
         ybar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         xbar = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)

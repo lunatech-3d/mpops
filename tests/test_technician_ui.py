@@ -20,10 +20,14 @@ class TechnicianUiHelpersTests(unittest.TestCase):
                     "termination_date", "notes", "notes_private"}
         self.assertEqual(set(TECHNICIAN_FIELDS), expected)
         self.assertTrue({"tech_id", "created_by", "updated_by"}.isdisjoint(TECHNICIAN_FIELDS))
-        self.assertEqual(TechnicianManager.COLUMNS[0], "tech_code")
+        self.assertEqual(TechnicianManager.COLUMNS[0], "first_name")
         self.assertNotIn("tech_id", TechnicianManager.COLUMNS)
         self.assertTrue(all("ID" not in heading.upper().split() for heading in TechnicianManager.HEADINGS))
         self.assertTrue({"ssn_last4", "date_of_birth", "notes_private"}.isdisjoint(TechnicianManager.COLUMNS))
+
+    def test_tree_defaults_to_first_name_in_ascending_order(self):
+        self.assertEqual(TechnicianManager.DEFAULT_SORT_COLUMN, "first_name")
+        self.assertIs(TechnicianManager.DEFAULT_SORT_DESCENDING, False)
 
     def test_display_name_uses_all_nonblank_components(self):
         self.assertEqual(display_name({"first_name": "Ada", "middle_name": "M",
