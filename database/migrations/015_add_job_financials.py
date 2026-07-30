@@ -4,6 +4,11 @@ import re
 import sqlite3
 
 
+def _columns(connection, table):
+    """Return the case-insensitive column names currently present in *table*."""
+    return {row[1].lower() for row in connection.execute(f'PRAGMA table_info("{table}")')}
+
+
 def _drop_columns_compat(connection, table, columns):
     """Rebuild *table* when SQLite predates native DROP COLUMN support."""
     schema = connection.execute(
@@ -56,16 +61,22 @@ def _drop_legacy_columns(connection):
     if sqlite3.sqlite_version_info >= (3, 35, 0):
         connection.execute("DROP INDEX IF EXISTS idx_JobSourceRecords_ap_invoice")
         for table, columns in targets.items():
-            existing = {row[1].lower() for row in connection.execute(f"PRAGMA table_info({table})")}
+            existing = _columns(connection, table)
             for column in columns:
                 if column.lower() in existing:
                     connection.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
     else:
         for table, columns in targets.items():
-            _drop_columns_compat(connection, table, columns)
+            existing = _columns(connection, table)
+            present = tuple(column for column in columns if column.lower() in existing)
+            if present:
+                _drop_columns_compat(connection, table, present)
 
 
 def migrate(connection):
+    # Create the destination before inspecting or reading any legacy source column.
+    # Some databases are resuming an older, partially applied version of migration
+    # 015, so the destination may exist after its source columns were removed.
     connection.execute(
         """CREATE TABLE IF NOT EXISTS JobFinancials (
             job_financial_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -90,13 +101,36 @@ def migrate(connection):
         "CREATE INDEX IF NOT EXISTS idx_JobFinancials_ap_invoice "
         "ON JobFinancials(ap_invoice_number COLLATE NOCASE)"
     )
-    connection.execute(
-        """INSERT OR IGNORE INTO JobFinancials (
+
+    source_columns = _columns(connection, "JobSourceRecords")
+    required_source_columns = {
+        "job_id", "job_source_record_id", "ap_invoice_number", "ct_rate",
+        "ct_travel_payout", "ct_off_hours_payout", "imported_at",
+    }
+    if required_source_columns <= source_columns:
+        connection.execute(
+            """INSERT OR IGNORE INTO JobFinancials (
             job_id, job_source_record_id, ap_invoice_number, ct_rate,
             ct_travel_payout, ct_off_hours_payout, created_at
         )
         SELECT job_id, job_source_record_id, ap_invoice_number, ct_rate,
                ct_travel_payout, ct_off_hours_payout, imported_at
         FROM JobSourceRecords"""
-    )
+        )
+
+    # Early Jobs schemas stored the invoice directly on the job. Preserve values
+    # that do not have a corresponding source-record financial row before dropping
+    # that legacy column.
+    if "ap_invoice_number" in _columns(connection, "Jobs"):
+        connection.execute(
+            """INSERT INTO JobFinancials (job_id, ap_invoice_number)
+               SELECT j.job_id, j.ap_invoice_number
+               FROM Jobs j
+               WHERE j.ap_invoice_number IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1 FROM JobFinancials f
+                     WHERE f.job_id = j.job_id
+                       AND f.ap_invoice_number = j.ap_invoice_number COLLATE NOCASE
+                 )"""
+        )
     _drop_legacy_columns(connection)

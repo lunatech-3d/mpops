@@ -9,3 +9,7 @@ applied in `001_initial.sql`.
 Migrations must not rely on `ALTER TABLE ... DROP COLUMN`. Some deployed Python
 installations bundle SQLite versions older than 3.35. When columns must be removed,
 migrations must provide a transactional table-rebuild fallback for those versions.
+
+Every schema migration must be exercised both from an empty database and as an
+upgrade of a populated database. Migration code must inspect legacy columns before
+reading them so that resuming a partially applied historical migration is safe.

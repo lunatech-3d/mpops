@@ -264,6 +264,41 @@ class MigrationTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def test_job_financial_migration_resumes_partially_applied_upgrade(self):
+        """An old executescript could commit DDL before failing and being recorded."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "partial.db"
+            auth = AuthService(Settings(path, password_iterations=100_000))
+            with auth.connection() as connection:
+                connection.execute(
+                    "INSERT INTO Users(username,password_hash,is_active) VALUES('owner','hash',1)"
+                )
+                connection.execute(
+                    "INSERT INTO Jobs(external_job_id,created_by) VALUES('legacy-job',1)"
+                )
+                connection.execute(
+                    "INSERT INTO JobFinancials(job_id,ap_invoice_number) VALUES(1,'AP-existing')"
+                )
+                connection.execute("DELETE FROM SchemaMigrations WHERE name='015_add_job_financials.py'")
+                connection.execute("ALTER TABLE Jobs ADD COLUMN ap_invoice_number TEXT")
+                connection.execute("UPDATE Jobs SET ap_invoice_number='AP-from-job' WHERE job_id=1")
+
+            # JobSourceRecords financial columns are already absent, matching the
+            # partial production state. Re-running must preserve both invoice values.
+            AuthService(Settings(path, password_iterations=100_000))
+            with auth.connection() as connection:
+                invoices = {row[0] for row in connection.execute(
+                    "SELECT ap_invoice_number FROM JobFinancials WHERE job_id=1"
+                )}
+                self.assertEqual(invoices, {"AP-existing", "AP-from-job"})
+                self.assertNotIn("ap_invoice_number", {
+                    row[1] for row in connection.execute("PRAGMA table_info(Jobs)")
+                })
+                self.assertEqual(connection.execute(
+                    "SELECT count(*) FROM SchemaMigrations WHERE name='015_add_job_financials.py'"
+                ).fetchone()[0], 1)
+                self.assertEqual(connection.execute("PRAGMA foreign_key_check").fetchall(), [])
+
     def test_failed_migration_is_not_recorded(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
