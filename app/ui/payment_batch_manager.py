@@ -148,6 +148,9 @@ class PaymentBatchDetail(tk.Toplevel):
         self.vars = {field: tk.StringVar() for field in FIELDS if field != "notes"}
         self.status_var = tk.StringVar(value="Draft"); self.total_vars: dict[str, tk.StringVar] = {}
         self.item_rows: list[dict[str, Any]] = []
+        self.compensation_preview: dict[str, Any] | None = None
+        self.technician_breakdowns: dict[str, dict[str, Any]] = {}
+        self.history_rows: list[dict[str, Any]] = []
         self.item_sort_column, self.item_sort_descending = "technician", False
         # Keep workflow actions outside the scrolling form so they remain
         # reachable as the window shrinks or more detail sections are added.
@@ -193,46 +196,76 @@ class PaymentBatchDetail(tk.Toplevel):
         self.items.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.items.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
         items_frame.rowconfigure(0, weight=1); items_frame.columnconfigure(0, weight=1)
-        compensation = ttk.LabelFrame(content, text="Technician Revenue & Compensation", padding=6)
+        distribution = ttk.LabelFrame(content, text="Payment Distribution Summary", padding=8)
+        distribution.pack(fill="x", pady=(0, 8))
+        self.distribution_unavailable_var = tk.StringVar()
+        ttk.Label(distribution, textvariable=self.distribution_unavailable_var,
+                  style="Section.TLabel").grid(row=0, column=0, columnspan=6, sticky="w")
+        self.distribution_vars = {key: tk.StringVar(value="—") for key in
+                                  ("gross", "technicians", "east", "lunatech", "unallocated")}
+        distribution_specs = (
+            ("Matterport Gross Payment", "gross", None),
+            ("Technician Transfers", "technicians", None),
+            ("Transfer to LunaTech-East", "east", "Section.TLabel"),
+            ("Retained by LunaTech 3D", "lunatech", "Section.TLabel"),
+            ("Unallocated / Exceptions", "unallocated", None),
+        )
+        for index, (label, key, style) in enumerate(distribution_specs):
+            row, pair = divmod(index, 3); column = pair * 2
+            ttk.Label(distribution, text=label + ":").grid(
+                row=row + 1, column=column, sticky="e", padx=(0, 5), pady=2)
+            ttk.Label(distribution, textvariable=self.distribution_vars[key],
+                      style=style or "TLabel").grid(
+                row=row + 1, column=column + 1, sticky="w", padx=(0, 18), pady=2)
+        self.distribution_status_var = tk.StringVar()
+        ttk.Label(distribution, textvariable=self.distribution_status_var).grid(
+            row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
+
+        compensation = ttk.LabelFrame(content, text="Technician Transfers", padding=6)
         compensation.pack(fill="x", pady=(0, 8))
-        summary_columns = ("technician", "jobs", "revenue", "rate", "payout", "east", "lunatech", "paid", "override")
-        self.technician_summary = ttk.Treeview(compensation, columns=summary_columns,
+        summary_columns = ("technician", "jobs", "revenue", "rate", "payout", "status")
+        transfer_table = ttk.Frame(compensation); transfer_table.pack(fill="x")
+        self.technician_summary = ttk.Treeview(transfer_table, columns=summary_columns,
                                                show="headings", height=4)
         for key, heading, width in (("technician", "Technician", 180), ("jobs", "Jobs", 55),
-                                    ("revenue", "Billed", 100), ("rate", "Effective Rate", 105),
-                                    ("payout", "Calculated Payout", 125), ("paid", "Paid?", 70),
-                                    ("east", "LunaTech-East", 115), ("lunatech", "LunaTech", 105),
-                                    ("override", "Overrides", 85)):
+                                    ("revenue", "Gross Revenue", 115), ("rate", "Rate", 105),
+                                    ("payout", "Transfer Amount", 135), ("status", "Status", 100)):
             self.technician_summary.heading(key, text=heading)
             self.technician_summary.column(key, width=width,
                 anchor="e" if key in {"jobs", "revenue", "payout"} else "w")
-        self.technician_summary.pack(fill="x")
-        self.allocation_totals_var = tk.StringVar(value="Revenue allocation not calculated.")
+        transfer_ybar = ttk.Scrollbar(transfer_table, orient="vertical",
+                                      command=self.technician_summary.yview)
+        self.technician_summary.configure(yscrollcommand=transfer_ybar.set)
+        self.technician_summary.grid(row=0, column=0, sticky="ew")
+        transfer_ybar.grid(row=0, column=1, sticky="ns")
+        transfer_table.columnconfigure(0, weight=1)
+        self.technician_summary.bind("<Double-1>", lambda _event: self.view_technician_breakdown())
+        transfer_actions = ttk.Frame(compensation); transfer_actions.pack(fill="x", pady=(5, 0))
+        self.allocation_totals_var = tk.StringVar(value="Total Technician Transfers: —")
         ttk.Label(compensation, textvariable=self.allocation_totals_var,
-                  style="Section.TLabel").pack(anchor="w", pady=(5, 0))
+                  style="Section.TLabel").pack(in_=transfer_actions, side="left")
+        ttk.Button(transfer_actions, text="View Technician Breakdown",
+                   command=self.view_technician_breakdown).pack(side="right")
         totals = ttk.LabelFrame(content, text="Reconciliation", padding=6); totals.pack(fill="x")
-        specs = (("Payment Amount", "payment_amount_cents"), ("Imported Total", "imported_total_cents"),
-                 ("Difference", "difference_cents"), ("Matched Total", "matched_total_cents"),
-                 ("Excluded Total", "excluded_total_cents"), ("Exception Total", "unmatched_total_cents"),
-                 ("Item Count", "item_count"), ("Matched Count", "matched_count"),
-                 ("Excluded Count", "excluded_count"), ("Exception Count", "exception_count"),
-                 ("Unmatched", "unmatched_count"), ("Missing Job", "missing_job_count"),
-                 ("Ambiguous", "ambiguous_count"), ("Amount Review", "amount_review_count"))
+        specs = (("Payment", "payment_amount_cents"), ("Imported", "imported_total_cents"),
+                 ("Difference", "difference_cents"), ("Matched", "matched_count"),
+                 ("Exceptions", "exception_count"))
         for index, (label, key) in enumerate(specs):
-            row, col = divmod(index, 5); col *= 2; var = tk.StringVar(value="$0.00" if "cents" in key else "0"); self.total_vars[key] = var
+            row, col = divmod(index, 3); col *= 2; var = tk.StringVar(value="$0.00" if "cents" in key else "0"); self.total_vars[key] = var
             ttk.Label(totals, text=label + ":").grid(row=row, column=col, sticky="e", padx=(5, 2), pady=2)
             style = "Section.TLabel" if key == "difference_cents" else "TLabel"
             ttk.Label(totals, textvariable=var, style=style).grid(row=row, column=col + 1, sticky="w", padx=(0, 8))
         self.workflow_var = tk.StringVar()
-        workflow = ttk.LabelFrame(content, text="Workflow", padding=6); workflow.pack(fill="x", pady=(0, 4))
-        ttk.Label(workflow, textvariable=self.workflow_var, justify="left").pack(anchor="w")
-        self.lock_var = tk.StringVar()
-        ttk.Label(workflow, textvariable=self.lock_var, justify="left",
-                  style="Section.TLabel").pack(anchor="w", pady=(4, 0))
+        workflow = ttk.LabelFrame(content, text="Workflow Status", padding=6); workflow.pack(fill="x", pady=(4, 4))
+        ttk.Label(workflow, textvariable=self.workflow_var, justify="left").pack(side="left", anchor="w")
+        ttk.Button(workflow, text="Show Workflow Details",
+                   command=self.show_workflow_details).pack(side="right", anchor="n")
         self.history_var = tk.StringVar()
         history = ttk.LabelFrame(content, text="Financial History", padding=6)
         history.pack(fill="x", pady=(0, 4))
-        ttk.Label(history, textvariable=self.history_var, justify="left").pack(anchor="w")
+        ttk.Label(history, textvariable=self.history_var).pack(side="left", anchor="w")
+        ttk.Button(history, text="View Financial History",
+                   command=self.show_financial_history).pack(side="right")
         actions = ttk.Frame(outer, padding=(PADDING, 8, PADDING, PADDING))
         actions.grid(row=1, column=0, sticky="ew")
         self.save_button = ttk.Button(actions, text="Save", command=self.save)
@@ -304,17 +337,29 @@ class PaymentBatchDetail(tk.Toplevel):
             var.set(value)
         self.notes.configure(state="normal"); self.notes.delete("1.0", "end"); self.notes.insert("1.0", batch.get("notes") or "")
         self.status_var.set(batch["batch_status"]); self.item_rows = items
+        self.items.configure(height=max(3, min(6, len(items))))
         self._render_items(); self._render_technician_summary()
         display = totals_to_display(totals)
-        self.workflow_var.set("\n".join(workflow_summary(batch["batch_status"], totals,
-                                                         self.reconciliation, batch)))
+        self.workflow_details = workflow_summary(batch["batch_status"], totals,
+                                                 self.reconciliation, batch)
         locked = batch["batch_status"] in ("Reconciled", "Approved", "Closed")
-        self.lock_var.set("This payment batch has been reconciled.\nFinancial data is locked.\n"
-                          "To make changes a supervisor must perform an unreconcile operation (future feature)."
-                          if locked else "")
-        self.history_var.set("\n".join(
-            f"{format_display_datetime(entry['timestamp'])}  |  {entry['user']}  |  {entry['event']}" for entry in history
-        ) or "No financial history available.")
+        matched = int(totals.get("matched_count", 0)); item_count = int(totals.get("item_count", 0))
+        allocation = "Complete" if self.compensation_preview and not self.compensation_preview.get("exceptions") else "Not available"
+        posted_count = sum(1 for row in getattr(self, "posted_earnings", [])
+                           if row["earning_status"] != "Voided")
+        earnings_status = "Generated" if posted_count else "Not yet generated"
+        self.workflow_var.set(
+            f"Batch Status: {batch['batch_status']}\n"
+            f"Matching: {matched} of {item_count} jobs matched   Allocation: {allocation}\n"
+            f"Earnings: {earnings_status}" + ("   Financial data locked" if locked else ""))
+        self.history_rows = history
+        if history:
+            latest = history[-1]
+            self.history_var.set(
+                f"Last activity: {format_display_datetime(latest['timestamp'])} — "
+                f"{latest['event']} by {latest['user']}")
+        else:
+            self.history_var.set("No financial history available.")
         for key, var in self.total_vars.items(): var.set(display.get(key, "0"))
         self.snapshot = self._form_values(); self.apply_status_permissions(); self.title(f"Matterport Payment Batch #{self.batch_id}")
 
@@ -346,52 +391,133 @@ class PaymentBatchDetail(tk.Toplevel):
 
     def _render_technician_summary(self) -> None:
         self.technician_summary.delete(*self.technician_summary.get_children())
-        self.allocation_totals_var.set("Revenue allocation not calculated.")
+        self.technician_breakdowns.clear()
+        self.compensation_preview = None
+        self.posted_earnings = []
+        self.allocation_totals_var.set("Total Technician Transfers: —")
+        self.distribution_unavailable_var.set(
+            "Revenue distribution not available until the batch is reconciled.")
+        self.distribution_status_var.set("")
+        for var in self.distribution_vars.values(): var.set("—")
         earnings = {}
         paid_status = {}
         if self.batch_id and self.batch.get("batch_status") in ("Reconciled", "Approved", "Closed"):
             compensation = CompensationService(self.service.auth)
             preview = compensation.preview_technician_earnings(self.batch_id)
+            self.compensation_preview = preview
             totals = preview["summary"]
             posted_rows = compensation.list_technician_earnings(payment_batch_id=self.batch_id)
-            status_counts = {status: sum(row["earning_status"] == status for row in posted_rows)
-                             for status in ("Pending", "Approved", "Paid", "Voided")}
+            self.posted_earnings = posted_rows
+            self.distribution_unavailable_var.set("")
+            self.distribution_vars["gross"].set(format_cents(totals["gross_revenue_total_cents"]))
+            self.distribution_vars["technicians"].set(format_cents(totals["technician_total_cents"]))
+            self.distribution_vars["east"].set(format_cents(totals["lunatech_east_total_cents"]))
+            self.distribution_vars["lunatech"].set(format_cents(totals["lunatech_total_cents"]))
+            unallocated = int(totals["unallocated_total_cents"])
+            self.distribution_vars["unallocated"].set(format_cents(unallocated))
+            self.distribution_status_var.set(
+                "✓ Distribution balances to the Matterport payment" if unallocated == 0 and not preview["exceptions"]
+                else f"⚠ {format_cents(unallocated)} remains unallocated; "
+                     f"{len(preview['exceptions'])} exception(s)")
             self.allocation_totals_var.set(
-                f"Gross: {format_cents(totals['gross_revenue_total_cents'])}   "
-                f"Technicians: {format_cents(totals['technician_total_cents'])}   "
-                f"LunaTech-East: {format_cents(totals['lunatech_east_total_cents'])}   "
-                f"LunaTech: {format_cents(totals['lunatech_total_cents'])}   "
-                f"Unallocated / exceptions: {format_cents(totals['unallocated_total_cents'])}\n"
-                f"Technician earnings: {status_counts['Pending']} Pending   "
-                f"{status_counts['Approved']} Approved   {status_counts['Paid']} Paid   "
-                f"{status_counts['Voided']} Voided" +
-                ("\nWarnings:\n" + "\n".join(f"• {warning}" for warning in
-                    [entry.get("component_reconciliation_warning")
-                     for entry in preview["proposed_entries"]] if warning)
-                 if any(entry.get("component_reconciliation_warning")
-                        for entry in preview["proposed_entries"]) else ""))
+                f"Total Technician Transfers: {format_cents(totals['technician_total_cents'])}")
             for posted in posted_rows:
                 paid_status.setdefault(posted["tech_id"], []).append(posted["earning_status"])
             for entry in preview["proposed_entries"]:
                 bucket = earnings.setdefault(entry["technician_id"],
-                    {"amount": 0, "east": 0, "lunatech": 0, "rates": set(), "override": False})
+                    {"amount": 0, "rates": set(), "entries": []})
                 bucket["amount"] += entry["calculated_amount_cents"]
-                bucket["east"] += entry["lunatech_east_amount_cents"]
-                bucket["lunatech"] += entry["lunatech_amount_cents"]
                 bucket["rates"].add(entry.get("effective_rate_display") or
                     (f"{entry['rule_value'] / 100:.2f}%" if entry["rule_type"] == "Percentage" else "Flat"))
-                bucket["override"] |= "Override" in entry["rule_source"]
+                bucket["entries"].append(entry)
         for subtotal in technician_revenue_subtotals(self.item_rows):
             earning = earnings.get(subtotal["tech_id"])
             statuses = paid_status.get(subtotal["tech_id"], [])
             paid = "Yes" if statuses and all(status == "Paid" for status in statuses) else (
                 "Pending" if statuses else "No")
-            self.technician_summary.insert("", "end", values=(subtotal["technician"], subtotal["job_count"],
+            iid = f"tech-{subtotal['tech_id']}" if subtotal["tech_id"] else f"name-{len(self.technician_breakdowns)}"
+            self.technician_summary.insert("", "end", iid=iid, values=(subtotal["technician"], subtotal["job_count"],
                 format_cents(subtotal["revenue_cents"]), ", ".join(sorted(earning["rates"])) if earning else "Not calculated",
-                format_cents(earning["amount"]) if earning else "—",
-                format_cents(earning["east"]) if earning else "—",
-                format_cents(earning["lunatech"]) if earning else "—", paid,
-                "Yes" if earning and earning["override"] else "No"))
+                format_cents(earning["amount"]) if earning else "—", paid if earning else "Unavailable"))
+            self.technician_breakdowns[iid] = {"subtotal": subtotal,
+                                                "entries": earning["entries"] if earning else []}
+        self.technician_summary.configure(
+            height=max(1, min(6, len(self.technician_summary.get_children()))))
+
+    def view_technician_breakdown(self) -> None:
+        """Show job-level allocation detail without widening the transfer table."""
+        selected = self.technician_summary.selection()
+        if not selected:
+            messagebox.showinfo("Technician Breakdown",
+                                "Select a technician transfer first.", parent=self)
+            return
+        detail = self.technician_breakdowns.get(selected[0], {})
+        entries = detail.get("entries", [])
+        if not entries:
+            messagebox.showinfo("Technician Breakdown",
+                                "Revenue distribution is not available for this technician.", parent=self)
+            return
+        name = detail["subtotal"]["technician"]
+        dialog = tk.Toplevel(self); dialog.title(f"Technician Breakdown — {name}")
+        dialog.geometry("1080x360"); dialog.minsize(850, 280)
+        dialog.transient(self); dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=12); frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=name, style="Header.TLabel").pack(anchor="w", pady=(0, 8))
+        columns = ("job", "gross", "rate", "technician", "east", "lunatech", "rule", "override")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", height=min(8, len(entries)))
+        for key, heading, width in (("job", "Job", 95), ("gross", "Gross", 90),
+                                    ("rate", "Rate", 75), ("technician", "Technician", 95),
+                                    ("east", "LunaTech-East", 105), ("lunatech", "LunaTech 3D", 100),
+                                    ("rule", "Rule Source", 210), ("override", "Override", 75)):
+            tree.heading(key, text=heading); tree.column(key, width=width, anchor="w")
+        for entry in entries:
+            source = entry.get("rule_source") or ""
+            tree.insert("", "end", values=(entry.get("external_job_id") or entry.get("job_id") or "",
+                format_cents(entry["gross_revenue_cents"]), entry.get("effective_rate_display") or "",
+                format_cents(entry["calculated_amount_cents"]),
+                format_cents(entry["lunatech_east_amount_cents"]),
+                format_cents(entry["lunatech_amount_cents"]), source,
+                "Yes" if "Override" in source else "No"))
+        xbar = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(xscrollcommand=xbar.set); tree.pack(fill="both", expand=True); xbar.pack(fill="x")
+        ttk.Button(frame, text="Close", command=dialog.destroy).pack(anchor="e", pady=(8, 0))
+
+    def show_workflow_details(self) -> None:
+        """Open the complete workflow checklist without reserving form height."""
+        dialog = tk.Toplevel(self); dialog.title("Payment Batch Workflow Details")
+        dialog.transient(self); dialog.grab_set(); dialog.resizable(False, False)
+        frame = ttk.Frame(dialog, padding=14); frame.pack(fill="both", expand=True)
+        lines = list(getattr(self, "workflow_details", []))
+        preview = self.compensation_preview or {}
+        lines.extend(f"⚠ {warning}" for warning in
+                     (entry.get("component_reconciliation_warning")
+                      for entry in preview.get("proposed_entries", [])) if warning)
+        lines.extend(f"✗ {entry.get('message', 'Allocation exception')}"
+                     for entry in preview.get("exceptions", []))
+        ttk.Label(frame, text="\n".join(lines) or "No workflow details available.",
+                  justify="left", wraplength=720).pack(anchor="w")
+        ttk.Button(frame, text="Close", command=dialog.destroy).pack(anchor="e", pady=(10, 0))
+
+    def show_financial_history(self) -> None:
+        """Open the complete audit history in a compact scrolling table."""
+        dialog = tk.Toplevel(self); dialog.title("Payment Batch Financial History")
+        dialog.geometry("850x400"); dialog.minsize(650, 280)
+        dialog.transient(self); dialog.grab_set()
+        frame = ttk.Frame(dialog, padding=12); frame.pack(fill="both", expand=True)
+        tree = ttk.Treeview(frame, columns=("timestamp", "user", "event"),
+                            show="headings", height=10)
+        for key, heading, width in (("timestamp", "Date/Time", 175),
+                                    ("user", "User", 150), ("event", "Event", 460)):
+            tree.heading(key, text=heading); tree.column(key, width=width, anchor="w")
+        for entry in self.history_rows:
+            tree.insert("", "end", values=(format_display_datetime(entry["timestamp"]),
+                                             entry["user"], entry["event"]))
+        ybar = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=ybar.set)
+        tree.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns")
+        frame.rowconfigure(0, weight=1); frame.columnconfigure(0, weight=1)
+        ttk.Button(frame, text="Close", command=dialog.destroy).grid(
+            row=1, column=0, columnspan=2, sticky="e", pady=(8, 0))
 
     def _submitted(self) -> dict[str, Any]:
         values = self._form_values()
