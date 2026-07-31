@@ -22,8 +22,10 @@ STATUS_VALUES = (
     "Completed", "Cancelled", "On Hold",
 )
 
-JOB_FORM_DEFAULT_WIDTH = 700
-JOB_FORM_DEFAULT_HEIGHT = 600
+JOB_FORM_MIN_WIDTH = 720
+JOB_FORM_MAX_WIDTH = 900
+JOB_FORM_MIN_HEIGHT = 480
+JOB_FORM_MAX_HEIGHT = 760
 JOB_FORM_SCREEN_MARGIN = 100
 
 
@@ -85,55 +87,14 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     dialog = tk.Toplevel(parent)
     dialog.withdraw()
     dialog.title("Edit Job" if job else "Add Job")
-    # Use the full form height when the display permits it, while leaving room
-    # for desktop chrome on smaller displays.  The scrollable content below
-    # keeps every field reachable when the height must be constrained.
-    initial_height = min(
-        JOB_FORM_DEFAULT_HEIGHT,
-        max(580, dialog.winfo_screenheight() - JOB_FORM_SCREEN_MARGIN),
-    )
-    dialog.geometry(f"{JOB_FORM_DEFAULT_WIDTH}x{initial_height}")
-    dialog.minsize(600, 580)
 
     shell = ttk.Frame(dialog)
     shell.pack(fill="both", expand=True)
-    notebook = ttk.Notebook(shell)
-    notebook.pack(fill="both", expand=True, padx=PADDING, pady=(PADDING, 0))
-
-    tab_contents = {}
-    for tab_name in ("General", "Contact", "Details", "Financial"):
-        scrollable = ScrollableFrame(notebook)
-        notebook.add(scrollable, text=tab_name)
-        content = scrollable.content
-        content.configure(padding=PADDING)
-        content.columnconfigure(1, weight=1)
-        tab_contents[tab_name] = content
-
-    labels_by_tab = {
-        "General": (
-            ("external_job_id", "External Job ID *"),
-            ("market_id", "Market"),
-            (PRIMARY_TECHNICIAN_FIELD, "Technician"),
-            ("client_name_source", "Client"),
-            ("project_name_source", "Project"),
-            ("scheduled_start_at", "Scheduled Start (MM/DD/YYYY h:mm AM/PM)"),
-        ),
-        "Contact": (
-            ("capture_address_raw", "Capture Address"),
-            ("city", "City"),
-            ("state", "State"),
-            ("postal_code", "ZIP / Postal Code"),
-            ("onsite_contact_name", "On-site Contact"),
-            ("onsite_contact_email", "Contact Email"),
-            ("onsite_contact_phone", "Contact Phone"),
-        ),
-        "Details": (
-            ("requested_capture_size", "Requested Capture Size"),
-        ),
-        "Financial": (
-            ("ap_invoice_number", "AP Invoice Number"),
-        ),
-    }
+    scrollable = ScrollableFrame(shell)
+    scrollable.pack(fill="both", expand=True, padx=PADDING, pady=(PADDING, 0))
+    content = scrollable.content
+    content.configure(padding=(2, 2, 2, 4))
+    content.columnconfigure(0, weight=1)
 
     variables = {
         name: tk.StringVar(value=(format_display_datetime((job or {}).get(name))
@@ -163,65 +124,102 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
         value=technician_id_to_display.get((job or {}).get(PRIMARY_TECHNICIAN_FIELD), "")
     )
 
-    first = None
-    next_rows = {}
-    for tab_name, labels in labels_by_tab.items():
-        outer = tab_contents[tab_name]
-        for row, (name, label) in enumerate(labels):
-            ttk.Label(outer, text=label).grid(
-                row=row, column=0, sticky="w", padx=(0, 12), pady=4
-            )
-            if name == "ap_invoice_number":
-                invoices = ", ".join(
-                    record["ap_invoice_number"]
-                    for record in (job or {}).get("financial_records", [])
-                    if record.get("ap_invoice_number")
-                )
-                entry = ttk.Entry(outer, state="readonly")
-                entry.configure(state="normal")
-                entry.insert(0, invoices)
-                entry.configure(state="readonly")
-            elif name == "market_id":
-                entry = ttk.Combobox(
-                    outer,
-                    textvariable=market_var,
-                    values=tuple(market_display_to_id),
-                    state="readonly",
-                )
-            elif name == PRIMARY_TECHNICIAN_FIELD:
-                entry = ttk.Combobox(
-                    outer,
-                    textvariable=technician_var,
-                    values=("", *technician_display_to_id),
-                    state="readonly",
-                )
-            else:
-                entry = ttk.Entry(outer, textvariable=variables[name])
-            entry.grid(row=row, column=1, sticky="ew", pady=4)
-            first = first or entry
-        next_rows[tab_name] = len(labels)
+    def section(title, row):
+        frame = ttk.LabelFrame(content, text=title, padding=(10, 6))
+        frame.grid(row=row, column=0, sticky="ew", pady=(0, 8))
+        return frame
 
-    outer = tab_contents["General"]
-    row = next_rows["General"]
-    ttk.Label(outer, text="Status").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
+    def labeled_entry(frame, row, label, variable, *, column=0, width=None, **kwargs):
+        ttk.Label(frame, text=label).grid(
+            row=row, column=column, sticky="w", padx=(0, 6), pady=3
+        )
+        entry = ttk.Entry(frame, textvariable=variable, width=width, **kwargs)
+        entry.grid(row=row, column=column + 1, sticky="ew", padx=(0, 12), pady=3)
+        return entry
+
+    summary = section("Job Summary", 0)
+    summary.columnconfigure(1, weight=1)
+    summary.columnconfigure(3, weight=1)
+    first = labeled_entry(summary, 0, "External Job ID *", variables["external_job_id"])
+    ttk.Label(summary, text="Status").grid(row=0, column=2, sticky="w", padx=(0, 6), pady=3)
     status = ttk.Combobox(
-        outer, textvariable=variables["job_status"], values=STATUS_VALUES, state="readonly"
+        summary, textvariable=variables["job_status"], values=STATUS_VALUES,
+        state="readonly", width=18,
     )
-    status.grid(row=row, column=1, sticky="ew", pady=4)
+    status.grid(row=0, column=3, sticky="ew", padx=(0, 12), pady=3)
     if not variables["job_status"].get():
         variables["job_status"].set("Requested")
-    row += 1
+    labeled_entry(summary, 1, "Project", variables["project_name_source"])
+    labeled_entry(summary, 1, "Client", variables["client_name_source"], column=2)
+    ttk.Label(summary, text="Market").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=3)
+    market_entry = ttk.Combobox(
+        summary, textvariable=market_var, values=tuple(market_display_to_id),
+        state="readonly",
+    )
+    market_entry.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=3)
+    labeled_entry(
+        summary, 2, "Requested Capture Size", variables["requested_capture_size"],
+        column=2, width=18,
+    )
 
-    if job is not None:
-        outer = tab_contents["Financial"]
-        row = next_rows["Financial"]
-        financial_frame = ttk.LabelFrame(outer, text="Financial Information", padding=6)
-        financial_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
+    schedule = section("Schedule and Assignment", 1)
+    schedule.columnconfigure(1, weight=1)
+    schedule.columnconfigure(3, weight=1)
+    labeled_entry(
+        schedule, 0, "Scheduled Start", variables["scheduled_start_at"],
+    )
+    ttk.Label(schedule, text="Technician").grid(
+        row=0, column=2, sticky="w", padx=(0, 6), pady=3
+    )
+    technician_entry = ttk.Combobox(
+        schedule, textvariable=technician_var,
+        values=("", *technician_display_to_id), state="readonly",
+    )
+    technician_entry.grid(row=0, column=3, sticky="ew", padx=(0, 12), pady=3)
+
+    address = section("Capture Address", 2)
+    address.columnconfigure(1, weight=3)
+    labeled_entry(address, 0, "Capture Address", variables["capture_address_raw"])
+    address.grid_slaves(row=0, column=1)[0].grid_configure(columnspan=5)
+    labeled_entry(address, 1, "City", variables["city"])
+    labeled_entry(address, 1, "State", variables["state"], column=2, width=7)
+    labeled_entry(address, 1, "ZIP / Postal Code", variables["postal_code"], column=4, width=12)
+
+    contact = section("On-Site Contact", 3)
+    contact.columnconfigure(1, weight=1)
+    contact.columnconfigure(3, weight=1)
+    labeled_entry(contact, 0, "Contact Name", variables["onsite_contact_name"])
+    labeled_entry(contact, 0, "Contact Phone", variables["onsite_contact_phone"], column=2)
+    labeled_entry(contact, 1, "Contact Email", variables["onsite_contact_email"])
+    contact.grid_slaves(row=1, column=1)[0].grid_configure(columnspan=3)
+
+    notes_frame = section("Internal Notes", 4)
+    notes_frame.columnconfigure(0, weight=1)
+    notes = tk.Text(notes_frame, height=6, wrap="word")
+    notes.grid(row=0, column=0, sticky="ew", pady=3)
+    notes.insert("1.0", (job or {}).get("internal_notes") or "")
+
+    financial_records = (job or {}).get("financial_records", [])
+    if job is not None and financial_records:
+        financial_frame = section("Current Financial Information", 5)
+        financial_frame.columnconfigure(1, weight=1)
+        invoices = ", ".join(
+            record["ap_invoice_number"]
+            for record in financial_records
+            if record.get("ap_invoice_number")
+        )
+        ttk.Label(financial_frame, text="AP Invoice Number").grid(
+            row=0, column=0, sticky="w", padx=(0, 6), pady=(0, 5)
+        )
+        invoice_entry = ttk.Entry(financial_frame)
+        invoice_entry.grid(row=0, column=1, sticky="ew", pady=(0, 5))
+        invoice_entry.insert(0, invoices)
+        invoice_entry.configure(state="readonly")
         financial_grid = ttk.Treeview(
             financial_frame,
             columns=("rate", "travel", "off_hours"),
             show="headings",
-            height=min(max(len(job.get("financial_records", [])), 1), 4),
+            height=min(len(financial_records), 4),
         )
         for column, heading in (
             ("rate", "CT Rate"),
@@ -230,21 +228,13 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
         ):
             financial_grid.heading(column, text=heading)
             financial_grid.column(column, width=160, anchor="e")
-        for record in job.get("financial_records", []):
+        for record in financial_records:
             financial_grid.insert("", "end", values=(
                 record.get("ct_rate") or 0,
                 record.get("ct_travel_payout") or 0,
                 record.get("ct_off_hours_payout") or 0,
             ))
-        financial_grid.pack(fill="x")
-    outer = tab_contents["Details"]
-    row = next_rows["Details"]
-    ttk.Label(outer, text="Internal Notes").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=4)
-    notes = tk.Text(outer, height=8, wrap="word")
-    notes.grid(row=row, column=1, sticky="nsew", pady=4)
-    notes.insert("1.0", (job or {}).get("internal_notes") or "")
-    outer.rowconfigure(row, weight=1)
-    row += 1
+        financial_grid.grid(row=1, column=0, columnspan=2, sticky="ew")
 
     def cancel(_event=None):
         close_modal(dialog)
@@ -273,6 +263,21 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     buttons.pack(fill="x")
     ttk.Button(buttons, text="Cancel", command=cancel).pack(side="right", padx=3)
     ttk.Button(buttons, text="Save", command=save).pack(side="right", padx=3)
+
+    # Size from the completed layout, but reserve desktop chrome and rely on
+    # the shared scrolling container whenever the content exceeds that space.
+    dialog.update_idletasks()
+    available_width = max(1, dialog.winfo_screenwidth() - JOB_FORM_SCREEN_MARGIN)
+    available_height = max(1, dialog.winfo_screenheight() - JOB_FORM_SCREEN_MARGIN)
+    requested_width = content.winfo_reqwidth() + (PADDING * 2) + 24
+    requested_height = content.winfo_reqheight() + buttons.winfo_reqheight() + PADDING
+    initial_width = min(max(JOB_FORM_MIN_WIDTH, requested_width),
+                        JOB_FORM_MAX_WIDTH, available_width)
+    initial_height = min(max(JOB_FORM_MIN_HEIGHT, requested_height),
+                         JOB_FORM_MAX_HEIGHT, available_height)
+    dialog.geometry(f"{initial_width}x{initial_height}")
+    dialog.minsize(min(JOB_FORM_MIN_WIDTH, available_width),
+                   min(JOB_FORM_MIN_HEIGHT, available_height))
 
     dialog.bind("<Escape>", cancel)
     dialog.protocol("WM_DELETE_WINDOW", cancel)
