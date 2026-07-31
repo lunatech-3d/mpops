@@ -8,6 +8,7 @@ from app.ui.dashboard import build_dashboard
 from app.ui.jobs_manager import JobsManager
 from app.ui.market_manager import MarketManager
 from app.ui.opentable_import_window import open_opentable_import
+from app.ui.on_demand_intake_window import open_on_demand_intake
 from app.ui.payment_batch_manager import PaymentBatchManager
 from app.ui.user_manager_window import open_user_manager
 from app.ui.technician_manager import TechnicianManager
@@ -84,6 +85,10 @@ class MainWindow:
                 command=self.open_opentable_import,
                 width=18,
             ).pack(fill="x",pady=2)
+            ttk.Button(
+                nav, text="On-Demand Intake", command=self.open_on_demand_intake,
+                width=18,
+            ).pack(fill="x", pady=2)
         ttk.Separator(nav).pack(fill="x",pady=8)
         if session.role == "admin" and not auth.settings.reporting_copy:
             ttk.Button(nav,text="Administration → Users",command=self.open_users).pack(fill="x",pady=2)
@@ -119,6 +124,11 @@ class MainWindow:
             self.auth,
             self.session,
             on_imported=self.show_jobs,
+        )
+        self.secondary_windows.append(window)
+    def open_on_demand_intake(self):
+        window = open_on_demand_intake(
+            self.root, self.auth, self.session, on_imported=self.show_jobs,
         )
         self.secondary_windows.append(window)
     def open_users(self):
