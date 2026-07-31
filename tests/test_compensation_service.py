@@ -93,7 +93,21 @@ class CompensationServiceTests(unittest.TestCase):
         self.assertEqual(entry["gross_revenue_cents"], 42060)
         self.assertEqual(entry["technician_calculation_basis_cents"], 42060)
         self.assertEqual(entry["component_sum_cents"], 57060)
-        self.assertIn("exceeds the matched gross payment", entry["component_reconciliation_warning"])
+        self.assertEqual(entry["component_reconciliation_status"],
+                         "Not applicable to Overall rule")
+        self.assertIsNone(entry["component_reconciliation_warning"])
+        self.assertIsNone(entry["components_reconciled"])
+        self.assertEqual(preview["exceptions"], [])
+
+    def test_overall_percentage_ignores_second_overlapping_metadata_example(self):
+        self._set_gross_and_components(32604, 326.04, 100.00)
+        preview = self.service.preview_technician_earnings(self.batch)
+        self.assertTrue(preview["ready"])
+        entry = preview["proposed_entries"][0]
+        self.assertEqual(entry["technician_amount_cents"], 22823)
+        self.assertEqual(entry["technician_calculation_basis_cents"], 32604)
+        self.assertIsNone(entry["component_reconciliation_warning"])
+        self.assertEqual(preview["exceptions"], [])
 
     def test_overall_percentage_uses_gross_with_reconciled_components(self):
         self._set_gross_and_components(50000, 350.00, 100.00, 50.00)
@@ -101,7 +115,8 @@ class CompensationServiceTests(unittest.TestCase):
         self.assertEqual((entry["technician_amount_cents"],
                           entry["lunatech_east_amount_cents"],
                           entry["lunatech_amount_cents"]), (35000, 5000, 10000))
-        self.assertEqual(entry["component_reconciliation_status"], "Reconciled")
+        self.assertEqual(entry["component_reconciliation_status"],
+                         "Not applicable to Overall rule")
         self.assertIsNone(entry["component_reconciliation_warning"])
 
     def test_component_rule_requires_reconciled_financial_basis(self):

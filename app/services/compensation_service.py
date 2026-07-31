@@ -207,8 +207,6 @@ class CompensationService:
                 except ValueError as exc:
                     exceptions.append(self._exception(base, "INVALID_FINANCIAL_AMOUNT", str(exc))); continue
                 resolver = RevenueRuleService(self.auth)
-                reconciliation = self.reconcile_financial_components(
-                    gross_revenue_cents, component_values)
                 try:
                     overall_rule = resolver.resolve_technician_rule(job_id=item["job_id"],
                         tech_id=tech["tech_id"], market_id=item["market_id"],
@@ -238,6 +236,8 @@ class CompensationService:
 
                 components, amount = [], 0
                 if resolved_component_rules:
+                    reconciliation = self.reconcile_financial_components(
+                        gross_revenue_cents, component_values)
                     if not reconciliation["components_reconciled"]:
                         exceptions.append(self._exception(base,
                             "FINANCIAL_COMPONENTS_DO_NOT_RECONCILE",
@@ -251,6 +251,15 @@ class CompensationService:
                             effective_date=effective_date, compensation_component=component)
                         calculation_parts.append((component, basis, rule))
                 else:
+                    # Overall rules use the matched payment as their complete basis.  Imported
+                    # component fields remain useful audit metadata, but are not a gross
+                    # breakdown and therefore have no reconciliation requirement.
+                    reconciliation = {
+                        "component_sum_cents": sum(component_values.values()),
+                        "component_reconciliation_status": "Not applicable to Overall rule",
+                        "component_reconciliation_warning": None,
+                        "components_reconciled": None,
+                    }
                     calculation_parts = [("Overall", gross_revenue_cents, overall_rule)]
 
                 for component, basis, rule in calculation_parts:

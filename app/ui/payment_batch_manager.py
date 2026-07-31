@@ -143,7 +143,7 @@ class PaymentBatchDetail(tk.Toplevel):
         super().__init__(parent); self.service, self.session = service, session
         self.batch_id, self.on_changed = batch_id, on_changed
         self.can_modify = session.role in {"admin", "operator"}; self.batch: dict[str, Any] = {}
-        self.title("Matterport Payment Batch"); self.geometry("1180x700"); self.minsize(1100, 550)
+        self.title("Matterport Payment Batch"); self.geometry("1180x780"); self.minsize(1100, 650)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.vars = {field: tk.StringVar() for field in FIELDS if field != "notes"}
         self.status_var = tk.StringVar(value="Draft"); self.total_vars: dict[str, tk.StringVar] = {}
