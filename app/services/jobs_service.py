@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -218,6 +218,56 @@ class JobsService:
         sql += " ORDER BY state COLLATE NOCASE, market_name COLLATE NOCASE"
         with self.auth.connection() as connection:
             return [dict(row) for row in connection.execute(sql, parameters)]
+
+    def get_job_activity_counts(self, today: date | None = None) -> dict[str, int]:
+        """Count non-cancelled jobs by their local scheduled calendar date.
+
+        ``scheduled_start_at`` is the operational job date imported from OpenTable.
+        Its ISO value represents local application time, so the calendar-date prefix
+        is compared directly rather than applying UTC conversion in SQLite.
+        """
+        if today is None:
+            today = datetime.now().astimezone().date()
+        if not isinstance(today, date):
+            raise ValueError("today must be a date")
+
+        week_start = today - timedelta(days=today.weekday())
+        week_end = week_start + timedelta(days=7)
+        month_start = today.replace(day=1)
+        month_end = (
+            month_start.replace(year=month_start.year + 1, month=1)
+            if month_start.month == 12
+            else month_start.replace(month=month_start.month + 1)
+        )
+        tomorrow = today + timedelta(days=1)
+
+        # One Jobs-only aggregate avoids multiplying jobs by financial/source rows.
+        # DISTINCT also protects each total if this query is extended with joins.
+        sql = """
+            SELECT
+                COUNT(DISTINCT CASE WHEN scheduled_start_at >= ?
+                                     AND scheduled_start_at < ? THEN job_id END) AS today,
+                COUNT(DISTINCT CASE WHEN scheduled_start_at >= ?
+                                     AND scheduled_start_at < ? THEN job_id END) AS week,
+                COUNT(DISTINCT CASE WHEN scheduled_start_at >= ?
+                                     AND scheduled_start_at < ? THEN job_id END) AS month
+            FROM Jobs
+            WHERE job_status <> 'Cancelled' COLLATE NOCASE
+              AND scheduled_start_at >= ?
+              AND scheduled_start_at < ?
+        """
+        earliest = min(today, week_start, month_start)
+        latest = max(tomorrow, week_end, month_end)
+        parameters = tuple(
+            boundary.isoformat()
+            for boundary in (
+                today, tomorrow, week_start, week_end, month_start, month_end,
+                earliest, latest,
+            )
+        )
+        with self.auth.connection() as connection:
+            row = connection.execute(sql, parameters).fetchone()
+        return {name: int(row[name] or 0) for name in ("today", "week", "month")}
 
     def list_active_technician_options(self) -> list[dict[str, Any]]:
         """Return active technicians for the Job form, in display order."""

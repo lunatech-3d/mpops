@@ -3,6 +3,7 @@ import os
 import sqlite3
 import tempfile
 import unittest
+from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,6 +11,7 @@ from app.config import PROJECT_ROOT, Settings
 from app.security.auth import AuthService, Session
 from app.security.passwords import hash_password, verify_password
 from app.security.user_manager import AuthorizationError, UserManager
+from app.services.jobs_service import JobsService
 from app.main import requires_initial_admin
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog, validate_confirmation, validate_identity
 from app.ui.main_window import MainWindow
@@ -33,6 +35,36 @@ class ApplicationServiceTests(unittest.TestCase):
                      "app.ui.initial_admin", "app.ui.user_form", "app.ui.password_reset",
                      "app.ui.technician_manager", "app.ui.technician_form", "app.ui.address_form"):
             self.assertIsNotNone(importlib.import_module(name))
+
+    def test_job_activity_uses_scheduled_local_dates_and_distinct_jobs(self):
+        jobs = JobsService(self.auth)
+        rows = (
+            ("TODAY-COMPLETE", "Completed", "2026-07-31T09:00:00"),
+            ("TODAY-SCHEDULED", "Scheduled", "2026-07-31T17:00:00"),
+            ("TODAY-CANCELLED", "Cancelled", "2026-07-31T12:00:00"),
+            ("MONDAY", "Assigned", "2026-07-27T08:00:00"),
+            ("SUNDAY", "Scheduled", "2026-08-02T23:59:00"),
+            ("MONTH-ONLY", "On Hold", "2026-07-05T10:00:00"),
+            ("OUTSIDE", "Completed", "2026-06-30T10:00:00"),
+        )
+        with self.auth.connection() as connection:
+            ids = {}
+            for external_id, status, scheduled in rows:
+                ids[external_id] = connection.execute(
+                    "INSERT INTO Jobs(external_job_id, job_status, scheduled_start_at, created_by) "
+                    "VALUES (?, ?, ?, ?)",
+                    (external_id, status, scheduled, self.admin_id),
+                ).lastrowid
+            connection.executemany(
+                "INSERT INTO JobFinancials(job_id, ct_rate) VALUES (?, ?)",
+                ((ids["TODAY-COMPLETE"], 10),
+                 (ids["TODAY-COMPLETE"], 20)),
+            )
+
+        self.assertEqual(
+            jobs.get_job_activity_counts(date(2026, 7, 31)),
+            {"today": 2, "week": 4, "month": 4},
+        )
 
     def test_logout_clears_environment(self):
         self.admin.apply_to_environment()

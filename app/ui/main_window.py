@@ -57,7 +57,7 @@ class MainWindow:
     def clear(self):
         for child in self.content.winfo_children(): child.destroy()
     def show_dashboard(self):
-        self.clear();build_dashboard(self.content,self.session,self.auth.settings.database_path).pack(fill="both",expand=True)
+        self.clear();build_dashboard(self.content,self.session,self.auth).pack(fill="both",expand=True)
     def show_jobs(self):
         self.clear(); JobsManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
     def show_technicians(self):
