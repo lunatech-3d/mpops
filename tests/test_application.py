@@ -15,7 +15,7 @@ from app.services.jobs_service import JobsService
 from app.main import requires_initial_admin
 from app.resources import resource_path
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog, validate_confirmation, validate_identity
-from app.ui.main_window import MainWindow
+from app.ui.main_window import MainWindow, _fit_logo
 
 
 class ApplicationServiceTests(unittest.TestCase):
@@ -32,7 +32,25 @@ class ApplicationServiceTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_packaged_logo_resource_exists(self):
-        self.assertTrue(resource_path("lunatech_logo.png").is_file())
+        self.assertTrue(resource_path("lunatech-logo.png").is_file())
+
+    def test_logo_is_scaled_to_fit_header(self):
+        logo = MagicMock()
+        logo.width.return_value = 3675
+        logo.height.return_value = 1650
+        fitted = MagicMock()
+        logo.subsample.return_value = fitted
+
+        self.assertIs(_fit_logo(logo), fitted)
+        logo.subsample.assert_called_once_with(35, 35)
+
+    def test_small_logo_is_not_resampled(self):
+        logo = MagicMock()
+        logo.width.return_value = 120
+        logo.height.return_value = 40
+
+        self.assertIs(_fit_logo(logo), logo)
+        logo.subsample.assert_not_called()
 
     def test_application_modules_import(self):
         for name in ("app.main", "app.ui.styles", "app.ui.dashboard", "app.ui.main_window", "app.ui.user_manager_window",

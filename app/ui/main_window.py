@@ -14,6 +14,14 @@ from app.ui.technician_manager import TechnicianManager
 from app.ui.styles import NAV_BACKGROUND, PADDING
 
 
+def _fit_logo(image, max_width=180, max_height=48):
+    """Return a proportionally subsampled logo that fits in the header."""
+    width_factor = (image.width() + max_width - 1) // max_width
+    height_factor = (image.height() + max_height - 1) // max_height
+    scale = max(1, width_factor, height_factor)
+    return image if scale == 1 else image.subsample(scale, scale)
+
+
 class MainWindow:
     def __init__(self, root, auth, session, on_logout):
         self.root, self.auth, self.session, self.on_logout = root, auth, session, on_logout
