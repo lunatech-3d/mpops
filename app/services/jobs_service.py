@@ -269,6 +269,41 @@ class JobsService:
             row = connection.execute(sql, parameters).fetchone()
         return {name: int(row[name] or 0) for name in ("today", "week", "month")}
 
+    def list_job_activity(self, period: str, today: date | None = None) -> list[dict[str, Any]]:
+        """Return scheduled, non-cancelled jobs in a dashboard calendar period."""
+        if today is None:
+            today = datetime.now().astimezone().date()
+        if not isinstance(today, date):
+            raise ValueError("today must be a date")
+
+        week_start = today - timedelta(days=today.weekday())
+        month_start = today.replace(day=1)
+        ranges = {
+            "today": (today, today + timedelta(days=1)),
+            "week": (week_start, week_start + timedelta(days=7)),
+            "month": (
+                month_start,
+                month_start.replace(year=month_start.year + 1, month=1)
+                if month_start.month == 12
+                else month_start.replace(month=month_start.month + 1),
+            ),
+        }
+        if period not in ranges:
+            raise ValueError("period must be today, week, or month")
+        start, end = ranges[period]
+
+        sql = (
+            _JOB_SUMMARY_SELECT
+            + " WHERE j.job_status <> 'Cancelled' COLLATE NOCASE"
+              " AND j.scheduled_start_at >= ? AND j.scheduled_start_at < ?"
+              " ORDER BY j.scheduled_start_at, j.external_job_id COLLATE NOCASE"
+        )
+        with self.auth.connection() as connection:
+            return [
+                dict(row)
+                for row in connection.execute(sql, (start.isoformat(), end.isoformat()))
+            ]
+
     def list_active_technician_options(self) -> list[dict[str, Any]]:
         """Return active technicians for the Job form, in display order."""
         with self.auth.connection() as connection:

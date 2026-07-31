@@ -86,6 +86,33 @@ def natural_sort_key(value):
     )
 
 
+def job_sort_key(row, column):
+    """Return the shared typed sort key used by job Treeviews."""
+    if column == "scheduled_start_at":
+        value = row.get("scheduled_start_at")
+        try:
+            return (value in (None, ""), datetime.fromisoformat(str(value)))
+        except ValueError:
+            return (True, datetime.max)
+    if column == "expected_payout":
+        try:
+            return float(row.get("expected_payout") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+    street, city, state = job_location_parts(row)
+    values = {
+        "external_job_id": row.get("external_job_id"),
+        "client": client_name(row),
+        "project": project_name(row),
+        "address": street,
+        "city": city,
+        "state": state,
+        "technician": technician_name(row),
+        "job_status": row.get("job_status"),
+    }
+    return natural_sort_key(values.get(column))
+
+
 class JobsController:
     """UI-facing JobsService adapter that can be tested without Tk widgets."""
 
@@ -232,35 +259,9 @@ class JobsManager(ttk.Frame):
         if not column:
             return
 
-        def key_for(iid):
-            row = self.rows[iid]
-            if column == "scheduled_start_at":
-                value = row.get("scheduled_start_at")
-                try:
-                    return (value in (None, ""), datetime.fromisoformat(str(value)))
-                except ValueError:
-                    return (True, datetime.max)
-            if column == "expected_payout":
-                try:
-                    return float(row.get("expected_payout") or 0)
-                except (TypeError, ValueError):
-                    return 0.0
-            street, city, state = job_location_parts(row)
-            values = {
-                "external_job_id": row.get("external_job_id"),
-                "client": client_name(row),
-                "project": project_name(row),
-                "address": street,
-                "city": city,
-                "state": state,
-                "technician": technician_name(row),
-                "job_status": row.get("job_status"),
-            }
-            return natural_sort_key(values.get(column))
-
         ordered = sorted(
             self.tree.get_children(""),
-            key=key_for,
+            key=lambda iid: job_sort_key(self.rows[iid], column),
             reverse=self.sort_descending,
         )
         for index, iid in enumerate(ordered):
