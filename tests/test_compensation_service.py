@@ -45,11 +45,16 @@ class CompensationServiceTests(unittest.TestCase):
         self.assertTrue(preview["ready"])
         self.assertEqual(preview["proposed_entries"][0]["calculated_amount_cents"], 71)
         self.assertEqual(preview["proposed_entries"][0]["lunatech_east_amount_cents"], 10)
+        self.assertEqual(preview["proposed_entries"][0]["lunatech_amount_cents"], 20)
+        self.assertEqual(preview["proposed_entries"][0]["effective_rate_display"], "70%")
         self.assertEqual(preview["proposed_entries"][0]["rule_source"], "System Default")
         result = self.service.generate_technician_earnings(self.session,self.batch)
         earning = self.service.get_technician_earning(result["earning_ids"][0])
         self.assertEqual((earning["payment_batch_id"],earning["payment_item_id"],earning["job_id"],earning["tech_id"]),(self.batch,self.item,self.job,self.tech))
-        self.assertEqual(json.loads(earning["calculation_details_json"])["rounding_method"],"ROUND_HALF_UP")
+        details = json.loads(earning["calculation_details_json"])
+        self.assertEqual(details["rounding_method"], "ROUND_HALF_UP")
+        self.assertEqual(details["gross_revenue_cents"], 101)
+        self.assertEqual(details["technician_calculation_basis_cents"], 101)
         again = self.service.generate_technician_earnings(self.session,self.batch)
         self.assertTrue(again["idempotent"]); self.assertEqual(again["generated_count"],0)
         with self.auth.connection() as c:
@@ -68,6 +73,80 @@ class CompensationServiceTests(unittest.TestCase):
         details = json.loads(allocation["calculation_details_json"])
         self.assertEqual(details["technician_compensation_rule_ids"], entry["technician_rule_ids"])
         self.assertEqual(details["market_revenue_share_rule_id"], entry["market_revenue_share_rule_id"])
+
+    def _set_gross_and_components(self, gross, base=0, travel=0, off_hours=0):
+        with self.auth.connection() as c:
+            c.execute("UPDATE MatterportPaymentItems SET amount_received_cents=? WHERE payment_item_id=?",
+                      (gross, self.item))
+            c.execute("INSERT INTO JobFinancials(job_id,ct_rate,ct_travel_payout,"
+                      "ct_off_hours_payout) VALUES(?,?,?,?)",
+                      (self.job, base, travel, off_hours))
+
+    def test_overall_percentage_uses_gross_with_overlapping_component_metadata(self):
+        self._set_gross_and_components(42060, 420.60, 150.00)
+        preview = self.service.preview_technician_earnings(self.batch)
+        self.assertTrue(preview["ready"])
+        entry = preview["proposed_entries"][0]
+        self.assertEqual((entry["technician_amount_cents"],
+                          entry["lunatech_east_amount_cents"],
+                          entry["lunatech_amount_cents"]), (29442, 4206, 8412))
+        self.assertEqual(entry["gross_revenue_cents"], 42060)
+        self.assertEqual(entry["technician_calculation_basis_cents"], 42060)
+        self.assertEqual(entry["component_sum_cents"], 57060)
+        self.assertIn("exceeds the matched gross payment", entry["component_reconciliation_warning"])
+
+    def test_overall_percentage_uses_gross_with_reconciled_components(self):
+        self._set_gross_and_components(50000, 350.00, 100.00, 50.00)
+        entry = self.service.preview_technician_earnings(self.batch)["proposed_entries"][0]
+        self.assertEqual((entry["technician_amount_cents"],
+                          entry["lunatech_east_amount_cents"],
+                          entry["lunatech_amount_cents"]), (35000, 5000, 10000))
+        self.assertEqual(entry["component_reconciliation_status"], "Reconciled")
+        self.assertIsNone(entry["component_reconciliation_warning"])
+
+    def test_component_rule_requires_reconciled_financial_basis(self):
+        self._set_gross_and_components(42060, 420.60, 150.00)
+        with self.auth.connection() as c:
+            c.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,rule_type,"
+                      "rule_value,compensation_component,created_by) "
+                      "VALUES('Technician',?,'Percentage',5000,'Travel',?)",
+                      (self.tech, self.admin_id))
+        preview = self.service.preview_technician_earnings(self.batch)
+        self.assertFalse(preview["ready"])
+        self.assertEqual(preview["exceptions"][0]["reason_code"],
+                         "FINANCIAL_COMPONENTS_DO_NOT_RECONCILE")
+
+    def test_flat_amount_must_leave_room_for_east(self):
+        with self.auth.connection() as c:
+            c.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,rule_type,"
+                      "rule_value,created_by) VALUES('Job',?,'Flat Amount',95,?)",
+                      (self.job, self.admin_id))
+        preview = self.service.preview_technician_earnings(self.batch)
+        self.assertEqual(preview["exceptions"][0]["reason_code"],
+                         "TECHNICIAN_AMOUNT_EXCEEDS_GROSS")
+
+    def test_internal_technician_allocates_all_revenue_to_lunatech(self):
+        with self.auth.connection() as c:
+            c.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,rule_type,"
+                      "rule_value,created_by) VALUES('Job',?,'Percentage',0,?)",
+                      (self.job, self.admin_id))
+            c.execute("UPDATE MarketRevenueShareRules SET share_basis_points=0 WHERE market_id=?",
+                      (self.market,))
+        entry = self.service.preview_technician_earnings(self.batch)["proposed_entries"][0]
+        self.assertEqual((entry["technician_amount_cents"],
+                          entry["lunatech_east_amount_cents"],
+                          entry["lunatech_amount_cents"]), (0, 0, 101))
+
+    def test_existing_calculation_difference_is_not_overwritten(self):
+        self.service.generate_technician_earnings(self.session, self.batch)
+        with self.auth.connection() as c:
+            c.execute("UPDATE MatterportPaymentItems SET amount_received_cents=102 "
+                      "WHERE payment_item_id=?", (self.item,))
+        preview = self.service.preview_technician_earnings(self.batch)
+        self.assertEqual(preview["exceptions"][0]["reason_code"],
+                         "EXISTING_CALCULATION_DIFFERS")
+        with self.auth.connection() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM TechnicianJobEarnings").fetchone()[0], 1)
 
     def test_rule_effective_date_precedence_and_fallbacks(self):
         job = {"completed_at": "2026-01-04T23:00:00", "actual_start_at": "2026-01-03T12:00:00",

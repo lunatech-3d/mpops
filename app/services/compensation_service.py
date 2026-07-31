@@ -57,6 +57,10 @@ class CompensationService:
         raise ValueError("Unsupported compensation rule type")
 
     @staticmethod
+    def _percentage_display(basis_points: int) -> str:
+        return format((Decimal(basis_points) / Decimal(100)).normalize(), "f") + "%"
+
+    @staticmethod
     def _technician(connection: sqlite3.Connection, job: sqlite3.Row):
         completed = job["completed_at"]
         rows = connection.execute("""
@@ -116,6 +120,34 @@ class CompensationService:
                 "Market": "Market Default", "System": "System Default"}[rule["scope_type"]]
 
     @staticmethod
+    def reconcile_financial_components(gross_revenue_cents: int,
+                                       components: dict[str, int]) -> dict[str, Any]:
+        """Describe whether imported financial metadata is a safe gross breakdown."""
+        component_sum = sum(components.values())
+        if not any(components.values()):
+            status, warning = "No component financial records", None
+        elif component_sum == gross_revenue_cents:
+            status, warning = "Reconciled", None
+        elif component_sum > gross_revenue_cents:
+            status = "Components exceed gross; likely overlapping metadata"
+            warning = (
+                f"Financial component fields total ${component_sum / 100:,.2f}, which exceeds "
+                f"the matched gross payment of ${gross_revenue_cents / 100:,.2f}. The Overall "
+                "technician percentage was applied to the matched gross payment to avoid "
+                "double-counting."
+            )
+        else:
+            status = "Components are less than gross"
+            warning = (
+                f"Financial component fields total ${component_sum / 100:,.2f}, which does not "
+                f"reconcile to the matched gross payment of ${gross_revenue_cents / 100:,.2f}."
+            )
+        return {"component_sum_cents": component_sum,
+                "component_reconciliation_status": status,
+                "component_reconciliation_warning": warning,
+                "components_reconciled": component_sum == gross_revenue_cents}
+
+    @staticmethod
     def _exception(base: dict[str, Any], code: str, message: str) -> dict[str, Any]:
         return {**base, "reason_code": code, "message": message}
 
@@ -163,34 +195,65 @@ class CompensationService:
                 if isinstance(gross_value, bool) or not isinstance(gross_value, int) or gross_value < 0:
                     exceptions.append(self._exception(base, "INVALID_FINANCIAL_AMOUNT",
                         "Gross revenue must be a nonnegative integer number of cents.")); continue
-                revenue = gross_value
+                gross_revenue_cents = gross_value
                 financial = connection.execute("""SELECT
                     COALESCE(SUM(ct_rate),0), COALESCE(SUM(ct_travel_payout),0),
                     COALESCE(SUM(ct_off_hours_payout),0)
                     FROM JobFinancials WHERE job_id=?""", (item["job_id"],)).fetchone()
                 try:
-                    component_revenue = [("Base", self._financial_cents(financial[0])),
-                                         ("Travel", self._financial_cents(financial[1])),
-                                         ("Off Hours", self._financial_cents(financial[2]))]
+                    component_values = {"Base": self._financial_cents(financial[0]),
+                                        "Travel": self._financial_cents(financial[1]),
+                                        "Off Hours": self._financial_cents(financial[2])}
                 except ValueError as exc:
                     exceptions.append(self._exception(base, "INVALID_FINANCIAL_AMOUNT", str(exc))); continue
-                # Imported receipts remain the safe basis for older jobs which do not
-                # yet have component financial records.
-                if not any(value for _, value in component_revenue):
-                    component_revenue = [("Overall", revenue)]
-                components, amount = [], 0
                 resolver = RevenueRuleService(self.auth)
-                for component, basis in component_revenue:
-                    if not basis:
-                        continue
+                reconciliation = self.reconcile_financial_components(
+                    gross_revenue_cents, component_values)
+                try:
+                    overall_rule = resolver.resolve_technician_rule(job_id=item["job_id"],
+                        tech_id=tech["tech_id"], market_id=item["market_id"],
+                        effective_date=effective_date, compensation_component="Overall")
+                except RuleConfigurationError as exc:
+                    exceptions.append(self._exception(base, "NO_TECHNICIAN_RULE", str(exc))); continue
+                except RuleDataIntegrityError as exc:
+                    exceptions.append(self._exception(base, "AMBIGUOUS_TECHNICIAN_RULE", str(exc))); continue
+
+                resolved_component_rules = []
+                for component, basis in component_values.items():
+                    if not basis: continue
                     try:
                         rule = resolver.resolve_technician_rule(job_id=item["job_id"],
                             tech_id=tech["tech_id"], market_id=item["market_id"],
                             effective_date=effective_date, compensation_component=component)
-                    except RuleConfigurationError as exc:
-                        exceptions.append(self._exception(base, "NO_TECHNICIAN_RULE", str(exc))); break
+                    except RuleConfigurationError:
+                        continue
                     except RuleDataIntegrityError as exc:
                         exceptions.append(self._exception(base, "AMBIGUOUS_TECHNICIAN_RULE", str(exc))); break
+                    if rule["compensation_component"] != "Overall":
+                        resolved_component_rules.append((component, basis, rule))
+                else:
+                    pass
+                if exceptions and exceptions[-1].get("payment_item_id") == item["payment_item_id"]:
+                    continue
+
+                components, amount = [], 0
+                if resolved_component_rules:
+                    if not reconciliation["components_reconciled"]:
+                        exceptions.append(self._exception(base,
+                            "FINANCIAL_COMPONENTS_DO_NOT_RECONCILE",
+                            "Component-specific technician rules require financial components "
+                            "that reconcile exactly to matched gross payment.")); continue
+                    calculation_parts = []
+                    for component, basis in component_values.items():
+                        if not basis: continue
+                        rule = resolver.resolve_technician_rule(job_id=item["job_id"],
+                            tech_id=tech["tech_id"], market_id=item["market_id"],
+                            effective_date=effective_date, compensation_component=component)
+                        calculation_parts.append((component, basis, rule))
+                else:
+                    calculation_parts = [("Overall", gross_revenue_cents, overall_rule)]
+
+                for component, basis, rule in calculation_parts:
                     source = self._rule_source(rule)
                     calculated = self.calculate_amount(basis, rule["rule_type"], int(rule["rule_value"]))
                     amount += calculated
@@ -200,10 +263,6 @@ class CompensationService:
                         "rule_scope_type": rule["scope_type"], "rule_scope_id": rule["scope_id"],
                         "resolved_component": rule["compensation_component"],
                         "rule_source": source, "calculated_amount_cents": calculated})
-                if len(components) != len([x for x in component_revenue if x[1]]): continue
-                if amount > revenue:
-                    exceptions.append(self._exception(base, "TECHNICIAN_AMOUNT_EXCEEDS_GROSS",
-                        "Technician compensation exceeds gross payment revenue.")); continue
                 try:
                     east_rule = resolver.resolve_market_revenue_rule(market_id=item["market_id"],
                         effective_date=effective_date, recipient_code="LUNATECH_EAST")
@@ -212,17 +271,19 @@ class CompensationService:
                 except RuleDataIntegrityError as exc:
                     exceptions.append(self._exception(base, "AMBIGUOUS_MARKET_REVENUE_RULE", str(exc))); continue
                 east_bp = int(east_rule["share_basis_points"])
+                east_amount = self.calculate_amount(gross_revenue_cents, "Percentage", east_bp)
+                if amount + east_amount > gross_revenue_cents:
+                    exceptions.append(self._exception(base, "TECHNICIAN_AMOUNT_EXCEEDS_GROSS",
+                        "Technician compensation exceeds gross payment after the LunaTech-East allocation.")); continue
                 contractual = (len(components) == 1 and components[0]["component"] == "Overall"
                                and components[0]["rule_type"] == "Percentage")
                 tech_bp = (components[0]["rule_value"] if contractual else
-                           (int((Decimal(amount) * 10000 / Decimal(revenue)).quantize(
-                                Decimal("1"), rounding=ROUND_HALF_UP)) if revenue else 0))
+                           (int((Decimal(amount) * 10000 / Decimal(gross_revenue_cents)).quantize(
+                                Decimal("1"), rounding=ROUND_HALF_UP)) if gross_revenue_cents else 0))
                 if tech_bp + east_bp > 10000:
                     exceptions.append(self._exception(base, "REVENUE_PERCENTAGES_EXCEED_100",
                         "Technician and LunaTech-East shares exceed 100%.")); continue
-                east_amount = int((Decimal(revenue) * Decimal(east_bp) / Decimal(10000)).quantize(
-                    Decimal("1"), rounding=ROUND_HALF_UP))
-                lunatech_amount = revenue - amount - east_amount
+                lunatech_amount = gross_revenue_cents - amount - east_amount
                 if lunatech_amount < 0:
                     exceptions.append(self._exception(base, "REVENUE_PERCENTAGES_EXCEED_100",
                         "Calculated company shares exceed gross revenue.")); continue
@@ -236,11 +297,11 @@ class CompensationService:
                 allocation = connection.execute("SELECT * FROM CompanyRevenueAllocations "
                     "WHERE payment_item_id=? AND allocation_status<>'Superseded'",
                     (item["payment_item_id"],)).fetchone()
-                if existing and (existing["revenue_basis_cents"] != revenue or
+                if existing and (existing["revenue_basis_cents"] != gross_revenue_cents or
                         existing["calculated_amount_cents"] != amount):
                     exceptions.append(self._exception(base, "EXISTING_CALCULATION_DIFFERS",
                         "Current technician earning differs from the resolved calculation.")); continue
-                if allocation and (allocation["gross_revenue_cents"] != revenue or
+                if allocation and (allocation["gross_revenue_cents"] != gross_revenue_cents or
                         allocation["technician_amount_cents"] != amount or
                         allocation["lunatech_east_amount_cents"] != east_amount or
                         allocation["lunatech_amount_cents"] != lunatech_amount or
@@ -252,11 +313,19 @@ class CompensationService:
                     (tech["preferred_name"] or tech["first_name"], tech["last_name"]))),
                     "market_id": item["market_id"], "market_name": item["market_name"],
                     "effective_rule_date": effective_date,
-                    "revenue_basis_cents": revenue, "rule_type": rule["rule_type"],
+                    "gross_revenue_cents": gross_revenue_cents,
+                    "technician_calculation_basis_cents": sum(p[1] for p in calculation_parts),
+                    "technician_rule_type": rule["rule_type"],
+                    "technician_rule_value": int(rule["rule_value"]),
+                    "technician_rule_source": source,
+                    **reconciliation, "component_values_cents": component_values,
+                    "revenue_basis_cents": gross_revenue_cents, "rule_type": rule["rule_type"],
                     "rule_value": int(rule["rule_value"]), "rule_source": source,
                     "components": components,
-                    "effective_rate_display": (f"{(Decimal(amount) * 100 / Decimal(revenue)):.2f}%"
-                                               if revenue else "—"),
+                    "effective_rate_display": (self._percentage_display(tech_bp) if contractual else
+                        (f"{(Decimal(amount) * 100 / Decimal(gross_revenue_cents)):.2f}%"
+                         if gross_revenue_cents else "—")),
+                    "technician_amount_cents": amount,
                     "calculated_amount_cents": amount,
                     "technician_rule_ids": [c["compensation_rule_id"] for c in components],
                     "technician_percentage_is_contractual": contractual,
@@ -300,7 +369,14 @@ class CompensationService:
             now, ids, allocation_ids = utc_now_iso(), [], []
             for entry in new_entries:
                 details = {"effective_rule_date": entry["effective_rule_date"],
-                    "gross_revenue_basis_cents": entry["revenue_basis_cents"],
+                    "gross_revenue_basis_cents": entry["gross_revenue_cents"],
+                    "gross_revenue_cents": entry["gross_revenue_cents"],
+                    "technician_calculation_basis_cents": entry["technician_calculation_basis_cents"],
+                    "component_values_cents": entry["component_values_cents"],
+                    "component_sum_cents": entry["component_sum_cents"],
+                    "component_reconciliation_status": entry["component_reconciliation_status"],
+                    "component_reconciliation_warning": entry["component_reconciliation_warning"],
+                    "components_reconciled": entry["components_reconciled"],
                     "technician_id": entry["technician_id"], "market_id": entry["market_id"],
                     "rule_type": entry["rule_type"], "rule_source": entry["rule_source"],
                     "rounding_method": "ROUND_HALF_UP", "technician_components": entry.get("components", []),

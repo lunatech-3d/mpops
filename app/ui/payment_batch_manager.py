@@ -364,7 +364,12 @@ class PaymentBatchDetail(tk.Toplevel):
                 f"Unallocated / exceptions: {format_cents(totals['unallocated_total_cents'])}\n"
                 f"Technician earnings: {status_counts['Pending']} Pending   "
                 f"{status_counts['Approved']} Approved   {status_counts['Paid']} Paid   "
-                f"{status_counts['Voided']} Voided")
+                f"{status_counts['Voided']} Voided" +
+                ("\nWarnings:\n" + "\n".join(f"• {warning}" for warning in
+                    [entry.get("component_reconciliation_warning")
+                     for entry in preview["proposed_entries"]] if warning)
+                 if any(entry.get("component_reconciliation_warning")
+                        for entry in preview["proposed_entries"]) else ""))
             for posted in posted_rows:
                 paid_status.setdefault(posted["tech_id"], []).append(posted["earning_status"])
             for entry in preview["proposed_entries"]:
