@@ -97,29 +97,43 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
 
     shell = ttk.Frame(dialog)
     shell.pack(fill="both", expand=True)
-    scrollable = ScrollableFrame(shell)
-    scrollable.pack(fill="both", expand=True)
-    outer = scrollable.content
-    outer.configure(padding=PADDING)
-    outer.columnconfigure(1, weight=1)
+    notebook = ttk.Notebook(shell)
+    notebook.pack(fill="both", expand=True, padx=PADDING, pady=(PADDING, 0))
 
-    labels = (
-        ("external_job_id", "External Job ID *"),
-        ("ap_invoice_number", "AP Invoice Number"),
-        ("market_id", "Market"),
-        (PRIMARY_TECHNICIAN_FIELD, "Technician"),
-        ("client_name_source", "Client"),
-        ("project_name_source", "Project"),
-        ("scheduled_start_at", "Scheduled Start (MM/DD/YYYY h:mm AM/PM)"),
-        ("capture_address_raw", "Capture Address"),
-        ("city", "City"),
-        ("state", "State"),
-        ("postal_code", "ZIP / Postal Code"),
-        ("requested_capture_size", "Requested Capture Size"),
-        ("onsite_contact_name", "On-site Contact"),
-        ("onsite_contact_email", "Contact Email"),
-        ("onsite_contact_phone", "Contact Phone"),
-    )
+    tab_contents = {}
+    for tab_name in ("General", "Contact", "Details", "Financial"):
+        scrollable = ScrollableFrame(notebook)
+        notebook.add(scrollable, text=tab_name)
+        content = scrollable.content
+        content.configure(padding=PADDING)
+        content.columnconfigure(1, weight=1)
+        tab_contents[tab_name] = content
+
+    labels_by_tab = {
+        "General": (
+            ("external_job_id", "External Job ID *"),
+            ("market_id", "Market"),
+            (PRIMARY_TECHNICIAN_FIELD, "Technician"),
+            ("client_name_source", "Client"),
+            ("project_name_source", "Project"),
+            ("scheduled_start_at", "Scheduled Start (MM/DD/YYYY h:mm AM/PM)"),
+        ),
+        "Contact": (
+            ("capture_address_raw", "Capture Address"),
+            ("city", "City"),
+            ("state", "State"),
+            ("postal_code", "ZIP / Postal Code"),
+            ("onsite_contact_name", "On-site Contact"),
+            ("onsite_contact_email", "Contact Email"),
+            ("onsite_contact_phone", "Contact Phone"),
+        ),
+        "Details": (
+            ("requested_capture_size", "Requested Capture Size"),
+        ),
+        "Financial": (
+            ("ap_invoice_number", "AP Invoice Number"),
+        ),
+    }
 
     variables = {
         name: tk.StringVar(value=(format_display_datetime((job or {}).get(name))
@@ -150,39 +164,45 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     )
 
     first = None
-    row = 0
-    for name, label in labels:
-        ttk.Label(outer, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
-        if name == "ap_invoice_number":
-            invoices = ", ".join(
-                record["ap_invoice_number"]
-                for record in (job or {}).get("financial_records", [])
-                if record.get("ap_invoice_number")
+    next_rows = {}
+    for tab_name, labels in labels_by_tab.items():
+        outer = tab_contents[tab_name]
+        for row, (name, label) in enumerate(labels):
+            ttk.Label(outer, text=label).grid(
+                row=row, column=0, sticky="w", padx=(0, 12), pady=4
             )
-            entry = ttk.Entry(outer, state="readonly")
-            entry.configure(state="normal")
-            entry.insert(0, invoices)
-            entry.configure(state="readonly")
-        elif name == "market_id":
-            entry = ttk.Combobox(
-                outer,
-                textvariable=market_var,
-                values=tuple(market_display_to_id),
-                state="readonly",
-            )
-        elif name == PRIMARY_TECHNICIAN_FIELD:
-            entry = ttk.Combobox(
-                outer,
-                textvariable=technician_var,
-                values=("", *technician_display_to_id),
-                state="readonly",
-            )
-        else:
-            entry = ttk.Entry(outer, textvariable=variables[name])
-        entry.grid(row=row, column=1, sticky="ew", pady=4)
-        first = first or entry
-        row += 1
+            if name == "ap_invoice_number":
+                invoices = ", ".join(
+                    record["ap_invoice_number"]
+                    for record in (job or {}).get("financial_records", [])
+                    if record.get("ap_invoice_number")
+                )
+                entry = ttk.Entry(outer, state="readonly")
+                entry.configure(state="normal")
+                entry.insert(0, invoices)
+                entry.configure(state="readonly")
+            elif name == "market_id":
+                entry = ttk.Combobox(
+                    outer,
+                    textvariable=market_var,
+                    values=tuple(market_display_to_id),
+                    state="readonly",
+                )
+            elif name == PRIMARY_TECHNICIAN_FIELD:
+                entry = ttk.Combobox(
+                    outer,
+                    textvariable=technician_var,
+                    values=("", *technician_display_to_id),
+                    state="readonly",
+                )
+            else:
+                entry = ttk.Entry(outer, textvariable=variables[name])
+            entry.grid(row=row, column=1, sticky="ew", pady=4)
+            first = first or entry
+        next_rows[tab_name] = len(labels)
 
+    outer = tab_contents["General"]
+    row = next_rows["General"]
     ttk.Label(outer, text="Status").grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
     status = ttk.Combobox(
         outer, textvariable=variables["job_status"], values=STATUS_VALUES, state="readonly"
@@ -193,6 +213,8 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     row += 1
 
     if job is not None:
+        outer = tab_contents["Financial"]
+        row = next_rows["Financial"]
         financial_frame = ttk.LabelFrame(outer, text="Financial Information", padding=6)
         financial_frame.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(8, 4))
         financial_grid = ttk.Treeview(
@@ -215,8 +237,8 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
                 record.get("ct_off_hours_payout") or 0,
             ))
         financial_grid.pack(fill="x")
-        row += 1
-
+    outer = tab_contents["Details"]
+    row = next_rows["Details"]
     ttk.Label(outer, text="Internal Notes").grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=4)
     notes = tk.Text(outer, height=8, wrap="word")
     notes.grid(row=row, column=1, sticky="nsew", pady=4)
