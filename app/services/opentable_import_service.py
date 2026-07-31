@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import csv
 import json
-import os
 import re
 from collections import defaultdict
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 from app.date_utils import utc_now_iso
@@ -318,7 +318,7 @@ class OpenTableImportService:
                 "parent_record_count": group["parent_record_count"],
             })
         return {
-            "file_name": os.path.basename(file_path),
+            "file_name": Path(file_path).name,
             "groups": groups,
             "items": items,
             "counts": dict(counts),
@@ -387,7 +387,7 @@ class OpenTableImportService:
                         self._number(row.get("Capture Size - Requested")),
                         source_json,
                         now,
-                        os.path.basename(file_path),
+                        Path(file_path).name,
                         int(row["__source_row_number"]),
                     )
                     if source_record is None:
@@ -460,7 +460,7 @@ class OpenTableImportService:
                 "opentable_csv_imported",
                 actor_user_id=session.user_id,
                 details={
-                    "file_name": os.path.basename(file_path),
+                    "file_name": Path(file_path).name,
                     "created": result["created"],
                     "updated": result["updated"],
                     "skipped": result["skipped"],

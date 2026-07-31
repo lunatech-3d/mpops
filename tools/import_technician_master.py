@@ -1,8 +1,8 @@
 """One-time importer for the LunaTech Technician Master CSV.
 
-Run from Git Bash:
+Run from the project root in any shell:
     python tools/import_technician_master.py \
-      --database C:/sqlite/mpops/database/mpops.db \
+      --database database/mpops.db \
       --file "imports/LunaTech_Technician_Master.xlsx - Technician Master.csv" \
       --actor-username YOUR_ADMIN_USERNAME \
       --dry-run

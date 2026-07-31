@@ -7,7 +7,7 @@ from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from app.config import PROJECT_ROOT, Settings
+from app.config import DEFAULT_DATABASE, PROJECT_ROOT, Settings, get_settings
 from app.security.auth import AuthService, Session
 from app.security.passwords import hash_password, verify_password
 from app.security.user_manager import AuthorizationError, UserManager
@@ -16,6 +16,17 @@ from app.main import requires_initial_admin
 from app.resources import resource_path
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog, validate_confirmation, validate_identity
 from app.ui.main_window import MainWindow, _fit_logo
+
+
+class ConfigurationTests(unittest.TestCase):
+    def test_database_defaults_to_project_database_directory(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(get_settings().database_path, DEFAULT_DATABASE)
+
+    def test_database_environment_variable_overrides_default(self):
+        override = Path("custom") / "mpops.db"
+        with patch.dict(os.environ, {"MPOPS_DB_PATH": str(override)}, clear=True):
+            self.assertEqual(get_settings().database_path, override)
 
 
 class ApplicationServiceTests(unittest.TestCase):

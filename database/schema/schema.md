@@ -1,8 +1,8 @@
 # Matterport Ops database schema
 
 This document describes the reconciled production schema and the approved design for
-new operational tables. The live SQLite database is
-`C:/sqlite/mpops/database/mpops.db` (overridable with `MPOPS_DB_PATH`). It is excluded
+new operational tables. The live SQLite database is `database/mpops.db` under the
+project root (overridable with `MPOPS_DB_PATH`). It is excluded
 from Git because it contains credentials and operational/personal data; only schema,
 migration, documentation, and test artifacts belong in the repository.
 

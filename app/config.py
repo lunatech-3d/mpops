@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_DATABASE = PROJECT_ROOT / "database" / "mpops.db"
 
 
 @dataclass(frozen=True)
@@ -21,7 +22,7 @@ class Settings:
 
 def get_settings() -> Settings:
     """Load settings from the ``MPOPS_`` environment namespace."""
-    database_path = Path(os.environ.get("MPOPS_DB_PATH", "C:/sqlite/mpops/database/mpops.db"))
+    database_path = Path(os.environ.get("MPOPS_DB_PATH", str(DEFAULT_DATABASE)))
     iterations = int(os.environ.get("MPOPS_PASSWORD_ITERATIONS", "600000"))
     if iterations < 100_000:
         raise ValueError("MPOPS_PASSWORD_ITERATIONS must be at least 100000")

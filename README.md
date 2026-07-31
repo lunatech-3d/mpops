@@ -28,8 +28,9 @@ rather than selecting one implicitly. The Technician Manager UI remains a later 
 
 ## Database and current scope
 
-The production database defaults to `C:/sqlite/mpops/database/mpops.db`. Set
-`MPOPS_DB_PATH` to override it (tests always use temporary paths). The parent directory,
+The production database defaults to `database/mpops.db` under the project root. Set
+`MPOPS_DB_PATH` to override it with any platform-appropriate path (tests always use
+temporary paths). The parent directory,
 canonical initial schema, and transactional forward-only migrations are handled at
 startup while preserving existing records and password hashes. The live database and
 its WAL/journal sidecars are ignored because they contain sensitive data.
