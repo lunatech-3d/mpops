@@ -40,11 +40,22 @@ class Session:
 class AuthService:
     def __init__(self, settings: Settings | None = None):
         self.settings = settings or get_settings()
-        self.settings.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self.initialize_database()
+        if self.settings.reporting_copy:
+            if not self.settings.database_path.is_file():
+                raise FileNotFoundError("The configured reporting database does not exist.")
+            with self.connect() as connection:
+                if connection.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    raise sqlite3.DatabaseError("The reporting database failed its integrity check.")
+        else:
+            self.settings.database_path.parent.mkdir(parents=True, exist_ok=True)
+            self.initialize_database()
 
     def connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.settings.database_path)
+        if self.settings.reporting_copy:
+            uri = self.settings.database_path.resolve().as_uri() + "?mode=ro"
+            connection = sqlite3.connect(uri, uri=True)
+        else:
+            connection = sqlite3.connect(self.settings.database_path)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
@@ -108,11 +119,14 @@ class AuthService:
                 (normalized,),
             ).fetchone()
             if user is None or not user["is_active"] or not verify_password(password, user["password_hash"]):
-                record_event(connection, "login_failed", details={"username": normalized})
+                if not self.settings.reporting_copy:
+                    record_event(connection, "login_failed", details={"username": normalized})
                 # Persist the audit event before raising: sqlite's context manager
                 # rolls back a transaction when an exception leaves the block.
-                connection.commit()
+                if not self.settings.reporting_copy:
+                    connection.commit()
                 raise AuthenticationError("Invalid username or password")
-            connection.execute("UPDATE Users SET last_login_at = ? WHERE id = ?", (utc_now_iso(), user["id"]))
-            record_event(connection, "login_succeeded", actor_user_id=user["id"])
+            if not self.settings.reporting_copy:
+                connection.execute("UPDATE Users SET last_login_at = ? WHERE id = ?", (utc_now_iso(), user["id"]))
+                record_event(connection, "login_succeeded", actor_user_id=user["id"])
         return Session(user["id"], user["username"], user["role"], user["display_name"])

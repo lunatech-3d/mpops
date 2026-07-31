@@ -49,3 +49,14 @@ python -m app.verify_database
 ```
 
 See [`docs/architecture/authentication.md`](docs/architecture/authentication.md) for security boundaries and [`docs/decisions/0001-independent-project.md`](docs/decisions/0001-independent-project.md) for project separation.
+# Database backup and reporting copies
+
+Use **Database Backup** in the navigation to select a local Google Drive for
+Desktop folder and create a verified backup. MPOPS creates timestamped history
+files and atomically refreshes `mpops_latest.db`; the synchronized copy must
+never be selected as the operational database.
+
+To open a downloaded, local copy for reporting, set `MPOPS_DB_PATH` to that
+copy and set `MPOPS_REPORTING_COPY=1` before launching MPOPS. Reporting mode
+opens SQLite with `mode=ro`, displays a reporting-copy banner, and exposes only
+dashboard/report navigation. It is a one-way workflow and does not merge data.

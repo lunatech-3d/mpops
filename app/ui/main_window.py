@@ -12,6 +12,9 @@ from app.ui.payment_batch_manager import PaymentBatchManager
 from app.ui.user_manager_window import open_user_manager
 from app.ui.technician_manager import TechnicianManager
 from app.ui.styles import NAV_BACKGROUND, PADDING
+from app.services.backup_service import BackupService
+from app.ui.backup_manager import BackupManager
+from app.date_utils import format_display_datetime
 
 
 def _fit_logo(image, max_width=180, max_height=48):
@@ -49,11 +52,23 @@ class MainWindow:
             header,
             text=f"Signed in as: {session.display_name or session.username} | Role: {session.role.title()}",
         ).grid(row=0, column=1, sticky="e", padx=(PADDING, 0))
+        if auth.settings.reporting_copy:
+            modified = __import__("datetime").datetime.fromtimestamp(
+                auth.settings.database_path.stat().st_mtime
+            ).astimezone()
+            ttk.Label(
+                header,
+                text=f"REPORTING COPY — Backup file modified {format_display_datetime(modified)}",
+                foreground="#9b1c1c",
+                font=("Segoe UI", 11, "bold"),
+            ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         header.columnconfigure(0, weight=1)
         body=ttk.Frame(root);body.pack(fill="both",expand=True)
         nav=ttk.Frame(body,padding=PADDING);nav.pack(side="left",fill="y")
         self.content=ttk.Frame(body,style="App.TFrame");self.content.pack(side="left",fill="both",expand=True)
-        for name in ("Dashboard","Jobs","Technicians","Markets","Clients","Matterport Payments","Reports"):
+        names = (("Dashboard", "Reports") if auth.settings.reporting_copy else
+                 ("Dashboard","Jobs","Technicians","Markets","Clients","Matterport Payments","Reports"))
+        for name in names:
             command=(self.show_dashboard if name=="Dashboard" else
                      self.show_jobs if name=="Jobs" else
                      self.show_technicians if name=="Technicians" else
@@ -61,7 +76,7 @@ class MainWindow:
                      self.show_payments if name=="Matterport Payments" else
                      lambda n=name:self.show_placeholder(n))
             ttk.Button(nav,text=name,style="Nav.TButton",command=command,width=18).pack(fill="x",pady=2)
-        if session.role in {"admin", "operator"}:
+        if session.role in {"admin", "operator"} and not auth.settings.reporting_copy:
             ttk.Separator(nav).pack(fill="x",pady=8)
             ttk.Button(
                 nav,
@@ -70,13 +85,16 @@ class MainWindow:
                 width=18,
             ).pack(fill="x",pady=2)
         ttk.Separator(nav).pack(fill="x",pady=8)
-        if session.role == "admin":
+        if session.role == "admin" and not auth.settings.reporting_copy:
             ttk.Button(nav,text="Administration → Users",command=self.open_users).pack(fill="x",pady=2)
+        if not auth.settings.reporting_copy:
+            ttk.Button(nav, text="Database Backup", command=self.show_backup).pack(fill="x", pady=2)
         ttk.Button(nav,text="Log Out",command=self.logout).pack(fill="x",pady=(20,2))
-        ttk.Button(nav,text="Exit",command=root.destroy).pack(fill="x",pady=2)
+        ttk.Button(nav,text="Exit",command=self.request_exit).pack(fill="x",pady=2)
+        root.protocol("WM_DELETE_WINDOW", self.request_exit)
         # Matterport jobs are the current operational focus, so make the job
         # list the first screen users see after signing in.
-        self.show_jobs()
+        self.show_dashboard() if auth.settings.reporting_copy else self.show_jobs()
 
     def clear(self):
         for child in self.content.winfo_children(): child.destroy()
@@ -90,6 +108,8 @@ class MainWindow:
         self.clear(); MarketManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
     def show_payments(self):
         self.clear(); PaymentBatchManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
+    def show_backup(self):
+        self.clear(); BackupManager(self.content, self.auth, self.session).pack(fill="both", expand=True)
     def show_placeholder(self,name):
         self.clear(); frame=ttk.Frame(self.content,padding=PADDING*2,style="App.TFrame");frame.pack(fill="both",expand=True)
         ttk.Label(frame,text=name,style="Header.TLabel").pack(anchor="w");ttk.Label(frame,text="This module has not yet been implemented.",style="Status.TLabel").pack(anchor="w",pady=12)
@@ -110,3 +130,24 @@ class MainWindow:
         Session.clear_environment()
         for child in self.root.winfo_children():child.destroy()
         self.root.withdraw();self.on_logout()
+
+    def request_exit(self):
+        if self.auth.settings.reporting_copy:
+            self.root.destroy(); return
+        service = BackupService(self.auth)
+        reminder = service.get_setting("backup_close_reminder", "1") == "1"
+        if reminder and not service.backed_up_today():
+            choice = messagebox.askyesnocancel(
+                "Daily database backup",
+                "No database backup has been completed today.\n\nWould you like to back up the database before exiting?\n\n"
+                "Yes: Back Up Now    No: Exit Without Backup    Cancel: Keep MPOPS open",
+                parent=self.root,
+            )
+            if choice is None:
+                return
+            if choice:
+                self.show_backup()
+                manager = next((child for child in self.content.winfo_children() if isinstance(child, BackupManager)), None)
+                if manager is None or not manager.backup_now():
+                    return
+        self.root.destroy()

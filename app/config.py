@@ -16,6 +16,7 @@ class Settings:
     schema_path: Path = PROJECT_ROOT / "database" / "schema" / "001_initial.sql"
     migrations_path: Path = PROJECT_ROOT / "database" / "migrations"
     password_iterations: int = 600_000
+    reporting_copy: bool = False
 
 
 def get_settings() -> Settings:
@@ -24,4 +25,9 @@ def get_settings() -> Settings:
     iterations = int(os.environ.get("MPOPS_PASSWORD_ITERATIONS", "600000"))
     if iterations < 100_000:
         raise ValueError("MPOPS_PASSWORD_ITERATIONS must be at least 100000")
-    return Settings(database_path=database_path, password_iterations=iterations)
+    reporting_copy = os.environ.get("MPOPS_REPORTING_COPY", "").strip().lower() in {"1", "true", "yes", "on"}
+    return Settings(
+        database_path=database_path,
+        password_iterations=iterations,
+        reporting_copy=reporting_copy,
+    )
