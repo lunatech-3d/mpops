@@ -353,13 +353,19 @@ class PaymentBatchDetail(tk.Toplevel):
             compensation = CompensationService(self.service.auth)
             preview = compensation.preview_technician_earnings(self.batch_id)
             totals = preview["summary"]
+            posted_rows = compensation.list_technician_earnings(payment_batch_id=self.batch_id)
+            status_counts = {status: sum(row["earning_status"] == status for row in posted_rows)
+                             for status in ("Pending", "Approved", "Paid", "Voided")}
             self.allocation_totals_var.set(
                 f"Gross: {format_cents(totals['gross_revenue_total_cents'])}   "
                 f"Technicians: {format_cents(totals['technician_total_cents'])}   "
                 f"LunaTech-East: {format_cents(totals['lunatech_east_total_cents'])}   "
                 f"LunaTech: {format_cents(totals['lunatech_total_cents'])}   "
-                f"Unallocated / exceptions: {format_cents(totals['unallocated_total_cents'])}")
-            for posted in compensation.list_technician_earnings(payment_batch_id=self.batch_id):
+                f"Unallocated / exceptions: {format_cents(totals['unallocated_total_cents'])}\n"
+                f"Technician earnings: {status_counts['Pending']} Pending   "
+                f"{status_counts['Approved']} Approved   {status_counts['Paid']} Paid   "
+                f"{status_counts['Voided']} Voided")
+            for posted in posted_rows:
                 paid_status.setdefault(posted["tech_id"], []).append(posted["earning_status"])
             for entry in preview["proposed_entries"]:
                 bucket = earnings.setdefault(entry["technician_id"],

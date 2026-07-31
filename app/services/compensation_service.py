@@ -404,6 +404,116 @@ class CompensationService:
             return self._get(connection,earning_id)
 
     @staticmethod
+    def _approval_failure(connection: sqlite3.Connection, earning_id: int) -> str | None:
+        row = connection.execute("""SELECT e.*,t.status technician_status,j.job_id valid_job,
+          i.payment_item_id valid_item,a.company_revenue_allocation_id,a.allocation_status,
+          a.gross_revenue_cents allocation_gross,a.technician_amount_cents,
+          a.lunatech_east_amount_cents,a.lunatech_amount_cents
+          FROM TechnicianJobEarnings e LEFT JOIN Techs t ON t.tech_id=e.tech_id
+          LEFT JOIN Jobs j ON j.job_id=e.job_id
+          LEFT JOIN MatterportPaymentItems i ON i.payment_item_id=e.payment_item_id
+          LEFT JOIN CompanyRevenueAllocations a ON a.technician_earning_id=e.technician_earning_id
+            AND a.allocation_status<>'Superseded'
+          WHERE e.technician_earning_id=?""", (earning_id,)).fetchone()
+        if not row: return "earning does not exist"
+        if row["earning_status"] != "Pending": return f"earning is {row['earning_status']}, not Pending"
+        if row["technician_status"] != "Active": return "technician is not active"
+        linked = connection.execute("""SELECT p.payment_status FROM TechnicianPaymentEarnings pe
+          JOIN TechnicianPayments p ON p.technician_payment_id=pe.technician_payment_id
+          WHERE pe.technician_earning_id=?""", (earning_id,)).fetchone()
+        if linked and linked[0] not in {"Cancelled", "Failed"}: return "earning is linked to a payment"
+        if row["entry_type"] == "Manual Adjustment":
+            if row["job_id"] is not None and row["valid_job"] is None: return "related job is invalid"
+            return None
+        if row["valid_job"] is None or row["valid_item"] is None: return "related job or payment item is invalid"
+        if row["company_revenue_allocation_id"] is None: return "related company allocation is missing"
+        if row["allocation_status"] != "Calculated": return "company allocation is not Calculated"
+        if row["technician_amount_cents"] != row["net_earning_cents"]: return "allocation technician amount does not match earning"
+        if (row["technician_amount_cents"] + row["lunatech_east_amount_cents"] +
+                row["lunatech_amount_cents"] != row["allocation_gross"]):
+            return "allocation amounts do not total gross revenue"
+        return None
+
+    def approve_technician_earnings(self, session: Session, earning_ids: list[int]) -> list[dict[str, Any]]:
+        self._write(session)
+        ids = list(dict.fromkeys(self._id(value, "earning_id") for value in earning_ids))
+        if not ids: raise ValueError("At least one earning must be selected")
+        with self.auth.connection() as connection:
+            failures = [{"earning_id": value, "reason": reason} for value in ids
+                        if (reason := self._approval_failure(connection, value))]
+            if failures:
+                message = "; ".join(f"{x['earning_id']}: {x['reason']}" for x in failures)
+                raise ValueError(f"Earning approval validation failed: {message}")
+            now = utc_now_iso()
+            for value in ids:
+                row = connection.execute("SELECT entry_type,tech_id,net_earning_cents FROM TechnicianJobEarnings WHERE technician_earning_id=?", (value,)).fetchone()
+                changed = connection.execute("""UPDATE TechnicianJobEarnings SET earning_status='Approved',
+                  approved_at=?,approved_by=? WHERE technician_earning_id=? AND earning_status='Pending'""",
+                  (now,session.user_id,value)).rowcount
+                if changed != 1: raise ValueError("Concurrent earning approval detected")
+                if row["entry_type"] != "Manual Adjustment":
+                    connection.execute("""UPDATE CompanyRevenueAllocations SET allocation_status='Approved',
+                      approved_at=?,approved_by=? WHERE technician_earning_id=? AND allocation_status='Calculated'""",
+                      (now,session.user_id,value))
+                action = ("technician_earning_adjustment_approved" if row["entry_type"] == "Manual Adjustment"
+                          else "technician_earning_approved")
+                record_event(connection, action, actor_user_id=session.user_id, details={
+                    "earning_id": value, "technician_id": row["tech_id"],
+                    "amount_cents": row["net_earning_cents"], "previous_status": "Pending",
+                    "new_status": "Approved", "timestamp": now})
+            if len(ids) > 1:
+                record_event(connection,"technician_earnings_bulk_approved",actor_user_id=session.user_id,
+                  details={"earning_ids":ids,"count":len(ids),"actor":session.user_id,"timestamp":now})
+            return [self._get(connection, value) for value in ids]
+
+    def approve_technician_earning(self, session: Session, earning_id: int) -> dict[str, Any]:
+        return self.approve_technician_earnings(session, [earning_id])[0]
+
+    def list_earnings_for_review(self, *, status=None, technician_id=None, payment_batch_id=None,
+            job_date_from=None, job_date_to=None, payment_date_from=None, payment_date_to=None,
+            market_id=None, search_text=None, unpaid_only=False):
+        clauses, params = [], []
+        filters = (("e.earning_status",status),("e.tech_id",technician_id),
+                   ("e.payment_batch_id",payment_batch_id),("j.market_id",market_id))
+        for column, value in filters:
+            if value not in (None, "", "All"): clauses.append(column+"=?"); params.append(value)
+        for column, op, value in (("substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10)",">=",job_date_from),
+                                  ("substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10)","<=",job_date_to),
+                                  ("b.payment_date",">=",payment_date_from),("b.payment_date","<=",payment_date_to)):
+            if value: clauses.append(f"{column}{op}?"); params.append(value)
+        if search_text:
+            clauses.append("(j.external_job_id LIKE ? OR j.capture_address_raw LIKE ? OR j.address_1 LIKE ?)")
+            token=f"%{str(search_text).strip()}%"; params.extend((token,token,token))
+        if unpaid_only: clauses.append("e.earning_status<>'Paid'")
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        sql = """SELECT e.*,COALESCE(t.preferred_name,t.first_name)||' '||t.last_name technician_name,
+          j.external_job_id,COALESCE(j.capture_address_raw,j.address_1,'') job_address,
+          substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10) job_date,
+          m.market_name,i.document_number,b.payment_date,b.payment_batch_id matterport_payment_batch_id,
+          a.lunatech_east_amount_cents,a.lunatech_amount_cents,a.allocation_status,
+          pe.technician_payment_id,(pe.technician_payment_id IS NOT NULL) linked_to_payment
+          FROM TechnicianJobEarnings e JOIN Techs t ON t.tech_id=e.tech_id
+          LEFT JOIN Jobs j ON j.job_id=e.job_id LEFT JOIN Markets m ON m.market_id=j.market_id
+          LEFT JOIN MatterportPaymentItems i ON i.payment_item_id=e.payment_item_id
+          LEFT JOIN MatterportPaymentBatches b ON b.payment_batch_id=e.payment_batch_id
+          LEFT JOIN CompanyRevenueAllocations a ON a.technician_earning_id=e.technician_earning_id
+            AND a.allocation_status<>'Superseded'
+          LEFT JOIN TechnicianPaymentEarnings pe ON pe.technician_earning_id=e.technician_earning_id"""
+        with self.auth.connection() as connection:
+            return [dict(r) for r in connection.execute(sql+where+" ORDER BY e.technician_earning_id",params)]
+
+    def get_earning_calculation_details(self, earning_id: int) -> dict[str, Any]:
+        self._id(earning_id,"earning_id")
+        with self.auth.connection() as connection:
+            earning = self._get(connection,earning_id)
+            earning["calculation_details"] = json.loads(earning.get("calculation_details_json") or "{}")
+            allocation = connection.execute("SELECT * FROM CompanyRevenueAllocations WHERE technician_earning_id=? ORDER BY company_revenue_allocation_id DESC LIMIT 1",(earning_id,)).fetchone()
+            earning["allocation"] = dict(allocation) if allocation else None
+            earning["audit_history"] = [dict(r) for r in connection.execute(
+                "SELECT * FROM AuditLog WHERE details_json LIKE ? ORDER BY id",(f'%\"earning_id\": {earning_id}%',))]
+            return earning
+
+    @staticmethod
     def _get(connection, earning_id):
         row=connection.execute("""SELECT e.*,t.first_name,t.last_name,j.external_job_id,i.document_number
           FROM TechnicianJobEarnings e JOIN Techs t ON t.tech_id=e.tech_id
