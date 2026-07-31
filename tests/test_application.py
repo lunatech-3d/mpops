@@ -13,6 +13,7 @@ from app.security.passwords import hash_password, verify_password
 from app.security.user_manager import AuthorizationError, UserManager
 from app.services.jobs_service import JobsService
 from app.main import requires_initial_admin
+from app.resources import resource_path
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog, validate_confirmation, validate_identity
 from app.ui.main_window import MainWindow
 
@@ -29,6 +30,9 @@ class ApplicationServiceTests(unittest.TestCase):
     def tearDown(self):
         Session.clear_environment()
         self.tmp.cleanup()
+
+    def test_packaged_logo_resource_exists(self):
+        self.assertTrue(resource_path("lunatech_logo.png").is_file())
 
     def test_application_modules_import(self):
         for name in ("app.main", "app.ui.styles", "app.ui.dashboard", "app.ui.main_window", "app.ui.user_manager_window",

@@ -30,10 +30,11 @@ class MainWindow:
         header.pack(fill="x")
         brand = ttk.Frame(header)
         brand.grid(row=0, column=0, sticky="w")
-        # Keep the PhotoImage on the window: Tk discards images whose Python
-        # wrapper is garbage-collected.  Subsampling preserves the source
-        # aspect ratio while giving the header a comfortable 32px logo height.
-        self.brand_logo = tk.PhotoImage(file=resource_path("lunatech-logo.png")).subsample(2, 2)
+        # Keep the fitted PhotoImage on the window: Tk discards images whose
+        # Python wrapper is garbage-collected.  Deriving the scale from the
+        # actual asset prevents a large source logo from taking over the form.
+        source_logo = tk.PhotoImage(file=resource_path("lunatech-logo.png"))
+        self.brand_logo = _fit_logo(source_logo)
         ttk.Label(brand, image=self.brand_logo).pack(side="left")
         ttk.Label(brand, text="3D Ops", style="Header.TLabel").pack(side="left", padx=(12, 0))
         ttk.Label(
