@@ -23,7 +23,8 @@ class JobTechnicianAssignmentTests(unittest.TestCase):
         spec.loader.exec_module(migration)
         with self.auth.connection() as connection:
             migration.migrate(connection)
-            connection.execute("ALTER TABLE Jobs ADD COLUMN market_id INTEGER")
+            if "market_id" not in {row[1] for row in connection.execute("PRAGMA table_info(Jobs)")}:
+                connection.execute("ALTER TABLE Jobs ADD COLUMN market_id INTEGER")
             connection.execute("ALTER TABLE Markets ADD COLUMN state TEXT")
         users = UserManager(self.auth)
         users.create_user("admin", "admin-password-123", "admin")

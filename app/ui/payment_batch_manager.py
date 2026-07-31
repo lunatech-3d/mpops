@@ -195,17 +195,21 @@ class PaymentBatchDetail(tk.Toplevel):
         items_frame.rowconfigure(0, weight=1); items_frame.columnconfigure(0, weight=1)
         compensation = ttk.LabelFrame(content, text="Technician Revenue & Compensation", padding=6)
         compensation.pack(fill="x", pady=(0, 8))
-        summary_columns = ("technician", "jobs", "revenue", "rate", "payout", "paid", "override")
+        summary_columns = ("technician", "jobs", "revenue", "rate", "payout", "east", "lunatech", "paid", "override")
         self.technician_summary = ttk.Treeview(compensation, columns=summary_columns,
                                                show="headings", height=4)
         for key, heading, width in (("technician", "Technician", 180), ("jobs", "Jobs", 55),
                                     ("revenue", "Billed", 100), ("rate", "Effective Rate", 105),
                                     ("payout", "Calculated Payout", 125), ("paid", "Paid?", 70),
+                                    ("east", "LunaTech-East", 115), ("lunatech", "LunaTech", 105),
                                     ("override", "Overrides", 85)):
             self.technician_summary.heading(key, text=heading)
             self.technician_summary.column(key, width=width,
                 anchor="e" if key in {"jobs", "revenue", "payout"} else "w")
         self.technician_summary.pack(fill="x")
+        self.allocation_totals_var = tk.StringVar(value="Revenue allocation not calculated.")
+        ttk.Label(compensation, textvariable=self.allocation_totals_var,
+                  style="Section.TLabel").pack(anchor="w", pady=(5, 0))
         totals = ttk.LabelFrame(content, text="Reconciliation", padding=6); totals.pack(fill="x")
         specs = (("Payment Amount", "payment_amount_cents"), ("Imported Total", "imported_total_cents"),
                  ("Difference", "difference_cents"), ("Matched Total", "matched_total_cents"),
@@ -342,17 +346,27 @@ class PaymentBatchDetail(tk.Toplevel):
 
     def _render_technician_summary(self) -> None:
         self.technician_summary.delete(*self.technician_summary.get_children())
+        self.allocation_totals_var.set("Revenue allocation not calculated.")
         earnings = {}
         paid_status = {}
         if self.batch_id and self.batch.get("batch_status") in ("Reconciled", "Approved", "Closed"):
             compensation = CompensationService(self.service.auth)
             preview = compensation.preview_technician_earnings(self.batch_id)
+            totals = preview["summary"]
+            self.allocation_totals_var.set(
+                f"Gross: {format_cents(totals['gross_revenue_total_cents'])}   "
+                f"Technicians: {format_cents(totals['technician_total_cents'])}   "
+                f"LunaTech-East: {format_cents(totals['lunatech_east_total_cents'])}   "
+                f"LunaTech: {format_cents(totals['lunatech_total_cents'])}   "
+                f"Unallocated / exceptions: {format_cents(totals['unallocated_total_cents'])}")
             for posted in compensation.list_technician_earnings(payment_batch_id=self.batch_id):
                 paid_status.setdefault(posted["tech_id"], []).append(posted["earning_status"])
             for entry in preview["proposed_entries"]:
                 bucket = earnings.setdefault(entry["technician_id"],
-                    {"amount": 0, "rates": set(), "override": False})
+                    {"amount": 0, "east": 0, "lunatech": 0, "rates": set(), "override": False})
                 bucket["amount"] += entry["calculated_amount_cents"]
+                bucket["east"] += entry["lunatech_east_amount_cents"]
+                bucket["lunatech"] += entry["lunatech_amount_cents"]
                 bucket["rates"].add(entry.get("effective_rate_display") or
                     (f"{entry['rule_value'] / 100:.2f}%" if entry["rule_type"] == "Percentage" else "Flat"))
                 bucket["override"] |= "Override" in entry["rule_source"]
@@ -363,7 +377,9 @@ class PaymentBatchDetail(tk.Toplevel):
                 "Pending" if statuses else "No")
             self.technician_summary.insert("", "end", values=(subtotal["technician"], subtotal["job_count"],
                 format_cents(subtotal["revenue_cents"]), ", ".join(sorted(earning["rates"])) if earning else "Not calculated",
-                format_cents(earning["amount"]) if earning else "—", paid,
+                format_cents(earning["amount"]) if earning else "—",
+                format_cents(earning["east"]) if earning else "—",
+                format_cents(earning["lunatech"]) if earning else "—", paid,
                 "Yes" if earning and earning["override"] else "No"))
 
     def _submitted(self) -> dict[str, Any]:

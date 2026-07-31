@@ -22,10 +22,12 @@ class CompensationServiceTests(unittest.TestCase):
         self.viewer = Session(self.admin_id, "viewer", "viewer")
         self.service = CompensationService(self.auth)
         with self.auth.connection() as c:
+            self.market = c.execute("INSERT INTO Markets(market_name,created_by) VALUES('North Carolina',?)", (self.admin_id,)).lastrowid
             self.tech = c.execute("INSERT INTO Techs(tech_code,first_name,last_name,created_by,default_pay_percentage) VALUES('T1','Ada','Lovelace',?,70)", (self.admin_id,)).lastrowid
-            self.job = c.execute("INSERT INTO Jobs(external_job_id,job_status,completed_at,created_by) VALUES('JOB-1','Completed','2026-07-01T12:00:00',?)", (self.admin_id,)).lastrowid
+            self.job = c.execute("INSERT INTO Jobs(external_job_id,job_status,completed_at,market_id,created_by) VALUES('JOB-1','Completed','2026-07-01T12:00:00',?,?)", (self.market,self.admin_id)).lastrowid
             c.execute("INSERT INTO JobAssignments(job_id,tech_id,assignment_role,assignment_status,assigned_at,completed_at,assigned_by) VALUES (?,?,'Primary','Completed','2026-06-01','2026-07-01',?)", (self.job,self.tech,self.admin_id))
             c.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,rule_type,rule_value,created_by) VALUES('System',NULL,'Percentage',7000,?)", (self.admin_id,))
+            c.execute("INSERT INTO MarketRevenueShareRules(market_id,recipient_code,share_basis_points,effective_from,created_by) VALUES(?,'LUNATECH_EAST',1000,'2020-01-01',?)", (self.market,self.admin_id))
         payments = PaymentService(self.auth)
         self.batch = payments.create_payment_batch(self.session,{"payment_date":"2026-07-02","payment_amount_cents":101})
         self.item = payments.add_payment_item(self.session,self.batch,{"document_number":"JOB-1","amount_received_cents":101})
@@ -42,6 +44,7 @@ class CompensationServiceTests(unittest.TestCase):
         self.assertEqual(len(self.service.list_technician_earnings()), before)
         self.assertTrue(preview["ready"])
         self.assertEqual(preview["proposed_entries"][0]["calculated_amount_cents"], 71)
+        self.assertEqual(preview["proposed_entries"][0]["lunatech_east_amount_cents"], 10)
         self.assertEqual(preview["proposed_entries"][0]["rule_source"], "System Default")
         result = self.service.generate_technician_earnings(self.session,self.batch)
         earning = self.service.get_technician_earning(result["earning_ids"][0])
@@ -49,6 +52,34 @@ class CompensationServiceTests(unittest.TestCase):
         self.assertEqual(json.loads(earning["calculation_details_json"])["rounding_method"],"ROUND_HALF_UP")
         again = self.service.generate_technician_earnings(self.session,self.batch)
         self.assertTrue(again["idempotent"]); self.assertEqual(again["generated_count"],0)
+        with self.auth.connection() as c:
+            self.assertEqual(c.execute("SELECT COUNT(*) FROM CompanyRevenueAllocations").fetchone()[0], 1)
+
+    def test_complete_north_carolina_allocation_and_rule_trace(self):
+        with self.auth.connection() as c:
+            c.execute("UPDATE MatterportPaymentItems SET amount_received_cents=40382 WHERE payment_item_id=?", (self.item,))
+        entry = self.service.preview_technician_earnings(self.batch)["proposed_entries"][0]
+        self.assertEqual((entry["calculated_amount_cents"], entry["lunatech_east_amount_cents"],
+                          entry["lunatech_amount_cents"]), (28267, 4038, 8077))
+        result = self.service.generate_technician_earnings(self.session, self.batch)
+        with self.auth.connection() as c:
+            allocation = c.execute("SELECT * FROM CompanyRevenueAllocations WHERE company_revenue_allocation_id=?",
+                                   (result["allocation_ids"][0],)).fetchone()
+        details = json.loads(allocation["calculation_details_json"])
+        self.assertEqual(details["technician_compensation_rule_ids"], entry["technician_rule_ids"])
+        self.assertEqual(details["market_revenue_share_rule_id"], entry["market_revenue_share_rule_id"])
+
+    def test_rule_effective_date_precedence_and_fallbacks(self):
+        job = {"completed_at": "2026-01-04T23:00:00", "actual_start_at": "2026-01-03T12:00:00",
+               "scheduled_start_at": "2026-01-02T12:00:00"}
+        self.assertEqual(self.service.rule_effective_date(job, "2026-01-01"), "2026-01-04")
+        job["completed_at"] = None
+        self.assertEqual(self.service.rule_effective_date(job, "2026-01-01"), "2026-01-03")
+        job["actual_start_at"] = None
+        self.assertEqual(self.service.rule_effective_date(job, "2026-01-01"), "2026-01-02")
+        job["scheduled_start_at"] = None
+        self.assertEqual(self.service.rule_effective_date(job, "2026-01-01"), "2026-01-01")
+        self.assertIsNone(self.service.rule_effective_date(job, None))
 
     def test_rule_precedence_flat_and_voided_regeneration(self):
         with self.auth.connection() as c:
@@ -59,7 +90,8 @@ class CompensationServiceTests(unittest.TestCase):
         eid=self.service.generate_technician_earnings(self.session,self.batch)["earning_ids"][0]
         self.service.void_technician_earning(self.session,eid,"wrong assignment")
         self.assertEqual(self.service.get_payment_batch_earnings_summary(self.batch)["entry_count"],0)
-        self.assertEqual(self.service.generate_technician_earnings(self.session,self.batch)["generated_count"],1)
+        # Voiding an earning does not silently supersede the linked company allocation.
+        self.assertTrue(self.service.generate_technician_earnings(self.session,self.batch)["idempotent"])
 
     def test_adjustments_authorization_validation_audit_and_immutability(self):
         with self.assertRaises(AuthorizationError):
