@@ -7,6 +7,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -91,11 +92,20 @@ class BackupService:
             handle, raw_path = tempfile.mkstemp(prefix="mpops-snapshot-", suffix=".db")
             os.close(handle)
             temp_path = Path(raw_path)
-            with self.auth.connect() as source, sqlite3.connect(temp_path) as snapshot:
-                source.backup(snapshot)
+            # A sqlite connection's context manager commits or rolls back, but it
+            # does not close the connection.  Explicitly close both handles before
+            # touching the snapshot as a normal file: Windows otherwise keeps the
+            # temporary database locked and copy/unlink fails with WinError 32.
+            with closing(self.auth.connect()) as source, closing(
+                sqlite3.connect(temp_path)
+            ) as snapshot:
+                with source, snapshot:
+                    source.backup(snapshot)
             if progress:
                 progress("Verifying backup...")
-            with sqlite3.connect(f"file:{temp_path.as_posix()}?mode=ro", uri=True) as check:
+            with closing(
+                sqlite3.connect(f"file:{temp_path.as_posix()}?mode=ro", uri=True)
+            ) as check:
                 integrity = check.execute("PRAGMA integrity_check").fetchone()[0]
             if integrity != "ok":
                 raise sqlite3.DatabaseError(f"Integrity check returned: {integrity}")
