@@ -278,19 +278,39 @@ class JobsService:
 
         week_start = today - timedelta(days=today.weekday())
         month_start = today.replace(day=1)
+        next_month_start = (
+            month_start.replace(year=month_start.year + 1, month=1)
+            if month_start.month == 12
+            else month_start.replace(month=month_start.month + 1)
+        )
+        following_month_start = (
+            next_month_start.replace(year=next_month_start.year + 1, month=1)
+            if next_month_start.month == 12
+            else next_month_start.replace(month=next_month_start.month + 1)
+        )
         ranges = {
             "today": (today, today + timedelta(days=1)),
             "week": (week_start, week_start + timedelta(days=7)),
+            "next_week": (week_start + timedelta(days=7), week_start + timedelta(days=14)),
             "month": (
                 month_start,
-                month_start.replace(year=month_start.year + 1, month=1)
-                if month_start.month == 12
-                else month_start.replace(month=month_start.month + 1),
+                next_month_start,
             ),
+            "next_month": (next_month_start, following_month_start),
         }
         if period not in ranges:
-            raise ValueError("period must be today, week, or month")
+            raise ValueError("period must be today, week, next_week, month, or next_month")
         start, end = ranges[period]
+
+        return self.list_job_activity_range(start, end - timedelta(days=1))
+
+    def list_job_activity_range(self, start: date, end: date) -> list[dict[str, Any]]:
+        """Return scheduled jobs from an inclusive local calendar-date range."""
+        if not isinstance(start, date) or not isinstance(end, date):
+            raise ValueError("start and end must be dates")
+        if start > end:
+            raise ValueError("From Date cannot be after To Date.")
+        exclusive_end = end + timedelta(days=1)
 
         sql = (
             _JOB_SUMMARY_SELECT
@@ -301,7 +321,9 @@ class JobsService:
         with self.auth.connection() as connection:
             return [
                 dict(row)
-                for row in connection.execute(sql, (start.isoformat(), end.isoformat()))
+                for row in connection.execute(
+                    sql, (start.isoformat(), exclusive_end.isoformat())
+                )
             ]
 
     def list_active_technician_options(self) -> list[dict[str, Any]]:
