@@ -49,6 +49,9 @@ _COUNTRY_NAMES = frozenset({
 _ZIP_SUFFIX = re.compile(r"(?:^|\s)(\d{5}(?:-\d{4})?)$")
 _STATE_SUFFIX = re.compile(r"(?:^|\s)([A-Za-z]{2})$")
 _STREET_PREFIX = re.compile(r"^\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?\s+\S")
+_ADDRESS_FIELDS = frozenset({
+    "address_1", "address_2", "city", "state", "postal_code", "county", "country",
+})
 
 
 class OpenTableImportService:
@@ -262,6 +265,23 @@ class OpenTableImportService:
             "cancellation_reason": cancellation_reason,
         }
 
+    @staticmethod
+    def _job_changes(job_data: dict[str, Any], existing: Any) -> dict[str, Any]:
+        """Return import-owned values that differ from an existing job.
+
+        Parsed address fields intentionally include null values. This lets a newer
+        parser remove a value that an older parser incorrectly inferred while the
+        other optional import fields retain the importer's historical, non-destructive
+        null behavior.
+        """
+        return {
+            field: value
+            for field, value in job_data.items()
+            if field != "external_job_id"
+            and (value is not None or field in _ADDRESS_FIELDS)
+            and existing[field] != value
+        }
+
     @classmethod
     def read_csv(cls, file_path: str) -> list[dict[str, Any]]:
         if not isinstance(file_path, str) or not file_path.strip():
@@ -300,7 +320,7 @@ class OpenTableImportService:
             existing_jobs = {
                 row["external_job_id"].casefold(): row
                 for row in connection.execute(
-                    "SELECT job_id, external_job_id FROM Jobs"
+                    "SELECT * FROM Jobs"
                 )
             }
             existing_records = {
@@ -326,7 +346,8 @@ class OpenTableImportService:
                 if existing_records[record_number] != self._source_row_json(row):
                     changed += 1
 
-            if imported == group["source_row_count"] and changed == 0:
+            job_changes = self._job_changes(group["job"], existing_job) if existing_job else {}
+            if imported == group["source_row_count"] and changed == 0 and not job_changes:
                 action = "Skipped"
             elif existing_job is not None:
                 action = "Updated"
@@ -345,6 +366,7 @@ class OpenTableImportService:
                 "source_row_count": group["source_row_count"],
                 "already_imported_rows": imported,
                 "changed_source_rows": changed,
+                "changed_job_fields": sorted(job_changes),
                 "parent_record_count": group["parent_record_count"],
             })
         return {
@@ -370,7 +392,7 @@ class OpenTableImportService:
             for group in preview["groups"]:
                 external_job_id = group["external_job_id"]
                 existing = connection.execute(
-                    "SELECT job_id FROM Jobs WHERE external_job_id = ? COLLATE NOCASE",
+                    "SELECT * FROM Jobs WHERE external_job_id = ? COLLATE NOCASE",
                     (external_job_id,),
                 ).fetchone()
                 job_data = group["job"]
@@ -386,11 +408,8 @@ class OpenTableImportService:
                     result["created"] += 1
                 else:
                     job_id = int(existing["job_id"])
-                    changes = {
-                        field: value
-                        for field, value in job_data.items()
-                        if field != "external_job_id" and value is not None
-                    }
+                    changes = self._job_changes(job_data, existing)
+                    job_changed = bool(changes)
                     assignments = ",".join(f"{field} = ?" for field in changes)
                     if assignments:
                         connection.execute(

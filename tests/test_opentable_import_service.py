@@ -243,6 +243,62 @@ class OpenTableImportServiceTests(unittest.TestCase):
                 connection.execute("SELECT COUNT(*) FROM JobSourceRecords").fetchone()[0], 2
             )
 
+    def test_reimport_reprocesses_unchanged_source_with_refined_address_parser(self):
+        raw = (
+            "Dental Care at Village Commons, 6400 Weddington Rd Ste J, "
+            "Wesley Chapel, NC"
+        )
+        row = source_row("1001", "JOB-1", "Parent Record")
+        row["Capture Address"] = raw
+        self.write_rows([row])
+        self.service.import_csv(self.session, str(self.csv_path))
+
+        # Reproduce the address values written by the parser before it learned to
+        # ignore a business-name prefix.
+        with self.auth.connection() as connection:
+            connection.execute(
+                "UPDATE Jobs SET address_1 = ?, city = ?, state = NULL",
+                ("Dental Care at Village Commons", "6400 Weddington Rd Ste J"),
+            )
+
+        preview = self.service.preview(str(self.csv_path))
+
+        self.assertEqual(preview["counts"], {"updated": 1})
+        self.assertEqual(preview["items"][0]["changed_source_rows"], 0)
+        self.assertEqual(
+            preview["items"][0]["changed_job_fields"],
+            ["address_1", "city", "state"],
+        )
+
+        result = self.service.import_csv(self.session, str(self.csv_path))
+
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["skipped"], 0)
+        self.assertEqual(result["source_rows_updated"], 0)
+        with self.auth.connection() as connection:
+            job = connection.execute(
+                "SELECT address_1, city, state FROM Jobs WHERE external_job_id = 'JOB-1'"
+            ).fetchone()
+        self.assertEqual(tuple(job), ("6400 Weddington Rd Ste J", "Wesley Chapel", "NC"))
+
+    def test_reimport_clears_address_value_previously_inferred_in_error(self):
+        raw = "Studio 54 Dental, 100 Main St Suite 200"
+        row = source_row("1001", "JOB-1", "Parent Record")
+        row["Capture Address"] = raw
+        self.write_rows([row])
+        self.service.import_csv(self.session, str(self.csv_path))
+        with self.auth.connection() as connection:
+            connection.execute("UPDATE Jobs SET city = '100 Main St Suite 200'")
+
+        preview = self.service.preview(str(self.csv_path))
+        result = self.service.import_csv(self.session, str(self.csv_path))
+
+        self.assertEqual(preview["counts"], {"updated": 1})
+        self.assertEqual(result["updated"], 1)
+        with self.auth.connection() as connection:
+            city = connection.execute("SELECT city FROM Jobs").fetchone()[0]
+        self.assertIsNone(city)
+
     def test_blank_invoice_number_is_stored_as_null(self):
         self.write_rows([source_row("1001", "JOB-1", "Parent Record", invoice="   ")])
 
