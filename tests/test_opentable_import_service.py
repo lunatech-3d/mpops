@@ -79,6 +79,98 @@ class OpenTableImportServiceTests(unittest.TestCase):
             writer.writeheader()
             writer.writerows(rows)
 
+    def test_parse_address_variants(self):
+        cases = [
+            (
+                "123 Main St, Plymouth, MI, 48170, USA",
+                ("123 Main St", "Plymouth", "MI", "48170", "USA"),
+            ),
+            (
+                "Dental Care at Village Commons, 6400 Weddington Rd Ste J, "
+                "Wesley Chapel, NC",
+                ("6400 Weddington Rd Ste J", "Wesley Chapel", "NC", None, None),
+            ),
+            (
+                "Stoney Point Dental Care, 7483 Rockfish Rd, Fayetteville, NC",
+                ("7483 Rockfish Rd", "Fayetteville", "NC", None, None),
+            ),
+            (
+                "6400 Veterans Blvd, Bryson City NC 28713",
+                ("6400 Veterans Blvd", "Bryson City", "NC", "28713", None),
+            ),
+            (
+                "5057 Woodward Ave, Detroit, MI 48202",
+                ("5057 Woodward Ave", "Detroit", "MI", "48202", None),
+            ),
+            (
+                "7483 Rockfish Rd, Fayetteville, NC",
+                ("7483 Rockfish Rd", "Fayetteville", "NC", None, None),
+            ),
+            (
+                "6400 Weddington Rd Ste J, Wesley Chapel, NC 28104",
+                ("6400 Weddington Rd Ste J", "Wesley Chapel", "NC", "28104", None),
+            ),
+            (
+                "123 Main St, Grand Rapids, MI 49503-1234",
+                ("123 Main St", "Grand Rapids", "MI", "49503-1234", None),
+            ),
+            (
+                "1965 Michigan Ave, Alma, MI, 48801, US",
+                ("1965 Michigan Ave", "Alma", "MI", "48801", "USA"),
+            ),
+            (
+                "123 Main St, Plymouth, mi 48170",
+                ("123 Main St", "Plymouth", "MI", "48170", None),
+            ),
+            (
+                "Studio 54 Dental, 25 Oak Ave Unit 4, Austin, TX",
+                ("25 Oak Ave Unit 4", "Austin", "TX", None, None),
+            ),
+        ]
+
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                parsed = self.service._parse_address(raw)
+                actual = tuple(parsed[field] for field in (
+                    "address_1", "city", "state", "postal_code", "country"
+                ))
+                self.assertEqual(actual, expected)
+
+    def test_partial_address_does_not_guess_street_as_city_and_preserves_raw(self):
+        raw = "Studio 54 Dental, 100 Main St Suite 200"
+
+        parsed = self.service._parse_address(raw)
+        built = self.service._build_job(
+            "JOB-PARTIAL", [source_row("1001", "JOB-PARTIAL", "Parent Record") | {
+                "Capture Address": raw,
+            }],
+        )
+
+        self.assertEqual(parsed["address_1"], "100 Main St Suite 200")
+        self.assertIsNone(parsed["city"])
+        self.assertEqual(built["capture_address_raw"], raw)
+
+    def test_import_writes_business_prefixed_address_and_preserves_raw(self):
+        raw = (
+            "Dental Care at Village Commons, 6400 Weddington Rd Ste J, "
+            "Wesley Chapel, NC"
+        )
+        row = source_row("1001", "JOB-1", "Parent Record")
+        row["Capture Address"] = raw
+        self.write_rows([row])
+
+        self.service.import_csv(self.session, str(self.csv_path))
+
+        with self.auth.connection() as connection:
+            job = connection.execute(
+                "SELECT address_1, city, state, postal_code, capture_address_raw FROM Jobs"
+            ).fetchone()
+        self.assertEqual(job["address_1"], "6400 Weddington Rd Ste J")
+        self.assertEqual(job["city"], "Wesley Chapel")
+        self.assertEqual(job["state"], "NC")
+        self.assertIsNone(job["postal_code"])
+        self.assertEqual(job["capture_address_raw"], raw)
+
     def test_preview_groups_parent_and_child_rows_into_one_job(self):
         self.write_rows([
             source_row("1001", "JOB-1", "Parent Record", rate="200.80", size="5000"),

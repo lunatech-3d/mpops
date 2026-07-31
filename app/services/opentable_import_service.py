@@ -36,6 +36,20 @@ _STATUS_MAP = {
     "model not found": "On Hold",
 }
 
+_US_STATE_ABBREVIATIONS = frozenset({
+    "AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DC", "DE", "FL", "GA", "HI",
+    "IA", "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN",
+    "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH",
+    "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA",
+    "WI", "WV", "WY",
+})
+_COUNTRY_NAMES = frozenset({
+    "us", "usa", "united states", "united states of america",
+})
+_ZIP_SUFFIX = re.compile(r"(?:^|\s)(\d{5}(?:-\d{4})?)$")
+_STATE_SUFFIX = re.compile(r"(?:^|\s)([A-Za-z]{2})$")
+_STREET_PREFIX = re.compile(r"^\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?\s+\S")
+
 
 class OpenTableImportService:
     """Parse, preview, and transactionally import an OpenTable CSV export."""
@@ -137,20 +151,9 @@ class OpenTableImportService:
 
     @staticmethod
     def _parse_address(raw: str | None) -> dict[str, str | None]:
-        """Best-effort split while always preserving the original address string."""
-        if not raw:
-            return {
-                "address_1": None,
-                "address_2": None,
-                "city": None,
-                "state": None,
-                "postal_code": None,
-                "county": None,
-                "country": None,
-            }
-        parts = [part.strip() for part in raw.split(",") if part.strip()]
+        """Conservatively parse a US address using its right-hand suffix."""
         result = {
-            "address_1": parts[0] if parts else raw,
+            "address_1": None,
             "address_2": None,
             "city": None,
             "state": None,
@@ -158,17 +161,44 @@ class OpenTableImportService:
             "county": None,
             "country": None,
         }
-        if len(parts) >= 2:
-            result["city"] = parts[1]
-        for part in parts[2:]:
-            if re.fullmatch(r"[A-Za-z]{2}", part):
-                result["state"] = part.upper()
-            elif re.fullmatch(r"\d{5}(?:-\d{4})?", part):
-                result["postal_code"] = part
-            elif part.casefold() in {"usa", "united states", "united states of america"}:
-                result["country"] = part
-            elif "county" in part.casefold():
-                result["county"] = part
+        if not raw or not str(raw).strip():
+            return result
+
+        parts = [re.sub(r"\s+", " ", part).strip() for part in str(raw).split(",")]
+        parts = [part for part in parts if part]
+        if not parts:
+            return result
+
+        if parts[-1].casefold() in _COUNTRY_NAMES:
+            result["country"] = "USA"
+            parts.pop()
+
+        if parts:
+            zip_match = _ZIP_SUFFIX.search(parts[-1])
+            if zip_match:
+                result["postal_code"] = zip_match.group(1)
+                parts[-1] = parts[-1][:zip_match.start()].strip()
+                if not parts[-1]:
+                    parts.pop()
+
+        if parts:
+            state_match = _STATE_SUFFIX.search(parts[-1])
+            if state_match and state_match.group(1).upper() in _US_STATE_ABBREVIATIONS:
+                result["state"] = state_match.group(1).upper()
+                parts[-1] = parts[-1][:state_match.start()].strip()
+                if not parts[-1]:
+                    parts.pop()
+
+        # A locality is only safe to infer when it immediately precedes a recognized
+        # state suffix. In particular, never use a numeric street as a positional city.
+        if result["state"] and parts and not _STREET_PREFIX.match(parts[-1]):
+            result["city"] = parts.pop()
+
+        # Work back from the locality so a business/facility prefix is ignored. Suite
+        # and unit text remains in the selected component without further splitting.
+        street = next((part for part in reversed(parts) if _STREET_PREFIX.match(part)), None)
+        if street:
+            result["address_1"] = street
         return result
 
     @staticmethod
