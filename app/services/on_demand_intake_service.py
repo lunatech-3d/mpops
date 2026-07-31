@@ -23,8 +23,9 @@ _ZONE_OFFSETS = {"EST": "-05:00", "EDT": "-04:00", "CST": "-06:00",
 
 
 def _label(text: str, name: str, next_names: str = "") -> str | None:
-    end = rf"(?=\n(?:{next_names}):|\Z)" if next_names else r"(?=\n[^\n:]+:|\Z)"
-    match = re.search(rf"(?ims)^\s*{re.escape(name)}:\s*(.*?)\s*{end}", text)
+    end = r"(?=\n(?:" + next_names + r"):|\Z)" if next_names else r"(?=\n[^\n:]+:|\Z)"
+    pattern = r"(?ims)^\s*" + re.escape(name) + r":\s*(.*?)\s*" + end
+    match = re.search(pattern, text)
     return match.group(1).strip() if match and match.group(1).strip() else None
 
 

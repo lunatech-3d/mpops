@@ -49,10 +49,12 @@ def calendar_details(data):
         payout = f"${float(str(data.get('expected_payout')).replace(',', '').replace('$', '')):,.2f}"
     except (TypeError, ValueError):
         payout = str(data.get("expected_payout") or "")
+    property_size = str(data.get("property_size") or "")
+    numeric_property_size = re.sub(r"[^\d.]", "", property_size)
     try:
-        size = f"{float(re.sub(r'[^\d.]', '', str(data.get('property_size')))):,.0f} sq ft"
+        size = f"{float(numeric_property_size):,.0f} sq ft" if numeric_property_size else ""
     except ValueError:
-        size = str(data.get("property_size") or "")
+        size = property_size
     return f"""Matterport On-Demand Capture
 
 Job ID: {data.get('job_id') or ''}
