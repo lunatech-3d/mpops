@@ -187,6 +187,19 @@ class RevenueRuleService:
                                      "WHERE compensation_rule_id=?", (rule_id,)).fetchone()
             return dict(row) if row else None
 
+    def list_technician_rules_for(self, tech_id: int, *, include_inactive: bool = True) -> list[dict[str, Any]]:
+        """Return only rules owned by one technician (never System fallbacks)."""
+        tech_id = self._id(tech_id, "tech_id")
+        if type(include_inactive) is not bool:
+            raise ValueError("include_inactive must be a boolean")
+        with self.auth.connection() as connection:
+            self._exists(connection, "Techs", "tech_id", tech_id, "Technician")
+            active = "" if include_inactive else " AND is_active=1"
+            rows = connection.execute("SELECT * FROM TechnicianCompensationRules WHERE "
+                "scope_type='Technician' AND scope_id=?" + active +
+                " ORDER BY effective_from DESC,compensation_rule_id DESC", (tech_id,))
+            return [dict(row) for row in rows]
+
     def _create_technician(self, connection: sqlite3.Connection, session: Session,
                            values: dict[str, Any]) -> int:
         clean = self._clean_technician(connection, values)
@@ -258,6 +271,33 @@ class RevenueRuleService:
                 "old_values": {k: before[k] for k in self.TECH_FIELDS},
                 "new_values": {"is_active": 0}, "acting_user": session.username})
 
+    def end_technician_rule(self, session: Session, rule_id: int, effective_to: str) -> dict[str, Any]:
+        """End a rule without changing its historical value or start date."""
+        return self.update_technician_rule(session, rule_id, effective_to=effective_to)
+
+    def resolve_technician_profile_rule(self, tech_id: int, effective_date: date | str,
+                                        compensation_component: str = "Overall") -> dict[str, Any]:
+        """Resolve Technician then System compensation for a profile view."""
+        tech_id = self._id(tech_id, "tech_id"); when = self._effective_date(effective_date)
+        if compensation_component not in self.COMPONENTS:
+            raise ValueError("Unsupported compensation_component")
+        with self.auth.connection() as connection:
+            self._exists(connection, "Techs", "tech_id", tech_id, "Technician")
+            for scope, scope_id in (("Technician", tech_id), ("System", None)):
+                rows = connection.execute("""SELECT * FROM TechnicianCompensationRules
+                    WHERE scope_type=? AND scope_id IS ? AND compensation_component=? AND is_active=1
+                      AND (effective_from IS NULL OR effective_from<=?)
+                      AND (effective_to IS NULL OR effective_to>=?)
+                    ORDER BY compensation_rule_id""",
+                    (scope, scope_id, compensation_component, when, when)).fetchall()
+                if len(rows) > 1:
+                    raise RuleDataIntegrityError(
+                        f"Multiple {scope} {compensation_component} technician rules apply on {when}")
+                if rows:
+                    return dict(rows[0])
+        raise RuleConfigurationError(
+            f"No {compensation_component} technician compensation rule applies on {when}")
+
     def resolve_technician_rule(self, *, job_id: int, tech_id: int, market_id: int,
                                 effective_date: date,
                                 compensation_component: str = "Overall") -> dict[str, Any]:
@@ -304,6 +344,22 @@ class RevenueRuleService:
             row = connection.execute("SELECT * FROM MarketRevenueShareRules WHERE "
                 "market_revenue_share_rule_id=?", (rule_id,)).fetchone()
             return dict(row) if row else None
+
+    def list_market_revenue_rules_for(self, market_id: int, *, include_inactive: bool = True,
+                                      recipient_code: str = "LUNATECH_EAST") -> list[dict[str, Any]]:
+        market_id = self._id(market_id, "market_id")
+        if type(include_inactive) is not bool:
+            raise ValueError("include_inactive must be a boolean")
+        if recipient_code not in self.RECIPIENTS:
+            raise ValueError("Unsupported recipient_code")
+        with self.auth.connection() as connection:
+            self._exists(connection, "Markets", "market_id", market_id, "Market")
+            active = "" if include_inactive else " AND is_active=1"
+            rows = connection.execute("SELECT * FROM MarketRevenueShareRules WHERE market_id=? "
+                "AND recipient_code=?" + active +
+                " ORDER BY effective_from DESC,market_revenue_share_rule_id DESC",
+                (market_id, recipient_code))
+            return [dict(row) for row in rows]
 
     def _create_market(self, connection: sqlite3.Connection, session: Session,
                        values: dict[str, Any]) -> int:
@@ -373,6 +429,10 @@ class RevenueRuleService:
                 "old_values": {k: before[k] for k in self.MARKET_FIELDS},
                 "new_values": {"is_active": 0}, "acting_user": session.username})
 
+    def end_market_revenue_rule(self, session: Session, rule_id: int,
+                                effective_to: str) -> dict[str, Any]:
+        return self.update_market_revenue_rule(session, rule_id, effective_to=effective_to)
+
     def resolve_market_revenue_rule(self, *, market_id: int, effective_date: date,
                                     recipient_code: str = "LUNATECH_EAST") -> dict[str, Any]:
         market_id = self._id(market_id, "market_id"); when = self._effective_date(effective_date)
@@ -392,3 +452,39 @@ class RevenueRuleService:
             raise RuleConfigurationError(
                 f"No {recipient_code} market revenue-share rule applies on {when}")
         return dict(rows[0])
+
+    def get_current_market_share_summary(self, market_ids: list[int],
+                                         effective_date: date | str) -> dict[int, dict[str, Any]]:
+        """Bulk resolve shares, explicitly distinguishing missing and ambiguous rules."""
+        if not isinstance(market_ids, list):
+            raise ValueError("market_ids must be a list")
+        ids = [self._id(value, "market_id") for value in market_ids]
+        if len(set(ids)) != len(ids):
+            ids = list(dict.fromkeys(ids))
+        if not ids:
+            return {}
+        when = self._effective_date(effective_date)
+        placeholders = ",".join("?" for _ in ids)
+        with self.auth.connection() as connection:
+            existing = {row[0] for row in connection.execute(
+                f"SELECT market_id FROM Markets WHERE market_id IN ({placeholders})", ids)}
+            missing_ids = set(ids) - existing
+            if missing_ids:
+                raise LookupError(f"Market not found: {min(missing_ids)}")
+            rows = connection.execute(f"""SELECT * FROM MarketRevenueShareRules
+                WHERE market_id IN ({placeholders}) AND recipient_code='LUNATECH_EAST'
+                  AND is_active=1 AND effective_from<=?
+                  AND (effective_to IS NULL OR effective_to>=?)
+                ORDER BY market_revenue_share_rule_id""", (*ids, when, when)).fetchall()
+        grouped: dict[int, list[dict[str, Any]]] = {identifier: [] for identifier in ids}
+        for row in rows:
+            grouped[int(row["market_id"])].append(dict(row))
+        result = {}
+        for identifier, matches in grouped.items():
+            if not matches:
+                result[identifier] = {"status": "missing", "rule": None}
+            elif len(matches) > 1:
+                result[identifier] = {"status": "integrity_error", "rule": None}
+            else:
+                result[identifier] = {"status": "resolved", "rule": matches[0]}
+        return result

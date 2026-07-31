@@ -6,10 +6,13 @@ from tkinter import messagebox, ttk
 from app.date_utils import display_date_to_iso, format_display_date
 from app.security.user_manager import AuthorizationError
 from app.services.technician_service import TechnicianService
+from app.services.revenue_rule_service import RevenueRuleService
 from app.ui.address_form import ADDRESS_FIELDS, address_form_data, show_address_form
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog
 from app.ui.styles import PADDING
 from app.ui.technician_form import changed_fields, show_technician_form
+from app.ui.revenue_rule_controllers import TechnicianCompensationController
+from app.ui.revenue_rule_views import TechnicianCompensationView
 
 EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
 
@@ -228,7 +231,11 @@ class TechnicianDetails:
         name = display_name(technician)
         ttk.Label(body, text=name, style="Header.TLabel").pack(anchor="w")
         ttk.Label(body, text=f"{technician['tech_code']}  •  {technician['status']}  •  {technician.get('email') or 'No email'}").pack(anchor="w", pady=(0, 10))
-        profile = ttk.Frame(body); profile.pack(fill="x", pady=(0, 10))
+        notebook = ttk.Notebook(body); notebook.pack(fill="both", expand=True)
+        profile_tab = ttk.Frame(notebook, padding=6); addresses_tab = ttk.Frame(notebook, padding=6)
+        compensation_tab = ttk.Frame(notebook); notebook.add(profile_tab, text="Profile")
+        notebook.add(addresses_tab, text="Addresses"); notebook.add(compensation_tab, text="Compensation")
+        profile = ttk.Frame(profile_tab); profile.pack(fill="x", pady=(0, 10))
         sections = [
             ("Identity", (("Preferred Name", "preferred_name"),)),
             ("Engagement", (("Company", "company_name"), ("Contractor Type", "contractor_type"),
@@ -259,17 +266,20 @@ class TechnicianDetails:
                 ttk.Label(section, text=f"{label}: {value}",
                           wraplength=285).pack(anchor="w")
         for column in range(3): profile.columnconfigure(column, weight=1)
-        ttk.Label(body, text="Addresses", style="Header.TLabel").pack(anchor="w")
-        self.tree = ttk.Treeview(body, columns=self.COLUMNS, show="headings", selectmode="browse")
+        ttk.Label(addresses_tab, text="Addresses", style="Header.TLabel").pack(anchor="w")
+        self.tree = ttk.Treeview(addresses_tab, columns=self.COLUMNS, show="headings", selectmode="browse")
         headings = ("Primary", "Address 1", "Address 2", "City", "State", "ZIP", "Effective Date", "End Date")
         for field, heading in zip(self.COLUMNS, headings): self.tree.heading(field, text=heading); self.tree.column(field, width=105)
         self.tree.pack(fill="both", expand=True); self.tree.bind("<<TreeviewSelect>>", lambda _e: self.update_buttons())
-        bar = ttk.Frame(body); bar.pack(fill="x", pady=(8, 0)); self.buttons = []
+        bar = ttk.Frame(addresses_tab); bar.pack(fill="x", pady=(8, 0)); self.buttons = []
         for label, command in (("Add Address", self.add), ("Edit Address", self.edit),
                                ("Set as Primary", self.set_primary), ("Delete Address", self.delete)):
             button=ttk.Button(bar,text=label,command=command); button.pack(side="left",padx=(0,6)); self.buttons.append(button)
         ttk.Button(bar,text="Close",command=lambda: close_modal(self.window)).pack(side="right")
-        self.status=tk.StringVar(); ttk.Label(body,textvariable=self.status,style="Status.TLabel").pack(anchor="w",pady=(6,0))
+        self.status=tk.StringVar(); ttk.Label(addresses_tab,textvariable=self.status,style="Status.TLabel").pack(anchor="w",pady=(6,0))
+        TechnicianCompensationView(compensation_tab,
+            TechnicianCompensationController(RevenueRuleService(controller.service.auth), controller.session),
+            tech_id).pack(fill="both", expand=True)
         self.refresh(); self.window.protocol("WM_DELETE_WINDOW",lambda:close_modal(self.window)); prepare_modal_dialog(self.window,parent); self.window.wait_window()
     def refresh(self, select_id=None):
         try: rows=self.controller.service.list_addresses(self.tech_id)

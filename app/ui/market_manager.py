@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import sqlite3
 import tkinter as tk
+from datetime import date
 from tkinter import messagebox, ttk
 from typing import Any
 
 from app.security.user_manager import AuthorizationError
 from app.services.market_service import MarketService
+from app.services.revenue_rule_service import RevenueRuleService
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog
+from app.ui.revenue_rule_controllers import MarketRevenueShareController
+from app.ui.revenue_rule_views import MarketRevenueShareWindow
 from app.ui.styles import PADDING
 
 EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
@@ -27,11 +31,12 @@ US_STATE_CODES = (
 class MarketManager(ttk.Frame):
     """CRUD interface for operational Markets."""
 
-    COLUMNS = ("market_name", "state", "status")
+    COLUMNS = ("market_name", "state", "share", "status")
 
     def __init__(self, parent: tk.Misc, auth, session):
         super().__init__(parent, padding=PADDING, style="App.TFrame")
         self.service = MarketService(auth)
+        self.revenue_controller = MarketRevenueShareController(RevenueRuleService(auth), session)
         self.session = session
         self.can_modify = session.role == "admin"
         self.rows: dict[str, dict[str, Any]] = {}
@@ -67,9 +72,10 @@ class MarketManager(ttk.Frame):
         headings = {
             "market_name": "Market",
             "state": "State",
+            "share": "LunaTech-East Share",
             "status": "Status",
         }
-        widths = {"market_name": 360, "state": 90, "status": 110}
+        widths = {"market_name": 300, "state": 80, "share": 180, "status": 110}
         for column in self.COLUMNS:
             self.tree.heading(
                 column,
@@ -98,6 +104,7 @@ class MarketManager(ttk.Frame):
             button.pack(side="left", padx=(0, 6))
             self.mutation_buttons.append(button)
         ttk.Button(actions, text="Refresh", command=self.refresh).pack(side="left")
+        ttk.Button(actions, text="Revenue Share", command=self.view_revenue_share).pack(side="left", padx=6)
 
         self.status_var = tk.StringVar()
         ttk.Label(
@@ -121,6 +128,7 @@ class MarketManager(ttk.Frame):
         headings = {
             "market_name": "Market",
             "state": "State",
+            "share": "LunaTech-East Share",
             "status": "Status",
         }
         for item in self.COLUMNS:
@@ -156,6 +164,12 @@ class MarketManager(ttk.Frame):
             self._error(exc)
             return
 
+        try:
+            summaries = self.revenue_controller.summaries(
+                [int(row["market_id"]) for row in rows], date.today())
+        except EXPECTED_ERRORS as exc:
+            self._error(exc); return
+
         self.tree.delete(*self.tree.get_children())
         self.rows.clear()
         for row in rows:
@@ -165,6 +179,7 @@ class MarketManager(ttk.Frame):
                 **row,
                 "market_name": row.get("market_name") or "",
                 "state": row.get("state") or "",
+                "share": summaries[market_id]["display_value"],
                 "status": row.get("status") or "",
             }
             self.rows[iid] = display_row
@@ -175,6 +190,7 @@ class MarketManager(ttk.Frame):
                 values=(
                     display_row["market_name"],
                     display_row["state"],
+                    display_row["share"],
                     display_row["status"],
                 ),
             )
@@ -282,6 +298,12 @@ class MarketManager(ttk.Frame):
         self.status_var.set(
             f"Market {'activated' if activate else 'deactivated'}."
         )
+
+    def view_revenue_share(self) -> None:
+        row = self.selected()
+        if row:
+            MarketRevenueShareWindow(self, self.revenue_controller, row)
+            self.refresh(int(row["market_id"]))
 
 
 def show_market_form(
