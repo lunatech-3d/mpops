@@ -1,5 +1,8 @@
 """Main LunaTech 3D Ops application shell."""
+import tkinter as tk
 from tkinter import messagebox, ttk
+
+from app.resources import resource_path
 from app.security.auth import Session
 from app.ui.dashboard import build_dashboard
 from app.ui.jobs_manager import JobsManager
@@ -23,9 +26,21 @@ class MainWindow:
         # expanding content area an appropriately sized initial window.
         root.title("LunaTech 3D Ops"); root.geometry("1500x800"); root.minsize(1200, 650); root.deiconify()
         self.secondary_windows = []
-        header=ttk.Frame(root,padding=PADDING);header.pack(fill="x")
-        ttk.Label(header,text="LunaTech 3D Ops",style="Header.TLabel").pack(side="left")
-        ttk.Label(header,text=f"Signed in as: {session.display_name or session.username} | Role: {session.role.title()}").pack(side="right")
+        header = ttk.Frame(root, padding=PADDING)
+        header.pack(fill="x")
+        brand = ttk.Frame(header)
+        brand.grid(row=0, column=0, sticky="w")
+        # Keep the PhotoImage on the window: Tk discards images whose Python
+        # wrapper is garbage-collected.  Subsampling preserves the source
+        # aspect ratio while giving the header a comfortable 32px logo height.
+        self.brand_logo = tk.PhotoImage(file=resource_path("lunatech-logo.png")).subsample(2, 2)
+        ttk.Label(brand, image=self.brand_logo).pack(side="left")
+        ttk.Label(brand, text="3D Ops", style="Header.TLabel").pack(side="left", padx=(12, 0))
+        ttk.Label(
+            header,
+            text=f"Signed in as: {session.display_name or session.username} | Role: {session.role.title()}",
+        ).grid(row=0, column=1, sticky="e", padx=(PADDING, 0))
+        header.columnconfigure(0, weight=1)
         body=ttk.Frame(root);body.pack(fill="both",expand=True)
         nav=ttk.Frame(body,padding=PADDING);nav.pack(side="left",fill="y")
         self.content=ttk.Frame(body,style="App.TFrame");self.content.pack(side="left",fill="both",expand=True)
