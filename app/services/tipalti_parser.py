@@ -153,8 +153,14 @@ def parse_tipalti_text(raw_text: str) -> dict[str, Any]:
         amount = None
         if not document:
             errors.append("Document number is required")
+        document_type = field("document_type")
+        if document_type and document_type.casefold() != "invoice":
+            errors.append(f"Unsupported document type: {document_type}")
+        if not field("document_date"):
+            errors.append("Document date is required")
         try:
-            document_date = _date(field("document_date"))
+            if field("document_date"):
+                document_date = _date(field("document_date"))
         except ValueError as exc:
             errors.append(str(exc))
         try:
@@ -168,7 +174,7 @@ def parse_tipalti_text(raw_text: str) -> dict[str, Any]:
         message = "; ".join(errors) if errors else (
             "Duplicate document number in pasted data" if duplicate else None)
         rows.append({"source_row_number": source_number, "document_number": document,
-                     "document_type": field("document_type") or None,
+                     "document_type": document_type or None,
                      "document_date": document_date,
                      "description_raw": field("description_raw") or None,
                      "amount_received_cents": amount, "status": status, "message": message,

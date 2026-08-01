@@ -52,9 +52,9 @@ class PaymentExceptionCenter(tk.Toplevel):
         search_frame = ttk.LabelFrame(right, text="Search All Jobs", padding=6)
         search_text = ttk.Entry(search_frame)
         search_text.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        candidates = ttk.Treeview(right, columns=("job", "customer", "project", "address", "date", "tech", "status"), show="headings", height=9)
-        for key, title in zip(("job", "customer", "project", "address", "date", "tech", "status"),
-                              ("Job Number", "Customer", "Project Name", "Property Address", "Capture Date", "Technician", "Job Status")):
+        candidates = ttk.Treeview(right, columns=("job", "address", "scheduled", "tech", "payout", "pipeline", "status"), show="headings", height=9)
+        for key, title in zip(("job", "address", "scheduled", "tech", "payout", "pipeline", "status"),
+                              ("External Job ID", "Address", "Scheduled Date", "Technician", "Expected Payout", "Pipeline/Source", "Job Status")):
             candidates.heading(key, text=title); candidates.column(key, width=105)
         candidate_ids = {}
         if name in {"Missing Jobs", "Ambiguous Matches"}:
@@ -93,9 +93,11 @@ class PaymentExceptionCenter(tk.Toplevel):
             candidates.delete(*candidates.get_children()); candidate_ids.clear()
             for candidate in self.service.list_exception_candidates(item["payment_item_id"]):
                 iid = str(candidate["job_id"]); candidate_ids[iid] = candidate["job_id"]
-                candidates.insert("", "end", iid=iid, values=(candidate["job_number"], candidate.get("customer") or "",
-                    candidate.get("project_name") or "", candidate.get("property_address") or "",
-                    format_display_datetime(candidate.get("capture_date")), candidate.get("technician") or "",
+                candidates.insert("", "end", iid=iid, values=(candidate["job_number"],
+                    candidate.get("property_address") or "",
+                    format_display_datetime(candidate.get("scheduled_date")), candidate.get("technician") or "",
+                    format_cents(round(float(candidate["expected_payout"]) * 100)) if candidate.get("expected_payout") is not None else "",
+                    candidate.get("pipeline") or "",
                     candidate.get("job_status") or ""))
         def search_jobs():
             try: results = self.service.search_jobs_for_payment_exception(search_text.get())
@@ -104,9 +106,10 @@ class PaymentExceptionCenter(tk.Toplevel):
             for candidate in results:
                 iid = str(candidate["job_id"]); candidate_ids[iid] = candidate["job_id"]
                 candidates.insert("", "end", iid=iid, values=(candidate["job_number"],
-                    candidate.get("customer") or "", candidate.get("project_name") or "",
-                    candidate.get("property_address") or "", format_display_datetime(candidate.get("capture_date")),
-                    candidate.get("technician") or "", candidate.get("job_status") or ""))
+                    candidate.get("property_address") or "", format_display_datetime(candidate.get("scheduled_date")),
+                    candidate.get("technician") or "",
+                    format_cents(round(float(candidate["expected_payout"]) * 100)) if candidate.get("expected_payout") is not None else "",
+                    candidate.get("pipeline") or "", candidate.get("job_status") or ""))
         def clear_search():
             search_text.delete(0, "end")
             load_candidates()
@@ -122,7 +125,23 @@ class PaymentExceptionCenter(tk.Toplevel):
             def assign(item):
                 choice = candidates.selection()
                 if not choice: raise ValueError("Select a suggested job first, or use Search Jobs.")
-                self.service.assign_payment_item_job(self.session, item["payment_item_id"], candidate_ids[choice[0]], notes())
+                resolution_notes = notes()
+                try:
+                    self.service.assign_payment_item_job(
+                        self.session, item["payment_item_id"], candidate_ids[choice[0]],
+                        resolution_notes)
+                except ValueError as exc:
+                    if not str(exc).startswith("AP Invoice Number conflict:"):
+                        raise
+                    if not messagebox.askyesno(
+                            "Resolve AP Invoice Number Conflict",
+                            f"{exc}\n\nReplace the JobFinancials AP Invoice Number with the "
+                            "payment document number and complete this manual match?",
+                            parent=self):
+                        return
+                    self.service.assign_payment_item_job(
+                        self.session, item["payment_item_id"], candidate_ids[choice[0]],
+                        resolution_notes, resolve_invoice_conflict=True)
             ttk.Button(actions, text="Assign Selected Job", command=lambda: act(assign), state=state).pack(side="left", padx=3)
             ttk.Button(search_frame, text="Search", command=search_jobs).pack(side="left", padx=3)
             ttk.Button(search_frame, text="Clear", command=clear_search).pack(side="left", padx=3)

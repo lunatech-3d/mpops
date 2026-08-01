@@ -81,7 +81,7 @@ USD1,100.00\r
             parse_tipalti_text("MP-1,Invoice,152.50")
 
     def test_blank_rows_ignored_and_duplicates_marked(self):
-        result = parse_tipalti_text("Document #\tAmount\n\n ABC \t10\nabc\t20\n")
+        result = parse_tipalti_text("Document #\tDocument Date\tAmount\n\n ABC \t7/24/2026\t10\nabc\t7/24/2026\t20\n")
         self.assertEqual(result["summary"], {"row_count": 2, "valid_count": 1, "duplicate_count": 1, "invalid_count": 0, "importable_total_cents": 1000})
         self.assertEqual(result["rows"][1]["message"], "Duplicate document number in pasted data")
 
@@ -92,6 +92,11 @@ USD1,100.00\r
         self.assertIn("Document number is required", result["rows"][0]["message"])
         self.assertIn("Document date is invalid", result["rows"][0]["message"])
         self.assertIn("two decimal", result["rows"][1]["message"])
+
+    def test_missing_document_date_is_invalid(self):
+        result = parse_tipalti_text("Document Number\tAmount\nAP-1\t10")
+        self.assertEqual(result["rows"][0]["status"], "Invalid")
+        self.assertIn("Document date is required", result["rows"][0]["message"])
 
     def test_currency_variations_and_negative_rejection(self):
         for value, cents in (("152.50", 15250), ("$152.50", 15250), ("1,234.56", 123456), ("$1,234.56", 123456)):
@@ -104,7 +109,7 @@ USD1,100.00\r
             self.assertIn("Negative", result["rows"][0]["message"])
 
     def test_existing_duplicate_overlay(self):
-        result = parse_tipalti_text("Document Number\tAmount\nABC\t1")
+        result = parse_tipalti_text("Document Number\tDocument Date\tAmount\nABC\t7/24/2026\t1")
         mark_imported_duplicates(result, {"abc"})
         self.assertEqual(result["summary"]["duplicate_count"], 1)
         self.assertEqual(result["summary"]["importable_total_cents"], 0)

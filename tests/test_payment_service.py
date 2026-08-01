@@ -307,6 +307,57 @@ class PaymentServiceTests(unittest.TestCase):
         self.assertEqual(details["previous_status"], "Amount Review")
         self.assertEqual(details["new_status"], "Matched")
 
+    def test_manual_on_demand_match_learns_invoice_and_audits(self):
+        batch_id = self.create_batch(100)
+        item_id = self.add_item(batch_id, "TIPALTI-NEW-1", 100)
+        with self.auth.connection() as connection:
+            job_id = int(connection.execute(
+                "INSERT INTO Jobs (external_job_id, created_by) VALUES ('OD-1', ?)",
+                (self.session.user_id,)).lastrowid)
+            source_id = int(connection.execute(
+                "INSERT INTO JobSourceRecords (job_id, source_system, "
+                "external_record_number, record_description) "
+                "VALUES (?, 'Matterport', 'OD-1', 'On-Demand')", (job_id,)).lastrowid)
+            financial_id = int(connection.execute(
+                "INSERT INTO JobFinancials (job_id, job_source_record_id, ap_invoice_number) "
+                "VALUES (?, ?, NULL)", (job_id, source_id)).lastrowid)
+
+        assigned = self.service.assign_payment_item_job(
+            self.session, item_id, job_id, "Confirmed On-Demand job")
+
+        self.assertEqual((assigned["job_id"], assigned["match_status"]),
+                         (job_id, "Matched"))
+        with self.auth.connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT ap_invoice_number FROM JobFinancials WHERE job_financial_id=?",
+                (financial_id,)).fetchone()[0], "TIPALTI-NEW-1")
+            actions = [row[0] for row in connection.execute(
+                "SELECT action FROM AuditLog WHERE action IN "
+                "('payment_item_job_assigned','on_demand_ap_invoice_learned') ORDER BY id")]
+        self.assertEqual(actions, ["payment_item_job_assigned",
+                                   "on_demand_ap_invoice_learned"])
+
+    def test_manual_on_demand_invoice_conflict_requires_explicit_resolution(self):
+        batch_id = self.create_batch(100)
+        item_id = self.add_item(batch_id, "TIPALTI-NEW-2", 100)
+        with self.auth.connection() as connection:
+            job_id = int(connection.execute(
+                "INSERT INTO Jobs (external_job_id, created_by) VALUES ('OD-2', ?)",
+                (self.session.user_id,)).lastrowid)
+            source_id = int(connection.execute(
+                "INSERT INTO JobSourceRecords (job_id, source_system, "
+                "external_record_number, record_description) "
+                "VALUES (?, 'Matterport', 'OD-2', 'On-Demand')", (job_id,)).lastrowid)
+            connection.execute(
+                "INSERT INTO JobFinancials (job_id, job_source_record_id, ap_invoice_number) "
+                "VALUES (?, ?, 'TIPALTI-OLD')", (job_id, source_id))
+        with self.assertRaisesRegex(ValueError, "Explicit confirmation"):
+            self.service.assign_payment_item_job(self.session, item_id, job_id)
+        self.assertIsNone(self.service.list_payment_items(batch_id)[0]["job_id"])
+        assigned = self.service.assign_payment_item_job(
+            self.session, item_id, job_id, resolve_invoice_conflict=True)
+        self.assertEqual(assigned["match_status"], "Matched")
+
     def test_exception_grouping_candidates_authorization_and_duplicate_policy(self):
         batch_id = self.create_batch(100)
         item_id = self.add_item(batch_id, "CANDIDATE", 100)

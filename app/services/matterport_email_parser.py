@@ -81,7 +81,9 @@ def parse_matterport_payment_email(raw_text: str) -> dict[str, Any]:
         amount_text = (match.group("amount") or "").strip()
         errors: list[str] = []
         amount = None
-        if not document or not document.casefold().startswith("ap-rec"):
+        # Treat the invoice as an opaque source identifier. On-Demand invoice
+        # numbers need not already exist in MPOPS or use an Airtable prefix.
+        if not document:
             errors.append("Invoice number is required")
         try:
             amount = _amount(amount_text)

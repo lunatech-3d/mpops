@@ -37,6 +37,13 @@ USD 420.60  Invoice  AP-rec3   7/21/2026
         self.assertEqual(result["rows"][1]["document_date"], "2026-07-06")
         self.assertEqual(result["rows"][2]["document_type"], "Invoice")
 
+    def test_unknown_but_present_invoice_is_valid_without_job_lookup(self):
+        result = parse_matterport_payment_email(
+            HEADER + "USD 25.00 Invoice TIPALTI-ON-DEMAND-42 7/24/2026\n")
+        self.assertEqual(result["rows"][0]["status"], "Valid")
+        self.assertEqual(result["rows"][0]["document_number"],
+                         "TIPALTI-ON-DEMAND-42")
+
     def test_malformed_email(self):
         with self.assertRaisesRegex(ValueError, "payment amount and payment method"):
             parse_matterport_payment_email("This is not a payment notification")

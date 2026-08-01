@@ -19,6 +19,7 @@ from app.security.user_manager import AuthorizationError
 
 
 LOGGER = logging.getLogger(__name__)
+ON_DEMAND_PIPELINE = "On-Demand"
 _AP_INVOICE_LOOKUP_SQL = """
     SELECT job_id, MIN(ap_invoice_number) AS ap_invoice_number
     FROM JobFinancials
@@ -728,8 +729,14 @@ class PaymentService:
                 """SELECT j.job_id, j.external_job_id AS job_number,
                           j.client_name_source AS customer,
                           COALESCE(j.capture_address_raw, j.address_1) AS property_address,
+                          j.scheduled_start_at AS scheduled_date,
                           COALESCE(j.completed_at, j.actual_start_at, j.scheduled_start_at) AS capture_date,
-                          t.first_name, t.last_name
+                          j.job_status, t.first_name, t.last_name,
+                          (SELECT SUM(COALESCE(f.ct_rate,0) + COALESCE(f.ct_travel_payout,0)
+                                      + COALESCE(f.ct_off_hours_payout,0))
+                             FROM JobFinancials f WHERE f.job_id=j.job_id) AS expected_payout,
+                          (SELECT GROUP_CONCAT(DISTINCT COALESCE(s.record_description,s.source_system))
+                             FROM JobSourceRecords s WHERE s.job_id=j.job_id) AS pipeline
                    FROM Jobs j
                    LEFT JOIN JobAssignments a ON a.job_id = j.job_id
                      AND a.assignment_role = 'Primary' AND a.unassigned_at IS NULL
@@ -766,7 +773,13 @@ class PaymentService:
                           COALESCE(j.capture_address_raw, j.address_1) AS property_address,
                           COALESCE(j.completed_at, j.actual_start_at,
                                    j.scheduled_start_at) AS capture_date,
-                          j.job_status, t.first_name, t.last_name
+                          j.scheduled_start_at AS scheduled_date,
+                          j.job_status, t.first_name, t.last_name,
+                          (SELECT SUM(COALESCE(f.ct_rate,0) + COALESCE(f.ct_travel_payout,0)
+                                      + COALESCE(f.ct_off_hours_payout,0))
+                             FROM JobFinancials f WHERE f.job_id=j.job_id) AS expected_payout,
+                          (SELECT GROUP_CONCAT(DISTINCT COALESCE(s.record_description,s.source_system))
+                             FROM JobSourceRecords s WHERE s.job_id=j.job_id) AS pipeline
                    FROM Jobs j
                    LEFT JOIN Projects p ON p.project_id = j.project_id
                    LEFT JOIN JobAssignments a ON a.job_id = j.job_id
@@ -780,9 +793,13 @@ class PaymentService:
                       OR COALESCE(p.client_name, '') LIKE ? COLLATE NOCASE
                       OR COALESCE(j.capture_address_raw, '') LIKE ? COLLATE NOCASE
                       OR COALESCE(j.address_1, '') LIKE ? COLLATE NOCASE
+                      OR EXISTS (SELECT 1 FROM JobSourceRecords search_source
+                                 WHERE search_source.job_id=j.job_id AND
+                                  (COALESCE(search_source.record_description,'') LIKE ? COLLATE NOCASE
+                                   OR COALESCE(search_source.source_system,'') LIKE ? COLLATE NOCASE))
                    ORDER BY CASE WHEN j.external_job_id = ? COLLATE NOCASE THEN 0 ELSE 1 END,
                             j.job_id DESC LIMIT ?""",
-                (*([pattern] * 7), needle, limit),
+                (*([pattern] * 9), needle, limit),
             ).fetchall()
         results = []
         for row in rows:
@@ -793,7 +810,9 @@ class PaymentService:
         return results
 
     def assign_payment_item_job(self, session: Session, payment_item_id: int, job_id: int,
-                                notes: str | None = None) -> dict[str, Any]:
+                                notes: str | None = None, *,
+                                resolve_invoice_conflict: bool = False) -> dict[str, Any]:
+        """Manually link an item and safely learn an On-Demand invoice number."""
         self._require_operator(session)
         self._positive_id(payment_item_id, "payment_item_id")
         self._positive_id(job_id, "job_id")
@@ -803,12 +822,54 @@ class PaymentService:
             batch = self._require_batch(connection, item["payment_batch_id"])
             self._require_batch_mutation(batch, "match")
             self._require_job(connection, job_id)
+            source = connection.execute(
+                """SELECT s.job_source_record_id, f.job_financial_id,
+                          f.ap_invoice_number
+                   FROM JobSourceRecords s
+                   LEFT JOIN JobFinancials f
+                     ON f.job_source_record_id=s.job_source_record_id
+                   WHERE s.job_id=? AND s.record_description=? COLLATE NOCASE
+                   ORDER BY s.job_source_record_id""",
+                (job_id, ON_DEMAND_PIPELINE)).fetchall()
+            learned_invoice = False
+            previous_invoice = None
+            if source:
+                if len(source) != 1 or source[0]["job_financial_id"] is None:
+                    raise ValueError(
+                        "The On-Demand JobFinancials record could not be identified uniquely")
+                financial = source[0]
+                previous_invoice = (financial["ap_invoice_number"] or "").strip() or None
+                incoming = item["document_number"]
+                if (previous_invoice and
+                        previous_invoice.casefold() != incoming.casefold() and
+                        not resolve_invoice_conflict):
+                    raise ValueError(
+                        "AP Invoice Number conflict: the selected On-Demand job has "
+                        f"'{previous_invoice}', while this payment has '{incoming}'. "
+                        "Explicit confirmation is required to replace it.")
+                if not previous_invoice or previous_invoice.casefold() != incoming.casefold():
+                    connection.execute(
+                        "UPDATE JobFinancials SET ap_invoice_number=?, updated_at=? "
+                        "WHERE job_financial_id=?",
+                        (incoming, utc_now_iso(), financial["job_financial_id"]))
+                    learned_invoice = True
             connection.execute(
                 "UPDATE MatterportPaymentItems SET job_id=?, match_status='Matched', "
                 "match_method='Manual exception resolution', match_notes=?, updated_at=? "
                 "WHERE payment_item_id=?", (job_id, notes, utc_now_iso(), payment_item_id))
             self._audit_resolution(connection, "payment_item_job_assigned", session, item,
-                                   "Matched", notes, job_id=job_id)
+                                   "Matched", notes, job_id=job_id,
+                                   document_number=item["document_number"],
+                                   on_demand=bool(source), invoice_learned=learned_invoice,
+                                   previous_ap_invoice_number=previous_invoice)
+            if learned_invoice:
+                record_event(connection, "on_demand_ap_invoice_learned",
+                             actor_user_id=session.user_id,
+                             details={"payment_item_id": payment_item_id, "job_id": job_id,
+                                      "job_financial_id": source[0]["job_financial_id"],
+                                      "ap_invoice_number": item["document_number"],
+                                      "previous_ap_invoice_number": previous_invoice,
+                                      "manual_match": True})
             return dict(self._require_item(connection, payment_item_id))
 
     def exclude_payment_item(self, session: Session, payment_item_id: int,
