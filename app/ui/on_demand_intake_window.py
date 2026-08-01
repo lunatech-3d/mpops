@@ -96,12 +96,21 @@ class OnDemandIntakeWindow(tk.Toplevel):
         super().__init__(parent)
         self.service, self.session, self.on_imported = OnDemandIntakeService(auth), session, on_imported
         self.parsed = None
-        self.title("On-Demand Job Intake"); self.geometry("1120x780"); self.minsize(900, 650)
+        self.title("On-Demand Job Intake"); self.geometry("1120x900"); self.minsize(900, 700)
         self.transient(parent)
         outer = ttk.Frame(self, padding=PADDING); outer.pack(fill="both", expand=True)
         ttk.Label(outer, text="On-Demand Job Intake", style="Header.TLabel").pack(anchor="w")
-        ttk.Label(outer, text="Paste both sources, parse them, review every value, then choose the actual technician.").pack(anchor="w", pady=(2, 8))
-        sources = ttk.Panedwindow(outer, orient="horizontal"); sources.pack(fill="both", expand=True)
+        ttk.Label(outer, text="Select the actual technician, paste both sources, parse them, then review every value.").pack(anchor="w", pady=(2, 8))
+
+        technician = ttk.Frame(outer); technician.pack(fill="x", pady=(0, 8))
+        ttk.Label(technician, text="Technician *").pack(side="left", padx=(0, 5))
+        technicians = self.service.list_active_technicians()
+        self.tech_by_name = {" ".join(filter(None, (r.get("first_name"), r.get("last_name")))): int(r["tech_id"]) for r in technicians}
+        self.tech_var = tk.StringVar()
+        ttk.Combobox(technician, textvariable=self.tech_var, values=list(self.tech_by_name),
+                     state="readonly", width=35).pack(side="left")
+
+        sources = ttk.Panedwindow(outer, orient="horizontal"); sources.pack(fill="x")
         self.email_text = self._source_box(sources, "A. Matterport Confirmation Email")
         self.notes_text = self._source_box(sources, "B. Skedulo Notes")
         actions = ttk.Frame(outer); actions.pack(fill="x", pady=8)
@@ -123,13 +132,8 @@ class OnDemandIntakeWindow(tk.Toplevel):
         row = (len(FIELDS) + 1) // 2
         ttk.Label(form, text="Site Instructions").grid(row=row, column=0, sticky="nw", pady=2)
         self.site_text = tk.Text(form, height=4, wrap="word"); self.site_text.grid(row=row, column=1, columnspan=3, sticky="ew", pady=2)
-        ttk.Label(form, text="Technician *").grid(row=row + 1, column=0, sticky="w", pady=4)
-        technicians = self.service.list_active_technicians()
-        self.tech_by_name = {" ".join(filter(None, (r.get("first_name"), r.get("last_name")))): int(r["tech_id"]) for r in technicians}
-        self.tech_var = tk.StringVar()
-        ttk.Combobox(form, textvariable=self.tech_var, values=list(self.tech_by_name), state="readonly", width=35).grid(row=row + 1, column=1, sticky="w")
         self.warning_var = tk.StringVar()
-        ttk.Label(form, textvariable=self.warning_var, foreground="#9b5c00", wraplength=850).grid(row=row + 2, column=0, columnspan=4, sticky="w", pady=5)
+        ttk.Label(form, textvariable=self.warning_var, foreground="#9b5c00", wraplength=850).grid(row=row + 1, column=0, columnspan=4, sticky="w", pady=5)
         for col in (1, 3): form.columnconfigure(col, weight=1)
         final = ttk.Frame(self.preview); final.pack(fill="x", pady=(8, 0))
         ttk.Button(final, text="Import Job", command=self.import_job).pack(side="left", padx=(0, 6))
