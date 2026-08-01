@@ -569,7 +569,9 @@ class CompensationService:
         if search_text:
             clauses.append("(j.external_job_id LIKE ? OR j.capture_address_raw LIKE ? OR j.address_1 LIKE ?)")
             token=f"%{str(search_text).strip()}%"; params.extend((token,token,token))
-        if unpaid_only: clauses.append("e.earning_status<>'Paid'")
+        if unpaid_only:
+            clauses.extend(("e.included_in_payment_run_id IS NULL", "e.paid_at IS NULL",
+                            "e.voided_at IS NULL"))
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         sql = """SELECT e.*,COALESCE(t.preferred_name,t.first_name)||' '||t.last_name technician_name,
           j.external_job_id,COALESCE(j.capture_address_raw,j.address_1,'') job_address,

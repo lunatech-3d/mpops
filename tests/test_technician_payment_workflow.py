@@ -39,6 +39,9 @@ class TechnicianPaymentWorkflowTests(CompensationServiceTests):
         eid=self.approved();unrelated=self.service.create_manual_earning_adjustment(self.session,self.tech,5,"later")
         run=self.payments.create_payment_run(self.session,[eid])
         self.assertEqual((run["payment_status"],len(run["payments"]),run["total_amount_cents"]),("Draft",1,71))
+        included=self.service.get_technician_earning(eid)
+        self.assertEqual(included["included_in_payment_run_id"],run["technician_payment_run_id"])
+        self.assertIsNotNone(included["included_in_payment_run_at"])
         run=self.payments.approve_payment_run(self.session,run["technician_payment_run_id"])
         self.assertEqual(self.service.get_technician_earning(eid)["earning_status"],"Approved")
         payment=run["payments"][0]
@@ -54,10 +57,29 @@ class TechnicianPaymentWorkflowTests(CompensationServiceTests):
         run=self.payments.create_payment_run(self.session,[pending]);rid=run["technician_payment_run_id"]
         with self.assertRaises(ValueError):self.payments.create_payment_run(self.session,[pending])
         self.payments.remove_earnings_from_payment_run(self.session,rid,[pending])
+        released=self.service.get_technician_earning(pending)
+        self.assertIsNone(released["included_in_payment_run_id"])
+        self.assertIsNone(released["included_in_payment_run_at"])
         self.assertEqual(len(self.payments.list_approved_unpaid_earnings()),1)
         run=self.payments.create_payment_run(self.session,[pending]);rid=run["technician_payment_run_id"]
         self.payments.cancel_payment_run(self.session,rid)
+        self.assertIsNone(self.service.get_technician_earning(pending)["included_in_payment_run_id"])
         self.assertEqual(len(self.payments.list_approved_unpaid_earnings()),1)
+
+    def test_new_run_eligibility_requires_approved_unincluded_unpaid_unvoided(self):
+        eligible=self.approved()
+        paid=self.service.create_manual_earning_adjustment(self.session,self.tech,5,"paid")
+        voided=self.service.create_manual_earning_adjustment(self.session,self.tech,6,"voided")
+        included=self.service.create_manual_earning_adjustment(self.session,self.tech,7,"included")
+        self.service.approve_technician_earnings(self.session,[paid,voided,included])
+        with self.auth.connection() as c:
+            dummy_run=c.execute("INSERT INTO TechnicianPaymentRuns(payment_status,total_amount_cents,created_by) "
+                                "VALUES('Draft',0,?)",(self.admin_id,)).lastrowid
+            c.execute("UPDATE TechnicianJobEarnings SET paid_at='2026-07-31' WHERE technician_earning_id=?",(paid,))
+            c.execute("UPDATE TechnicianJobEarnings SET voided_at='2026-07-31' WHERE technician_earning_id=?",(voided,))
+            c.execute("UPDATE TechnicianJobEarnings SET included_in_payment_run_id=? WHERE technician_earning_id=?",(dummy_run,included))
+        self.assertEqual([row["technician_earning_id"] for row in
+                          self.payments.list_approved_unpaid_earnings()],[eligible])
 
     def test_payment_csv_contains_no_sensitive_fields(self):
         eid=self.approved();run=self.payments.approve_payment_run(self.session,self.payments.create_payment_run(self.session,[eid])["technician_payment_run_id"])

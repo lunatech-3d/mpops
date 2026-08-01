@@ -275,10 +275,15 @@ class PaymentBatchDetail(tk.Toplevel):
         self.match_button = ttk.Button(actions, text="Match Jobs", command=self.match_jobs)
         self.resolve_button = ttk.Button(actions, text="Review Exceptions", command=self.resolve_exceptions)
         self.reconcile_button = ttk.Button(actions, text="Reconcile Batch", command=self.open_reconciliation)
+        self.generate_earnings_button = ttk.Button(
+            actions, text="Generate Technician Earnings", command=self.generate_earnings)
+        self.review_earnings_button = ttk.Button(
+            actions, text="Review Earnings", command=self.review_earnings)
         self.advance_button = ttk.Button(actions, text="Advance Status", command=self.advance)
         self.delete_button = ttk.Button(actions, text="Delete Draft", command=self.delete)
         for button in (self.save_button, self.import_button, self.metadata_button, self.match_button,
-                       self.resolve_button, self.reconcile_button, self.advance_button,
+                       self.resolve_button, self.reconcile_button, self.generate_earnings_button,
+                       self.review_earnings_button, self.advance_button,
                        self.delete_button):
             button.pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Refresh", command=self.refresh).pack(side="left")
@@ -315,6 +320,11 @@ class PaymentBatchDetail(tk.Toplevel):
                                       (exception_count > 0 or excluded_count > 0) else "disabled")
         ready = bool(getattr(self, "reconciliation", {}).get("ready"))
         self.reconcile_button.configure(state="normal" if self.batch_id and self.can_modify and ready else "disabled")
+        eligible = self.status_var.get() in {"Reconciled", "Approved", "Closed"}
+        self.generate_earnings_button.configure(
+            state="normal" if self.batch_id and self.can_modify and eligible else "disabled")
+        self.review_earnings_button.configure(
+            state="normal" if self.batch_id and getattr(self, "posted_earnings", []) else "disabled")
         next_status = next_batch_status(self.status_var.get())
         self.advance_button.configure(text={"Imported":"Send to Review", "Reconciled":"Approve", "Approved":"Close Batch"}.get(self.status_var.get(), "Mark Imported") if next_status else "Advance Status")
         if self.status_var.get() == "Needs Review": self.advance_button.configure(state="disabled")
@@ -586,6 +596,34 @@ class PaymentBatchDetail(tk.Toplevel):
             PaymentBatchReconciliationDialog(
                 self, self.service, self.session, self.batch_id,
                 lambda: (self.refresh(), self.on_changed(self.batch_id)))
+
+    def generate_earnings(self) -> None:
+        """Post the reviewed batch calculation to the Pending earnings ledger."""
+        if not self.batch_id:
+            return
+        try:
+            result = CompensationService(self.service.auth).generate_technician_earnings(
+                self.session, self.batch_id)
+        except Exception as exc:
+            _show_error(self, exc)
+            return
+        self.refresh(); self.on_changed(self.batch_id)
+        if result["idempotent"]:
+            message = "Technician earnings were already generated; no duplicate rows were created."
+        else:
+            message = (f"Generated {result['generated_count']} Pending technician earning(s).\n\n"
+                       "Open Review Earnings to inspect and approve them for payment.")
+        messagebox.showinfo("Technician Earnings", message, parent=self)
+
+    def review_earnings(self) -> None:
+        """Open the existing earnings review workflow filtered to this batch."""
+        if not self.batch_id:
+            return
+        from app.ui.technician_earnings_manager import TechnicianEarningsManager
+        dialog = tk.Toplevel(self); dialog.title(f"Technician Earnings — Batch #{self.batch_id}")
+        dialog.geometry("1400x650"); dialog.minsize(1000, 500); dialog.transient(self)
+        TechnicianEarningsManager(dialog, self.service.auth, self.session,
+                                  payment_batch_id=self.batch_id).pack(fill="both", expand=True)
 
     def advance(self) -> None:
         current = self.status_var.get(); requested = next_batch_status(current)

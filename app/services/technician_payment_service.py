@@ -40,7 +40,10 @@ class TechnicianPaymentService:
           WHERE e.technician_earning_id=?""",(earning_id,)).fetchone()
         if not row: return None,"earning does not exist"
         if row["earning_status"] != "Approved": return row,"earning is not Approved"
-        if row["technician_payment_id"] is not None: return row,"earning is already linked to a payment"
+        if row["included_in_payment_run_id"] is not None or row["technician_payment_id"] is not None:
+            return row,"earning is already linked to a payment"
+        if row["paid_at"] is not None: return row,"earning is already paid"
+        if row["voided_at"] is not None: return row,"earning is voided"
         if row["entry_type"] != "Manual Adjustment" and row["allocation_status"] != "Approved":
             return row,"company allocation is not Approved"
         return row,None
@@ -48,7 +51,8 @@ class TechnicianPaymentService:
     def list_approved_unpaid_earnings(self, **filters):
         filters={**filters,"status":"Approved","unpaid_only":True}
         return [row for row in CompensationService(self.auth).list_earnings_for_review(**filters)
-                if row["technician_payment_id"] is None and
+                if row["included_in_payment_run_id"] is None and row["paid_at"] is None and
+                row["voided_at"] is None and row["technician_payment_id"] is None and
                 (row["entry_type"] == "Manual Adjustment" or row["allocation_status"] == "Approved")]
 
     def create_payment_run(self, session: Session, earning_ids: list[int], notes: str | None=None,
@@ -79,6 +83,9 @@ class TechnicianPaymentService:
                 for earning in earnings:
                     c.execute("INSERT INTO TechnicianPaymentEarnings(technician_payment_id,technician_earning_id,amount_applied_cents,created_at) VALUES (?,?,?,?)",
                               (payment_id,earning["technician_earning_id"],earning["net_earning_cents"],now))
+                    c.execute("UPDATE TechnicianJobEarnings SET included_in_payment_run_id=?, "
+                              "included_in_payment_run_at=? WHERE technician_earning_id=?",
+                              (run_id,now,earning["technician_earning_id"]))
             total=sum(e["net_earning_cents"] for e in rows)
             c.execute("UPDATE TechnicianPaymentRuns SET total_amount_cents=? WHERE technician_payment_run_id=?",(total,run_id))
             record_event(c,"technician_payment_run_created",actor_user_id=session.user_id,details={
@@ -159,6 +166,8 @@ class TechnicianPaymentService:
                     pid=int(c.execute("INSERT INTO TechnicianPayments(technician_payment_run_id,tech_id,payment_amount_cents,payment_status,created_at) VALUES (?,?,0,'Pending',?)",(run_id,earning["tech_id"],now)).lastrowid)
                 else: pid=payment["technician_payment_id"]
                 c.execute("INSERT INTO TechnicianPaymentEarnings(technician_payment_id,technician_earning_id,amount_applied_cents,created_at) VALUES (?,?,?,?)",(pid,eid,earning["net_earning_cents"],now))
+                c.execute("UPDATE TechnicianJobEarnings SET included_in_payment_run_id=?, "
+                          "included_in_payment_run_at=? WHERE technician_earning_id=?",(run_id,now,eid))
                 record_event(c,"technician_earning_added_to_payment_run",actor_user_id=session.user_id,details={"payment_run_id":run_id,"earning_id":eid,"technician_id":earning["tech_id"],"amount_cents":earning["net_earning_cents"],"timestamp":now})
             c.execute("UPDATE TechnicianPaymentRuns SET version=version+1 WHERE technician_payment_run_id=?",(run_id,))
         return self.recalculate_payment_run(session,run_id)
@@ -177,6 +186,8 @@ class TechnicianPaymentService:
                   WHERE p.technician_payment_run_id=? AND pe.technician_earning_id=?""",(run_id,eid)).fetchone()
                 if not link: raise ValueError(f"Earning {eid} is not in this run")
                 c.execute("DELETE FROM TechnicianPaymentEarnings WHERE technician_payment_earning_id=?",(link[0],))
+                c.execute("UPDATE TechnicianJobEarnings SET included_in_payment_run_id=NULL, "
+                          "included_in_payment_run_at=NULL WHERE technician_earning_id=?",(eid,))
                 record_event(c,"technician_earning_removed_from_payment_run",actor_user_id=session.user_id,details={"payment_run_id":run_id,"earning_id":eid,"technician_id":link["tech_id"],"amount_cents":link["net_earning_cents"],"timestamp":now})
             c.execute("DELETE FROM TechnicianPayments WHERE technician_payment_run_id=? AND NOT EXISTS(SELECT 1 FROM TechnicianPaymentEarnings pe WHERE pe.technician_payment_id=TechnicianPayments.technician_payment_id)",(run_id,))
             c.execute("UPDATE TechnicianPaymentRuns SET version=version+1 WHERE technician_payment_run_id=?",(run_id,))
@@ -217,6 +228,10 @@ class TechnicianPaymentService:
             if run["payment_status"] != "Draft": raise ValueError("Only Draft runs may be cancelled")
             ids=[e["technician_earning_id"] for p in run["payments"] for e in p["earnings"]];now=utc_now_iso()
             c.execute("DELETE FROM TechnicianPaymentEarnings WHERE technician_payment_id IN (SELECT technician_payment_id FROM TechnicianPayments WHERE technician_payment_run_id=?)",(run_id,))
+            if ids:
+                placeholders=",".join("?" for _ in ids)
+                c.execute(f"UPDATE TechnicianJobEarnings SET included_in_payment_run_id=NULL, "
+                          f"included_in_payment_run_at=NULL WHERE technician_earning_id IN ({placeholders})",ids)
             c.execute("UPDATE TechnicianPayments SET payment_status='Cancelled',updated_at=? WHERE technician_payment_run_id=?",(now,run_id))
             c.execute("UPDATE TechnicianPaymentRuns SET payment_status='Cancelled',cancelled_at=?,cancelled_by=?,version=version+1 WHERE technician_payment_run_id=?",(now,session.user_id,run_id))
             record_event(c,"technician_payment_run_cancelled",actor_user_id=session.user_id,details={"payment_run_id":run_id,"released_earning_ids":ids,"previous_status":"Draft","new_status":"Cancelled","timestamp":now})
