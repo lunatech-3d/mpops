@@ -651,6 +651,18 @@ class JobsService:
         ):
             blockers.append(f"Matterport Payment Item {row['document_number']} (batch {row['batch_status']})")
         for row in connection.execute(
+            "SELECT pe.technician_payment_earning_id, p.technician_payment_id, p.payment_status "
+            "FROM TechnicianPaymentEarnings pe "
+            "JOIN TechnicianPayments p ON p.technician_payment_id=pe.technician_payment_id "
+            "JOIN TechnicianJobEarnings e ON e.technician_earning_id=pe.technician_earning_id "
+            "WHERE e.job_id=?",
+            (job_id,),
+        ):
+            blockers.append(
+                f"Technician payment allocation #{row['technician_payment_earning_id']} "
+                f"(payment #{row['technician_payment_id']}, {row['payment_status']})"
+            )
+        for row in connection.execute(
             "SELECT e.technician_earning_id, e.earning_status, t.first_name, t.last_name "
             "FROM TechnicianJobEarnings e JOIN Techs t ON t.tech_id=e.tech_id WHERE e.job_id=?",
             (job_id,),
@@ -665,13 +677,6 @@ class JobsService:
             (job_id,),
         ):
             blockers.append(f"Accepted or completed Job Assignment #{row['job_assignment_id']}")
-        for row in connection.execute(
-            "SELECT job_financial_id, ap_invoice_number FROM JobFinancials WHERE job_id=? AND "
-            "(ap_invoice_number IS NOT NULL OR ct_rate<>0 OR ct_travel_payout<>0 OR ct_off_hours_payout<>0)",
-            (job_id,),
-        ):
-            label = row["ap_invoice_number"] or f"#{row['job_financial_id']}"
-            blockers.append(f"Finalized Job Financial {label}")
         return blockers
 
     def get_job_deletion_blockers(self, session: Session, job_id: int) -> list[str]:
@@ -692,7 +697,8 @@ class JobsService:
             if blockers:
                 raise ValueError("This Job cannot be permanently deleted because it is linked to:\n\n- "
                                  + "\n- ".join(blockers) + "\n\nCancel or archive the Job instead.")
-            # Only zero-value, non-invoiced financial rows and incomplete assignments reach here.
+            # JobFinancials is a draft child. Its imported or calculated values do not
+            # establish payment finalization; protected downstream records are checked above.
             connection.execute("DELETE FROM JobFinancials WHERE job_id=?", (job_id,))
             connection.execute("DELETE FROM JobAssignments WHERE job_id=?", (job_id,))
             connection.execute("DELETE FROM JobSourceRecords WHERE job_id=?", (job_id,))
