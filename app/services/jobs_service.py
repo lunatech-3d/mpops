@@ -23,12 +23,12 @@ _JOB_FIELDS = frozenset({
     "onsite_contact_name", "onsite_contact_email", "onsite_contact_phone",
     "preferred_datetime_1", "preferred_datetime_2", "alternate_datetime_1",
     "alternate_datetime_2", "alternate_datetime_3", "cancellation_reason",
-    "internal_notes",
+    "internal_notes", "archived_at", "archive_reason",
 })
 _REQUIRED_JOB_FIELDS = frozenset({"external_job_id"})
 _TIMESTAMP_FIELDS = frozenset({
     "request_received_at", "scheduled_start_at", "actual_start_at", "completed_at",
-    "cancelled_at", "preferred_datetime_1", "preferred_datetime_2",
+    "cancelled_at", "archived_at", "preferred_datetime_1", "preferred_datetime_2",
     "alternate_datetime_1", "alternate_datetime_2", "alternate_datetime_3",
 })
 _LONG_TEXT_FIELDS = frozenset({
@@ -79,6 +79,11 @@ class JobsService:
     def _require_operator(session: Session | None) -> None:
         if session is None or session.role not in {"admin", "operator"}:
             raise AuthorizationError("Administrator or operator role required")
+
+    @staticmethod
+    def _require_admin(session: Session | None) -> None:
+        if session is None or session.role != "admin":
+            raise AuthorizationError("Administrator role required")
 
     @staticmethod
     def _positive_id(value: Any, label: str) -> int:
@@ -409,7 +414,9 @@ class JobsService:
         offset = self._page_value(offset, "offset", minimum=0)
         parameters: list[Any] = []
         where = ""
-        if job_status is not None:
+        if job_status == "Active":
+            where = " WHERE j.job_status NOT IN ('Cancelled', 'Archived') COLLATE NOCASE"
+        elif job_status is not None:
             status = self._clean_text("job_status", job_status, required=True)
             where = " WHERE j.job_status = ? COLLATE NOCASE"
             parameters.append(status)
@@ -452,7 +459,9 @@ class JobsService:
             ) + ")"
         ]
         parameters: list[Any] = [term] * len(searchable)
-        if job_status is not None:
+        if job_status == "Active":
+            conditions.append("j.job_status NOT IN ('Cancelled', 'Archived') COLLATE NOCASE")
+        elif job_status is not None:
             conditions.append("j.job_status = ? COLLATE NOCASE")
             parameters.append(self._clean_text("job_status", job_status, required=True))
         parameters.extend((limit, offset))
@@ -581,3 +590,115 @@ class JobsService:
             if "external_job_id" in message or "unique" in message:
                 raise ValueError("A Job with this external Job ID already exists") from exc
             raise ValueError("Job data conflicts with an existing record") from exc
+
+    def cancel_job(self, session: Session, job_id: int, reason: str, notes: str | None = None) -> dict[str, Any]:
+        """Cancel a Job without removing any operational or financial history."""
+        self._require_operator(session)
+        self._positive_id(job_id, "job_id")
+        reason = self._clean_text("cancellation_reason", reason, required=True)
+        notes = self._clean_text("internal_notes", notes)
+        with self.auth.connection() as connection:
+            before = dict(self._require_job(connection, job_id))
+            if str(before["job_status"]).casefold() == "cancelled":
+                return self._summary_row(connection, job_id)
+            now = utc_now_iso()
+            connection.execute(
+                "UPDATE Jobs SET job_status='Cancelled', cancelled_at=?, cancellation_reason=?, "
+                "internal_notes=CASE WHEN ? IS NULL THEN internal_notes WHEN internal_notes IS NULL OR internal_notes='' "
+                "THEN ? ELSE internal_notes || char(10) || ? END, updated_at=?, updated_by=? WHERE job_id=?",
+                (now, reason, notes, notes, notes, now, session.user_id, job_id),
+            )
+            record_event(connection, "job_cancelled", actor_user_id=session.user_id, details={
+                "job_id": job_id, "external_job_id": before["external_job_id"],
+                "address": before["capture_address_raw"], "prior_status": before["job_status"],
+                "new_status": "Cancelled", "reason": reason, "notes": notes,
+                "actor_username": session.username,
+            })
+            return self._summary_row(connection, job_id)
+
+    def archive_job(self, session: Session, job_id: int, reason: str, notes: str | None = None) -> dict[str, Any]:
+        """Archive a Job while preserving every related record."""
+        self._require_admin(session)
+        self._positive_id(job_id, "job_id")
+        reason = self._clean_text("archive_reason", reason, required=True)
+        notes = self._clean_text("internal_notes", notes)
+        with self.auth.connection() as connection:
+            before = dict(self._require_job(connection, job_id))
+            if str(before["job_status"]).casefold() == "archived":
+                return self._summary_row(connection, job_id)
+            now = utc_now_iso()
+            connection.execute(
+                "UPDATE Jobs SET job_status='Archived', archived_at=?, archive_reason=?, "
+                "internal_notes=CASE WHEN ? IS NULL THEN internal_notes WHEN internal_notes IS NULL OR internal_notes='' "
+                "THEN ? ELSE internal_notes || char(10) || ? END, updated_at=?, updated_by=? WHERE job_id=?",
+                (now, reason, notes, notes, notes, now, session.user_id, job_id),
+            )
+            record_event(connection, "job_archived", actor_user_id=session.user_id, details={
+                "job_id": job_id, "external_job_id": before["external_job_id"],
+                "address": before["capture_address_raw"], "prior_status": before["job_status"],
+                "new_status": "Archived", "reason": reason, "notes": notes,
+                "actor_username": session.username,
+            })
+            return self._summary_row(connection, job_id)
+
+    @staticmethod
+    def _deletion_blockers(connection: sqlite3.Connection, job_id: int) -> list[str]:
+        blockers: list[str] = []
+        for row in connection.execute(
+            "SELECT i.document_number, b.batch_status FROM MatterportPaymentItems i "
+            "JOIN MatterportPaymentBatches b ON b.payment_batch_id=i.payment_batch_id WHERE i.job_id=?",
+            (job_id,),
+        ):
+            blockers.append(f"Matterport Payment Item {row['document_number']} (batch {row['batch_status']})")
+        for row in connection.execute(
+            "SELECT e.technician_earning_id, e.earning_status, t.first_name, t.last_name "
+            "FROM TechnicianJobEarnings e JOIN Techs t ON t.tech_id=e.tech_id WHERE e.job_id=?",
+            (job_id,),
+        ):
+            blockers.append(
+                f"Technician earning #{row['technician_earning_id']} for "
+                f"{row['first_name']} {row['last_name']} ({row['earning_status']})"
+            )
+        for row in connection.execute(
+            "SELECT job_assignment_id, assignment_status FROM JobAssignments WHERE job_id=? "
+            "AND (accepted_at IS NOT NULL OR completed_at IS NOT NULL OR assignment_status IN ('Accepted','Completed'))",
+            (job_id,),
+        ):
+            blockers.append(f"Accepted or completed Job Assignment #{row['job_assignment_id']}")
+        for row in connection.execute(
+            "SELECT job_financial_id, ap_invoice_number FROM JobFinancials WHERE job_id=? AND "
+            "(ap_invoice_number IS NOT NULL OR ct_rate<>0 OR ct_travel_payout<>0 OR ct_off_hours_payout<>0)",
+            (job_id,),
+        ):
+            label = row["ap_invoice_number"] or f"#{row['job_financial_id']}"
+            blockers.append(f"Finalized Job Financial {label}")
+        return blockers
+
+    def get_job_deletion_blockers(self, session: Session, job_id: int) -> list[str]:
+        self._require_admin(session)
+        self._positive_id(job_id, "job_id")
+        with self.auth.connection() as connection:
+            self._require_job(connection, job_id)
+            return self._deletion_blockers(connection, job_id)
+
+    def delete_draft_job(self, session: Session, job_id: int, reason: str) -> dict[str, Any]:
+        """Permanently delete only a preliminary Job, atomically, after blocker checks."""
+        self._require_admin(session)
+        self._positive_id(job_id, "job_id")
+        reason = self._clean_text("reason", reason, required=True)
+        with self.auth.connection() as connection:
+            job = dict(self._require_job(connection, job_id))
+            blockers = self._deletion_blockers(connection, job_id)
+            if blockers:
+                raise ValueError("This Job cannot be permanently deleted because it is linked to:\n\n- "
+                                 + "\n- ".join(blockers) + "\n\nCancel or archive the Job instead.")
+            # Only zero-value, non-invoiced financial rows and incomplete assignments reach here.
+            connection.execute("DELETE FROM JobFinancials WHERE job_id=?", (job_id,))
+            connection.execute("DELETE FROM JobAssignments WHERE job_id=?", (job_id,))
+            connection.execute("DELETE FROM JobSourceRecords WHERE job_id=?", (job_id,))
+            connection.execute("DELETE FROM Jobs WHERE job_id=?", (job_id,))
+            details = {"deleted_job_id": job_id, "external_job_id": job["external_job_id"],
+                       "address": job["capture_address_raw"], "prior_status": job["job_status"],
+                       "reason": reason, "actor_username": session.username}
+            record_event(connection, "draft_job_deleted", actor_user_id=session.user_id, details=details)
+            return details

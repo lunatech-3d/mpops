@@ -236,7 +236,8 @@ class OnDemandIntakeService:
             job_id=int(job["job_id"]), tech_id=int(tech_id),
             gross_revenue=data.get("expected_payout"))
 
-    def import_job(self, session, data: dict[str, Any], email_text: str, notes_text: str, tech_id: int) -> tuple[int, bool]:
+    def import_job(self, session, data: dict[str, Any], email_text: str, notes_text: str,
+                   tech_id: int, *, update_protected: bool = False) -> tuple[int, bool]:
         self.jobs._require_operator(session)
         required = (("job_id", "External Job ID"), ("address", "Address"),
                     ("scheduled_start_at", "Scheduled start"), ("expected_payout", "Expected payout"))
@@ -261,6 +262,12 @@ class OnDemandIntakeService:
                       "onsite_contact_phone": re.sub(r"\D", "", str(data.get("contact_phone") or "")) or None}
         existing = self.jobs.get_job_by_external_id(data["job_id"])
         if existing:
+            if (str(existing.get("job_status")).casefold() in {"cancelled", "archived"}
+                    and not update_protected):
+                raise ValueError(
+                    f"Job {data['job_id']} is {existing['job_status']}. Explicitly confirm an update; "
+                    "the import will preserve that lifecycle status."
+                )
             # The UI confirms updates; only source-owned fields are supplied here.
             # Blank source controls never erase established operational data. Hayley
             # can still explicitly edit populated values in the reviewed preview.

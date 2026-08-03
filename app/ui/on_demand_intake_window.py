@@ -195,9 +195,20 @@ class OnDemandIntakeWindow(tk.Toplevel):
                 name = " ".join(filter(None, (assignment.get("first_name"), assignment.get("last_name"))))
                 if not messagebox.askyesno("Change primary technician?", f"{name} is currently primary. Replace that assignment and preserve it in history?", parent=self): return
             if not messagebox.askyesno("Update existing Job?", "This Job ID already exists. Update only the reviewed On-Demand source fields?", parent=self): return
+        update_protected = False
         try:
+            existing = self.service.jobs.get_job_by_external_id(data.get("job_id") or "")
+            if existing and str(existing.get("job_status")).casefold() in {"cancelled", "archived"}:
+                if not messagebox.askyesno(
+                    "Lifecycle-protected Job",
+                    f"Job {data['job_id']} is {existing['job_status']}.\n\n"
+                    "Update its source details while preserving that status?\n"
+                    "Choose No to leave it unchanged.", parent=self):
+                    return
+                update_protected = True
             job_id, created = self.service.import_job(self.session, data,
-                self.email_text.get("1.0", "end-1c"), self.notes_text.get("1.0", "end-1c"), tech_id)
+                self.email_text.get("1.0", "end-1c"), self.notes_text.get("1.0", "end-1c"),
+                tech_id, update_protected=update_protected)
         except (ValueError, LookupError) as exc:
             messagebox.showerror("On-Demand Job Intake", str(exc), parent=self); return
         self.status.set(f"Job {job_id} {'created' if created else 'updated'} successfully.")

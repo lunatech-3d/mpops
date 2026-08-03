@@ -4,7 +4,7 @@ import re
 import sqlite3
 import tkinter as tk
 from datetime import datetime
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 from app.date_utils import format_display_datetime
 from app.security.user_manager import AuthorizationError
@@ -15,8 +15,8 @@ from app.ui.styles import PADDING
 
 EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
 STATUS_VALUES = (
-    "All", "Requested", "Scheduling", "Scheduled", "Assigned", "In Progress",
-    "Completed", "Cancelled", "On Hold",
+    "Active", "Cancelled", "Archived", "All", "Requested", "Scheduling", "Scheduled",
+    "Assigned", "In Progress", "Completed", "On Hold",
 )
 
 
@@ -123,11 +123,27 @@ class JobsController:
     def can_modify(self):
         return self.session.role in {"admin", "operator"}
 
+    @property
+    def is_admin(self):
+        return self.session.role == "admin"
+
     def load(self, query="", status="All"):
         status_filter = None if status == "All" else status
         if query.strip():
             return self.service.search_jobs(query, status_filter)
         return self.service.list_jobs(status_filter)
+
+    def cancel(self, job_id, reason, notes=None):
+        return self.service.cancel_job(self.session, job_id, reason, notes)
+
+    def archive(self, job_id, reason, notes=None):
+        return self.service.archive_job(self.session, job_id, reason, notes)
+
+    def deletion_blockers(self, job_id):
+        return self.service.get_job_deletion_blockers(self.session, job_id)
+
+    def delete_draft(self, job_id, reason):
+        return self.service.delete_draft_job(self.session, job_id, reason)
 
     def create(self, data):
         data = dict(data)
@@ -168,7 +184,7 @@ class JobsManager(ttk.Frame):
         filters = ttk.Frame(self)
         filters.pack(fill="x", pady=(0, 8))
         self.search_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="All")
+        self.status_var = tk.StringVar(value="Active")
 
         ttk.Label(filters, text="Search:").pack(side="left")
         search = ttk.Entry(filters, textvariable=self.search_var, width=34)
@@ -226,6 +242,12 @@ class JobsManager(ttk.Frame):
         ttk.Button(actions, text="View Details", command=self.view_details).pack(
             side="left", padx=(0, 6)
         )
+        self.cancel_button = ttk.Button(actions, text="Cancel Job", command=self.cancel_job)
+        self.cancel_button.pack(side="left", padx=(12, 6))
+        self.archive_button = ttk.Button(actions, text="Archive Job", command=self.archive_job)
+        self.archive_button.pack(side="left", padx=(0, 6))
+        self.delete_button = ttk.Button(actions, text="Delete Draft", command=self.delete_draft)
+        self.delete_button.pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="Refresh", command=self.refresh).pack(side="left")
 
         self.status = tk.StringVar()
@@ -236,12 +258,16 @@ class JobsManager(ttk.Frame):
         if not self.controller.can_modify:
             self.add_button.configure(state="disabled")
             self.edit_button.configure(state="disabled")
+            self.cancel_button.configure(state="disabled")
+        if not self.controller.is_admin:
+            self.archive_button.configure(state="disabled")
+            self.delete_button.configure(state="disabled")
 
         self.refresh()
 
     def clear_filters(self):
         self.search_var.set("")
-        self.status_var.set("All")
+        self.status_var.set("Active")
         self.refresh()
 
     def sort_by(self, column):
@@ -371,8 +397,21 @@ class JobsManager(ttk.Frame):
         if assignment and assignment["status"] != "Active":
             technicians = [*technicians, assignment]
 
-        submitted = show_job_form(self, original, markets, technicians)
+        submitted = show_job_form(
+            self, original, markets, technicians,
+            lifecycle_permissions={
+                "cancel": str(original.get("job_status")).casefold() != "cancelled",
+                "archive": self.controller.is_admin and str(original.get("job_status")).casefold() != "archived",
+                "delete_visible": self.controller.is_admin,
+                "delete": self.controller.is_admin,
+            },
+        )
         if submitted is None:
+            return
+        lifecycle_action = submitted.get("__lifecycle_action")
+        if lifecycle_action:
+            {"cancel": self.cancel_job, "archive": self.archive_job,
+             "delete": self.delete_draft}[lifecycle_action]()
             return
         try:
             result = self.controller.update(job_id, original, submitted)
@@ -395,6 +434,75 @@ class JobsManager(ttk.Frame):
             self._error(LookupError("Job not found"))
             return
         JobDetails(self, job)
+
+    @staticmethod
+    def _identity(job):
+        return (f"Job: {job.get('external_job_id') or '—'}\n"
+                f"Address: {job_address(job) or '—'}\n"
+                f"Current Status: {job.get('job_status') or '—'}")
+
+    def cancel_job(self):
+        job = self.selected()
+        if not job:
+            return
+        if str(job.get("job_status")).casefold() == "cancelled":
+            messagebox.showinfo("Cancel Job", "This Job is already cancelled.", parent=self)
+            return
+        if not messagebox.askyesno("Cancel Job", self._identity(job) +
+                "\n\nCancel this Job? It will remain in history.", parent=self):
+            return
+        reason = simpledialog.askstring("Cancellation Reason", "Cancellation reason (required):", parent=self)
+        if not reason or not reason.strip():
+            messagebox.showwarning("Cancel Job", "A cancellation reason is required.", parent=self)
+            return
+        try:
+            self.controller.cancel(int(job["job_id"]), reason)
+        except EXPECTED_ERRORS as exc:
+            self._error(exc); return
+        self.refresh(int(job["job_id"])); self.status.set("Job cancelled; history was preserved.")
+
+    def archive_job(self):
+        job = self.selected()
+        if not job:
+            return
+        if str(job.get("job_status")).casefold() == "archived":
+            messagebox.showinfo("Archive Job", "This Job is already archived.", parent=self); return
+        if not messagebox.askyesno("Archive Job", self._identity(job) +
+                "\n\nArchive this Job? It will be hidden from active views but preserved.", parent=self):
+            return
+        reason = simpledialog.askstring("Archive Reason", "Archive reason (required):", parent=self)
+        if not reason or not reason.strip():
+            messagebox.showwarning("Archive Job", "An archive reason is required.", parent=self); return
+        try:
+            self.controller.archive(int(job["job_id"]), reason)
+        except EXPECTED_ERRORS as exc:
+            self._error(exc); return
+        self.refresh(); self.status.set("Job archived; all history was preserved.")
+
+    def delete_draft(self):
+        job = self.selected()
+        if not job:
+            return
+        try:
+            blockers = self.controller.deletion_blockers(int(job["job_id"]))
+        except EXPECTED_ERRORS as exc:
+            self._error(exc); return
+        if blockers:
+            messagebox.showerror("Delete Draft", "This Job cannot be permanently deleted because it is linked to:\n\n- "
+                                 + "\n- ".join(blockers) + "\n\nCancel or archive the Job instead.", parent=self)
+            return
+        prompt = ("Permanently delete this draft Job?\n\nThis action cannot be undone.\n\n"
+                  f"Job: {job.get('external_job_id') or '—'}\nAddress: {job_address(job) or '—'}")
+        if not messagebox.askyesno("Delete Draft Job", prompt, icon="warning", parent=self):
+            return
+        reason = simpledialog.askstring("Deletion Reason", "Reason for permanent deletion (required):", parent=self)
+        if not reason or not reason.strip():
+            messagebox.showwarning("Delete Draft", "A deletion reason is required.", parent=self); return
+        try:
+            self.controller.delete_draft(int(job["job_id"]), reason)
+        except EXPECTED_ERRORS as exc:
+            self._error(exc); return
+        self.refresh(); self.status.set("Draft Job permanently deleted; audit identity preserved.")
 
 
 class JobDetails:
