@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import re
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from app.date_utils import format_display_datetime
-from app.services.on_demand_intake_service import OnDemandIntakeService, combine_sources
+from app.services.on_demand_intake_service import (OnDemandIntakeService, calendar_details,
+                                                   combine_sources)
 from app.ui.scrollable_frame import ScrollableFrame
 from app.ui.styles import PADDING
 
@@ -26,76 +25,13 @@ FIELDS = (
 )
 
 
-def _phone(value):
-    digits = re.sub(r"\D", "", str(value or ""))
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
-    return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}" if len(digits) == 10 else str(value or "")
-
-
-def _duration(value):
-    try:
-        minutes = int(value)
-    except (TypeError, ValueError):
-        return str(value or "")
-    hours, remainder = divmod(minutes, 60)
-    return " ".join(part for part in (f"{hours} hours" if hours else "", f"{remainder} minutes" if remainder else "") if part)
-
-
-def calendar_details(data):
-    address = "\n".join(filter(None, (data.get("address_1") or data.get("address"),
-        " ".join(filter(None, (", ".join(filter(None, (data.get("city"), data.get("state")))), data.get("postal_code")))))))
-    try:
-        payout = f"${float(str(data.get('expected_payout')).replace(',', '').replace('$', '')):,.2f}"
-    except (TypeError, ValueError):
-        payout = str(data.get("expected_payout") or "")
-    property_size = str(data.get("property_size") or "")
-    numeric_property_size = re.sub(r"[^\d.]", "", property_size)
-    try:
-        size = f"{float(numeric_property_size):,.0f} sq ft" if numeric_property_size else ""
-    except ValueError:
-        size = property_size
-    return f"""Matterport On-Demand Capture
-
-Job ID: {data.get('job_id') or ''}
-Job Link: {data.get('job_link') or ''}
-
-Address:
-{address}
-
-Scheduled:
-{format_display_datetime(data.get('scheduled_start_at'))}
-
-Estimated Duration:
-{_duration(data.get('estimated_minutes'))}
-
-Property Type:
-{data.get('property_type') or ''}
-
-Property Size:
-{size}
-
-Capture Type:
-{data.get('capture_type') or ''}
-
-Contact:
-{data.get('contact_name') or ''}
-{data.get('contact_email') or ''}
-{_phone(data.get('contact_phone'))}
-Will be onsite: {data.get('contact_onsite') or ''}
-
-Site Instructions:
-{data.get('site_info') or ''}
-
-Expected Payout:
-{payout}"""
-
-
 class OnDemandIntakeWindow(tk.Toplevel):
     def __init__(self, parent, auth, session, on_imported=None):
         super().__init__(parent)
         self.service, self.session, self.on_imported = OnDemandIntakeService(auth), session, on_imported
         self.parsed = None
+        self.technician_identity = None
+        self.technician_payout = None
         self.title("On-Demand Job Intake"); self.geometry("1120x900"); self.minsize(900, 700)
         self.transient(parent)
         outer = ttk.Frame(self, padding=PADDING); outer.pack(fill="both", expand=True)
@@ -107,8 +43,13 @@ class OnDemandIntakeWindow(tk.Toplevel):
         technicians = self.service.list_active_technicians()
         self.tech_by_name = {" ".join(filter(None, (r.get("first_name"), r.get("last_name")))): int(r["tech_id"]) for r in technicians}
         self.tech_var = tk.StringVar()
-        ttk.Combobox(technician, textvariable=self.tech_var, values=list(self.tech_by_name),
-                     state="readonly", width=35).pack(side="left")
+        tech_box = ttk.Combobox(technician, textvariable=self.tech_var, values=list(self.tech_by_name),
+                                state="readonly", width=35)
+        tech_box.pack(side="left")
+        tech_box.bind("<<ComboboxSelected>>", self._refresh_calendar_info)
+        self.tech_email_var = tk.StringVar(value="Select a technician to view email.")
+        ttk.Label(technician, text="Email:").pack(side="left", padx=(18, 5))
+        ttk.Label(technician, textvariable=self.tech_email_var, wraplength=430).pack(side="left")
 
         sources = ttk.Panedwindow(outer, orient="horizontal"); sources.pack(fill="x")
         self.email_text = self._source_box(sources, "A. Matterport Confirmation Email")
@@ -134,10 +75,26 @@ class OnDemandIntakeWindow(tk.Toplevel):
         self.site_text = tk.Text(form, height=4, wrap="word"); self.site_text.grid(row=row, column=1, columnspan=3, sticky="ew", pady=2)
         self.warning_var = tk.StringVar()
         ttk.Label(form, textvariable=self.warning_var, foreground="#9b5c00", wraplength=850).grid(row=row + 1, column=0, columnspan=4, sticky="w", pady=5)
+        self.calendar_title_var = tk.StringVar(value="Matterport Capture")
+        self.attendee_var = tk.StringVar(value="No technician selected")
+        self.gross_payout_var = tk.StringVar(value="—")
+        self.tech_payout_var = tk.StringVar(value="Unable to calculate")
+        self.rule_var = tk.StringVar(value="—")
+        info_row = row + 2
+        for offset, (label, variable) in enumerate((
+                ("Suggested Calendar Title", self.calendar_title_var),
+                ("Technician Attendee", self.attendee_var),
+                ("Matterport Expected Payout", self.gross_payout_var),
+                ("Technician Expected Payout", self.tech_payout_var),
+                ("Compensation Rule", self.rule_var))):
+            ttk.Label(form, text=label).grid(row=info_row + offset, column=0, sticky="w", pady=2)
+            ttk.Label(form, textvariable=variable, wraplength=700).grid(
+                row=info_row + offset, column=1, columnspan=3, sticky="w", pady=2)
         for col in (1, 3): form.columnconfigure(col, weight=1)
         final = ttk.Frame(self.preview); final.pack(fill="x", pady=(8, 0))
         ttk.Button(final, text="Import Job", command=self.import_job).pack(side="left", padx=(0, 6))
         ttk.Button(final, text="Copy Calendar Details", command=self.copy_calendar).pack(side="left")
+        self.vars["expected_payout"].trace_add("write", self._refresh_calendar_info)
 
     @staticmethod
     def _source_box(parent, title):
@@ -147,7 +104,8 @@ class OnDemandIntakeWindow(tk.Toplevel):
 
     def clear(self):
         self.email_text.delete("1.0", "end"); self.notes_text.delete("1.0", "end")
-        self.preview.pack_forget(); self.parsed = None; self.status.set("Cleared. Nothing has been saved.")
+        self.preview.pack_forget(); self.parsed = None; self.technician_payout = None
+        self._refresh_calendar_info(); self.status.set("Cleared. Nothing has been saved.")
 
     def parse(self):
         try:
@@ -163,12 +121,70 @@ class OnDemandIntakeWindow(tk.Toplevel):
             if not self.parsed.get(key): messages.append(f"Missing {label}.")
         self.warning_var.set("  ".join(messages)); self.status.set("Parsed successfully. Review before importing.")
         self.preview.pack(fill="both", expand=True)
+        self._refresh_calendar_info()
 
     def _data(self):
         data = dict(self.parsed or {})
         data.update({key: variable.get().strip() or None for key, variable in self.vars.items()})
         data["site_info"] = self.site_text.get("1.0", "end-1c").strip() or None
         return data
+
+    @staticmethod
+    def _currency(value):
+        try:
+            return f"${float(str(value).replace(',', '').replace('$', '')):,.2f}"
+        except (TypeError, ValueError):
+            return "Invalid or blank"
+
+    def _refresh_calendar_info(self, *_args):
+        """Refresh attendee and compensation display after any relevant UI change."""
+        tech_id = self.tech_by_name.get(self.tech_var.get())
+        self.technician_identity = None
+        self.technician_payout = None
+        if tech_id:
+            try:
+                self.technician_identity = self.service.technician_calendar_identity(tech_id)
+            except (ValueError, LookupError) as exc:
+                self.tech_email_var.set(str(exc))
+                self.attendee_var.set("Unable to resolve technician")
+            else:
+                identity = self.technician_identity
+                if identity.get("email"):
+                    self.tech_email_var.set(identity["email"])
+                    self.attendee_var.set(f"{identity['name']} <{identity['email']}>")
+                else:
+                    warning = "No email address is stored for this technician."
+                    self.tech_email_var.set(warning)
+                    self.attendee_var.set(f"{identity['name']} — No email on file")
+        else:
+            self.tech_email_var.set("Select a technician to view email.")
+            self.attendee_var.set("No technician selected")
+
+        if not hasattr(self, "vars"):
+            return
+        data = self._data()
+        address = data.get("address_1") or data.get("address") or ""
+        street = str(address).split(",", 1)[0].strip()
+        self.calendar_title_var.set(f"Matterport Capture - {street}" if street else "Matterport Capture")
+        self.gross_payout_var.set(self._currency(data.get("expected_payout")))
+        self.tech_payout_var.set("Unable to calculate")
+        self.rule_var.set("—")
+        if not tech_id or not self.parsed:
+            return
+        try:
+            self.technician_payout = self.service.expected_technician_payout(data, tech_id)
+        except (ValueError, LookupError) as exc:
+            self.rule_var.set(str(exc))
+        except Exception as exc:
+            # Rule configuration/data-integrity errors are reviewable intake issues,
+            # not reasons for a Tk callback to terminate the application.
+            self.rule_var.set(f"Unable to calculate: {exc}")
+        else:
+            payout = self.technician_payout
+            self.tech_payout_var.set(f"${payout['amount_cents'] / 100:,.2f}")
+            value = (f"{payout['rule_value'] / 100:g}%" if payout["rule_type"] == "Percentage"
+                     else f"${payout['rule_value'] / 100:,.2f} flat")
+            self.rule_var.set(f"{payout['rule_source']} — {value}")
 
     def import_job(self):
         data, tech_id = self._data(), self.tech_by_name.get(self.tech_var.get())
@@ -185,15 +201,25 @@ class OnDemandIntakeWindow(tk.Toplevel):
         except (ValueError, LookupError) as exc:
             messagebox.showerror("On-Demand Job Intake", str(exc), parent=self); return
         self.status.set(f"Job {job_id} {'created' if created else 'updated'} successfully.")
+        self._refresh_calendar_info()
         messagebox.showinfo("On-Demand Job Intake", self.status.get(), parent=self)
         if self.on_imported: self.on_imported()
 
     def copy_calendar(self):
         if not self.parsed:
             messagebox.showwarning("On-Demand Job Intake", "Parse both sources first.", parent=self); return
-        text = calendar_details(self._data())
+        self._refresh_calendar_info()
+        if not self.technician_identity:
+            messagebox.showwarning("On-Demand Job Intake", "Select a technician first.", parent=self); return
+        if not self.technician_payout:
+            messagebox.showwarning(
+                "On-Demand Job Intake",
+                "Technician payout is unable to be calculated. Review the Job and compensation rule before copying.",
+                parent=self); return
+        text = calendar_details(self._data(), self.technician_identity, self.technician_payout)
         self.clipboard_clear(); self.clipboard_append(text); self.update()
         self.status.set("Calendar details copied to the clipboard.")
+        messagebox.showinfo("On-Demand Job Intake", self.status.get(), parent=self)
 
 
 def open_on_demand_intake(parent, auth, session, on_imported=None):

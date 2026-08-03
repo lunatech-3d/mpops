@@ -119,6 +119,36 @@ class CompensationService:
         return {"Job": "Job Override", "Technician": "Technician Default",
                 "Market": "Market Default", "System": "System Default"}[rule["scope_type"]]
 
+    def preview_job_payout(self, *, job_id: int, tech_id: int,
+                           gross_revenue: Any) -> dict[str, Any]:
+        """Calculate a non-persisted expected payout with the production rule resolver.
+
+        This is intentionally available only for a persisted Job, so job overrides,
+        its market, and its business date are considered exactly as they are by the
+        earnings workflow. A Job without a market still resolves Job, Technician,
+        then System rules; Market rules participate when a market is assigned.
+        """
+        job_id, tech_id = self._id(job_id, "job_id"), self._id(tech_id, "tech_id")
+        gross_cents = self._financial_cents(gross_revenue)
+        with self.auth.connection() as connection:
+            job = connection.execute(
+                "SELECT job_id, market_id, completed_at, actual_start_at, scheduled_start_at "
+                "FROM Jobs WHERE job_id=?", (job_id,)).fetchone()
+            if job is None:
+                raise LookupError("Job not found")
+        effective_date = self.rule_effective_date(job, None)
+        if effective_date is None:
+            raise ValueError("The Job has no date available for compensation rule resolution.")
+        rule = RevenueRuleService(self.auth).resolve_technician_rule(
+            job_id=job_id, tech_id=tech_id, market_id=job["market_id"],
+            effective_date=effective_date, compensation_component="Overall")
+        amount = self.calculate_amount(gross_cents, rule["rule_type"], int(rule["rule_value"]))
+        return {"amount_cents": amount, "rule_type": rule["rule_type"],
+                "rule_value": int(rule["rule_value"]),
+                "rule_source": self._rule_source(rule),
+                "compensation_rule_id": int(rule["compensation_rule_id"]),
+                "effective_date": effective_date}
+
     @staticmethod
     def reconcile_financial_components(gross_revenue_cents: int,
                                        components: dict[str, int]) -> dict[str, Any]:
