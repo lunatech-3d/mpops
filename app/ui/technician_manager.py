@@ -234,9 +234,10 @@ class TechnicianDetails:
         ttk.Label(body, text=f"{technician['tech_code']}  •  {technician['status']}  •  {technician.get('email') or 'No email'}").pack(anchor="w", pady=(0, 10))
         notebook = ttk.Notebook(body); notebook.pack(fill="both", expand=True)
         profile_tab = ttk.Frame(notebook, padding=6); addresses_tab = ttk.Frame(notebook, padding=6)
-        compensation_tab = ttk.Frame(notebook); finance_tab = ttk.Frame(notebook)
+        compensation_tab = ttk.Frame(notebook); jobs_tab = ttk.Frame(notebook); finance_tab = ttk.Frame(notebook)
         notebook.add(profile_tab, text="Profile")
         notebook.add(addresses_tab, text="Addresses"); notebook.add(compensation_tab, text="Compensation")
+        notebook.add(jobs_tab, text="Jobs")
         notebook.add(finance_tab, text="Finances")
         profile = ttk.Frame(profile_tab); profile.pack(fill="x", pady=(0, 10))
         sections = [
@@ -283,7 +284,8 @@ class TechnicianDetails:
         TechnicianCompensationView(compensation_tab,
             TechnicianCompensationController(RevenueRuleService(controller.service.auth), controller.session),
             tech_id).pack(fill="both", expand=True)
-        TechnicianFinanceView(finance_tab, controller.service.auth, tech_id).pack(fill="both", expand=True)
+        TechnicianFinanceView(jobs_tab, controller.service.auth, tech_id, mode="jobs").pack(fill="both", expand=True)
+        TechnicianFinanceView(finance_tab, controller.service.auth, tech_id, mode="finances").pack(fill="both", expand=True)
         self.refresh(); self.window.protocol("WM_DELETE_WINDOW",lambda:close_modal(self.window)); prepare_modal_dialog(self.window,parent); self.window.wait_window()
     def refresh(self, select_id=None):
         try: rows=self.controller.service.list_addresses(self.tech_id)

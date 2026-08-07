@@ -14,6 +14,11 @@ from app.security.user_manager import AuthorizationError
 from app.services.compensation_service import CompensationService
 
 PAYMENT_METHODS = ("ACH", "Check", "Zelle", "PayPal", "Other")
+DIRECT_PAYMENT_CATEGORIES = (
+    "Expense reimbursement", "Special travel payment", "Bonus",
+    "Compensation adjustment", "Payment correction", "Advance", "Miscellaneous",
+)
+DIRECT_PAYMENT_STATUSES = ("Draft", "Approved", "Scheduled", "Paid")
 
 
 class TechnicianPaymentService:
@@ -54,6 +59,90 @@ class TechnicianPaymentService:
                 if row["included_in_payment_run_id"] is None and row["paid_at"] is None and
                 row["voided_at"] is None and row["technician_payment_id"] is None and
                 (row["entry_type"] == "Manual Adjustment" or row["allocation_status"] == "Approved")]
+
+    def create_direct_payment(self, session: Session, *, technician_id: int,
+                              payment_date: str, category: str, amount_cents: int,
+                              description: str, status: str = "Draft",
+                              job_id: int | None = None, financial_component: str | None = None,
+                              payment_method: str = "ACH", reference: str | None = None):
+        """Create a direct transaction using the established earning/allocation ledger.
+
+        A direct item has its own one-technician run, but no Matterport batch.  Its
+        manual earning is the payable obligation and ``TechnicianPaymentEarnings``
+        remains the sole allocation source of truth.
+        """
+        self._write(session); self._id(technician_id, "technician_id")
+        if category not in DIRECT_PAYMENT_CATEGORIES:
+            raise ValueError("Unsupported direct payment category")
+        if status not in DIRECT_PAYMENT_STATUSES:
+            raise ValueError("Unsupported direct payment status")
+        if isinstance(amount_cents, bool) or not isinstance(amount_cents, int) or amount_cents <= 0:
+            raise ValueError("amount_cents must be a positive integer")
+        if payment_method not in PAYMENT_METHODS:
+            raise ValueError("Unsupported payment method")
+        description = (description or "").strip()
+        if not description: raise ValueError("Description is required")
+        if job_id is not None: self._id(job_id, "job_id")
+        stored_status = {"Draft": "Pending", "Approved": "Approved",
+                         "Scheduled": "Submitted", "Paid": "Paid"}[status]
+        earning_status = "Pending" if status == "Draft" else "Approved"
+        now = utc_now_iso()
+        with self.auth.connection() as c:
+            if not c.execute("SELECT 1 FROM Techs WHERE tech_id=?", (technician_id,)).fetchone():
+                raise LookupError("Technician not found")
+            if job_id is not None and not c.execute("SELECT 1 FROM Jobs WHERE job_id=?", (job_id,)).fetchone():
+                raise LookupError("Job not found")
+            run_id = int(c.execute("""INSERT INTO TechnicianPaymentRuns
+              (source_payment_batch_id,payment_run_date,payment_status,total_amount_cents,notes,
+               created_at,created_by,run_type) VALUES (?,?,?, ?,?,?,?,'Direct')""",
+              (None, payment_date, "Paid" if status == "Paid" else
+               "Submitted" if status == "Scheduled" else status, amount_cents,
+               description, now, session.user_id)).lastrowid)
+            details = __import__("json").dumps({"direct_payment": True, "category": category,
+                "financial_component": financial_component})
+            earning_id = int(c.execute("""INSERT INTO TechnicianJobEarnings
+              (tech_id,job_id,entry_type,revenue_basis_cents,calculated_amount_cents,
+               adjustment_amount_cents,net_earning_cents,earning_status,calculation_details_json,
+               reason,created_at,created_by,approved_at,approved_by)
+              VALUES (?,?,'Manual Adjustment',0,0,?,?,?, ?,?,?,?, ?,?)""",
+              (technician_id,job_id,amount_cents,amount_cents,earning_status,details,
+               description,now,session.user_id,now if status != "Draft" else None,
+               session.user_id if status != "Draft" else None)).lastrowid)
+            payment_id = int(c.execute("""INSERT INTO TechnicianPayments
+              (technician_payment_run_id,tech_id,payment_amount_cents,actual_amount_cents,
+               payment_method,payment_status,payment_date,payment_reference,recorded_at,recorded_by,
+               created_at,payment_kind,payment_category,financial_component,description)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+              (run_id,technician_id,amount_cents,amount_cents if status == "Paid" else None,
+               payment_method,stored_status,payment_date,reference,now if status == "Paid" else None,
+               session.user_id if status == "Paid" else None,now,"Direct",category,
+               financial_component,description)).lastrowid)
+            c.execute("INSERT INTO TechnicianPaymentEarnings(technician_payment_id,technician_earning_id,amount_applied_cents,created_at) VALUES (?,?,?,?)",
+                      (payment_id,earning_id,amount_cents,now))
+            if status == "Paid":
+                c.execute("UPDATE TechnicianJobEarnings SET earning_status='Paid',paid_at=? WHERE technician_earning_id=?", (now,earning_id))
+            record_event(c,"direct_technician_payment_created",actor_user_id=session.user_id,
+              details={"payment_id":payment_id,"technician_id":technician_id,"job_id":job_id,
+                       "category":category,"component":financial_component,"amount_cents":amount_cents,
+                       "status":status,"timestamp":now})
+            return dict(c.execute("SELECT * FROM TechnicianPayments WHERE technician_payment_id=?",(payment_id,)).fetchone())
+
+    def void_direct_payment(self, session: Session, payment_id: int, reason: str):
+        """Cancel an unpaid item or append a reversal for a paid direct payment."""
+        self._write(session); self._id(payment_id, "payment_id")
+        reason = (reason or "").strip()
+        if not reason: raise ValueError("Reversal reason is required")
+        with self.auth.connection() as c:
+            payment = c.execute("SELECT * FROM TechnicianPayments WHERE technician_payment_id=? AND payment_kind='Direct'", (payment_id,)).fetchone()
+            if not payment: raise LookupError("Direct payment not found")
+            if payment["payment_status"] == "Cancelled": raise ValueError("Payment is already voided")
+            now=utc_now_iso()
+            c.execute("UPDATE TechnicianPayments SET payment_status='Cancelled',updated_at=?,notes=? WHERE technician_payment_id=?", (now,reason,payment_id))
+            c.execute("UPDATE TechnicianPaymentRuns SET payment_status='Cancelled',cancelled_at=?,cancelled_by=? WHERE technician_payment_run_id=?", (now,session.user_id,payment["technician_payment_run_id"]))
+            links=c.execute("SELECT technician_earning_id FROM TechnicianPaymentEarnings WHERE technician_payment_id=?",(payment_id,)).fetchall()
+            for link in links:
+                c.execute("UPDATE TechnicianJobEarnings SET earning_status='Voided',voided_at=?,voided_by=?,void_reason=? WHERE technician_earning_id=?",(now,session.user_id,reason,link[0]))
+            record_event(c,"direct_technician_payment_voided",actor_user_id=session.user_id,details={"payment_id":payment_id,"reason":reason,"timestamp":now})
 
     def create_payment_run(self, session: Session, earning_ids: list[int], notes: str | None=None,
                            source_payment_batch_id: int | None=None):

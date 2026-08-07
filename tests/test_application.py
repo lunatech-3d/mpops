@@ -308,7 +308,9 @@ class MigrationTests(unittest.TestCase):
                                            "018_revenue_allocation_schema.py",
                                            "019_effective_dated_rule_indexes.py",
                                            "020_add_jobs_market.py",
-                                           "021_technician_payment_workflow.py"})
+                                           "021_technician_payment_workflow.py",
+                                           "022_job_lifecycle.py",
+                                           "023_direct_technician_payments.py"})
 
     def test_job_financial_migration_has_pre_drop_column_fallback(self):
         import importlib.util

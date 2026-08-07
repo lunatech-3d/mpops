@@ -172,7 +172,7 @@ class JobsManager(ttk.Frame):
         "Primary Technician", "Status", "Expected Payout",
     )
 
-    def __init__(self, parent, auth, session, service=None):
+    def __init__(self, parent, auth, session, service=None, open_opentable=None, open_on_demand=None):
         super().__init__(parent, padding=PADDING, style="App.TFrame")
         self.controller = JobsController(service or JobsService(auth), session)
         self.rows = {}
@@ -237,6 +237,10 @@ class JobsManager(ttk.Frame):
         actions.pack(fill="x", pady=(8, 0))
         self.add_button = ttk.Button(actions, text="Add Job", command=self.add)
         self.add_button.pack(side="left", padx=(0, 6))
+        if open_opentable:
+            ttk.Button(actions,text="Job Intake Center / OpenTable Import",command=open_opentable).pack(side="left",padx=(0,6))
+        if open_on_demand:
+            ttk.Button(actions,text="On-Demand Intake",command=open_on_demand).pack(side="left",padx=(0,6))
         self.edit_button = ttk.Button(actions, text="Edit Job", command=self.edit)
         self.edit_button.pack(side="left", padx=(0, 6))
         ttk.Button(actions, text="View Details", command=self.view_details).pack(

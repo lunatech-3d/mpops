@@ -6,15 +6,13 @@ from app.resources import resource_path
 from app.security.auth import Session
 from app.ui.dashboard import build_dashboard
 from app.ui.jobs_manager import JobsManager
-from app.ui.market_manager import MarketManager
 from app.ui.opentable_import_window import open_opentable_import
 from app.ui.on_demand_intake_window import open_on_demand_intake
-from app.ui.payment_batch_manager import PaymentBatchManager
-from app.ui.technician_earnings_manager import TechnicianEarningsManager
-from app.ui.technician_payment_run_manager import TechnicianPaymentRunManager
+from app.ui.payments_workspace import PaymentsWorkspace
+from app.ui.administration_workspace import AdministrationWorkspace
 from app.ui.user_manager_window import open_user_manager
 from app.ui.technician_manager import TechnicianManager
-from app.ui.styles import NAV_BACKGROUND, PADDING
+from app.ui.styles import PADDING
 from app.services.backup_service import BackupService
 from app.ui.backup_manager import BackupManager
 from app.date_utils import format_display_datetime
@@ -69,36 +67,17 @@ class MainWindow:
         body=ttk.Frame(root);body.pack(fill="both",expand=True)
         nav=ttk.Frame(body,padding=PADDING);nav.pack(side="left",fill="y")
         self.content=ttk.Frame(body,style="App.TFrame");self.content.pack(side="left",fill="both",expand=True)
-        names = (("Dashboard", "Reports") if auth.settings.reporting_copy else
-                 ("Dashboard","Jobs","Technicians","Markets","Clients","Matterport Payments",
-                  "Technician Earnings","Technician Payment Runs","Reports"))
+        names = (("Dashboard",) if auth.settings.reporting_copy else
+                 ("Dashboard","Jobs","Technicians","Payments","Administration"))
         for name in names:
             command=(self.show_dashboard if name=="Dashboard" else
                      self.show_jobs if name=="Jobs" else
                      self.show_technicians if name=="Technicians" else
-                     self.show_markets if name=="Markets" else
-                     self.show_payments if name=="Matterport Payments" else
-                     self.show_earnings if name=="Technician Earnings" else
-                     self.show_payment_runs if name=="Technician Payment Runs" else
+                     self.show_payments if name=="Payments" else
+                     self.show_administration if name=="Administration" else
                      lambda n=name:self.show_placeholder(n))
             ttk.Button(nav,text=name,style="Nav.TButton",command=command,width=18).pack(fill="x",pady=2)
-        if session.role in {"admin", "operator"} and not auth.settings.reporting_copy:
-            ttk.Separator(nav).pack(fill="x",pady=8)
-            ttk.Button(
-                nav,
-                text="Job Intake Center",
-                command=self.open_opentable_import,
-                width=18,
-            ).pack(fill="x",pady=2)
-            ttk.Button(
-                nav, text="On-Demand Intake", command=self.open_on_demand_intake,
-                width=18,
-            ).pack(fill="x", pady=2)
         ttk.Separator(nav).pack(fill="x",pady=8)
-        if session.role == "admin" and not auth.settings.reporting_copy:
-            ttk.Button(nav,text="Administration → Users",command=self.open_users).pack(fill="x",pady=2)
-        if not auth.settings.reporting_copy:
-            ttk.Button(nav, text="Database Backup", command=self.show_backup).pack(fill="x", pady=2)
         ttk.Button(nav,text="Log Out",command=self.logout).pack(fill="x",pady=(20,2))
         ttk.Button(nav,text="Exit",command=self.request_exit).pack(fill="x",pady=2)
         root.protocol("WM_DELETE_WINDOW", self.request_exit)
@@ -111,17 +90,15 @@ class MainWindow:
     def show_dashboard(self):
         self.clear();build_dashboard(self.content,self.session,self.auth).pack(fill="both",expand=True)
     def show_jobs(self):
-        self.clear(); JobsManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
+        self.clear(); JobsManager(self.content,self.auth,self.session,
+            open_opentable=self.open_opentable_import,
+            open_on_demand=self.open_on_demand_intake).pack(fill="both",expand=True)
     def show_technicians(self):
         self.clear(); TechnicianManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
-    def show_markets(self):
-        self.clear(); MarketManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
     def show_payments(self):
-        self.clear(); PaymentBatchManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
-    def show_earnings(self):
-        self.clear(); TechnicianEarningsManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
-    def show_payment_runs(self):
-        self.clear(); TechnicianPaymentRunManager(self.content,self.auth,self.session).pack(fill="both",expand=True)
+        self.clear(); PaymentsWorkspace(self.content,self.auth,self.session).pack(fill="both",expand=True)
+    def show_administration(self):
+        self.clear(); AdministrationWorkspace(self.content,self.auth,self.session,self.open_users).pack(fill="both",expand=True)
     def show_backup(self):
         self.clear(); BackupManager(self.content, self.auth, self.session).pack(fill="both", expand=True)
     def show_placeholder(self,name):

@@ -41,3 +41,35 @@ class TechnicianFinanceServiceTests(CompensationServiceTests):
     def test_unknown_technician_and_filter_are_rejected(self):
         with self.assertRaises(LookupError): self.finance.get_summary(999999)
         with self.assertRaises(ValueError): self.finance.list_jobs(self.tech, "Maybe")
+
+    def test_direct_reimbursement_is_not_attached_to_a_job_and_pending_is_not_paid(self):
+        payments = TechnicianPaymentService(self.auth)
+        item = payments.create_direct_payment(self.session, technician_id=self.tech,
+            payment_date="2026-08-07", category="Expense reimbursement", amount_cents=2500,
+            description="Replacement tablet charging cord", status="Approved", payment_method="ACH")
+        self.assertEqual(item["payment_kind"], "Direct")
+        self.assertEqual(self.finance.get_summary(self.tech)["balance_due_cents"], 2500)
+        self.assertEqual(self.finance.get_summary(self.tech)["total_paid_cents"], 0)
+        detail = self.finance.list_payments(self.tech)[0]
+        self.assertIsNone(detail["jobs"][0]["job_id"])
+        self.assertEqual(detail["payment_category"], "Expense reimbursement")
+
+    def test_paid_direct_travel_is_allocated_to_the_real_job_and_can_be_voided(self):
+        payments = TechnicianPaymentService(self.auth)
+        item = payments.create_direct_payment(self.session, technician_id=self.tech,
+            payment_date="2026-08-07", category="Special travel payment", amount_cents=4000,
+            description="Weekend travel", status="Paid", job_id=self.job,
+            financial_component="Travel", payment_method="Check", reference="CHK-7")
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertEqual(job["paid_cents"], 4000)
+        self.assertEqual(self.finance.get_summary(self.tech)["total_paid_cents"], 4000)
+        history = self.finance.list_payments(self.tech)[0]
+        self.assertEqual(history["jobs"][0]["job_id"], self.job)
+        self.assertEqual(history["financial_component"], "Travel")
+        payments.void_direct_payment(self.session, item["technician_payment_id"], "Entered twice")
+        self.assertEqual(self.finance.get_summary(self.tech)["total_paid_cents"], 0)
+
+    def test_cancelled_filter_includes_cancelled_assignment(self):
+        with self.auth.connection() as connection:
+            connection.execute("UPDATE Jobs SET job_status='Cancelled',cancelled_at='2026-08-07' WHERE job_id=?", (self.job,))
+        self.assertEqual(self.finance.list_jobs(self.tech, "Cancelled")[0]["job_id"], self.job)

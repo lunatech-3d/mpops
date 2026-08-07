@@ -20,26 +20,29 @@ class TechnicianFinanceController:
 class TechnicianFinanceView(ttk.Frame):
     JOB_COLUMNS = ("date", "job", "project", "status", "earned", "base", "travel", "paid", "due")
 
-    def __init__(self, parent, auth, technician_id):
+    def __init__(self, parent, auth, technician_id, mode="all"):
         super().__init__(parent, padding=PADDING)
         self.controller = TechnicianFinanceController(TechnicianFinanceService(auth), technician_id)
         self.job_rows = {}; self.payment_rows = {}
-        summary = ttk.Frame(self); summary.pack(fill="x", pady=(0, 8))
+        summary = ttk.Frame(self)
+        if mode != "jobs": summary.pack(fill="x", pady=(0, 8))
         self.summary_vars = {}
-        for column, (key, label) in enumerate((("upcoming_jobs", "Upcoming Jobs"),
-                ("completed_jobs", "Completed Jobs"), ("balance_due_cents", "Balance Due"),
-                ("total_paid_cents", "Total Paid"), ("pending_cents", "Pending Review"))):
+        for column, (key, label) in enumerate((("upcoming_expected_cents", "Upcoming Expected"),
+                ("completed_earnings_cents", "Completed Earnings"), ("balance_due_cents", "Approved Balance Due"),
+                ("total_paid_cents", "Total Paid"), ("pending_approval_cents", "Pending Approval"),
+                ("pending_direct_cents", "Pending Direct Items"))):
             box = ttk.LabelFrame(summary, text=label, padding=7); box.grid(row=0, column=column, sticky="nsew", padx=3)
             variable = tk.StringVar(value="—"); self.summary_vars[key] = variable
             ttk.Label(box, textvariable=variable, style="Header.TLabel").pack()
             summary.columnconfigure(column, weight=1)
         notebook = ttk.Notebook(self); notebook.pack(fill="both", expand=True)
         jobs_tab = ttk.Frame(notebook, padding=5); payments_tab = ttk.Frame(notebook, padding=5)
-        notebook.add(jobs_tab, text="Jobs & Balances"); notebook.add(payments_tab, text="Payment History")
+        if mode in {"all", "jobs"}: notebook.add(jobs_tab, text="Assigned Jobs")
+        if mode in {"all", "finances"}: notebook.add(payments_tab, text="Complete Payment History")
         filters = ttk.Frame(jobs_tab); filters.pack(fill="x")
         ttk.Label(filters, text="View:").pack(side="left")
         self.job_view = tk.StringVar(value="All")
-        ttk.Combobox(filters, textvariable=self.job_view, values=("All", "Upcoming", "Completed", "Owed"),
+        ttk.Combobox(filters, textvariable=self.job_view, values=("All", "Upcoming", "Completed", "Cancelled", "Owed"),
                      state="readonly", width=12).pack(side="left", padx=6)
         ttk.Button(filters, text="Refresh", command=self.refresh).pack(side="left")
         self.jobs_tree = ttk.Treeview(jobs_tab, columns=self.JOB_COLUMNS, show="headings")
@@ -58,6 +61,7 @@ class TechnicianFinanceView(ttk.Frame):
             self.payments_tree.heading(column, text=heading); self.payments_tree.column(column, width=110)
         self.payments_tree.pack(fill="both", expand=True, pady=(7, 0))
         self.status = tk.StringVar(); ttk.Label(self, textvariable=self.status, style="Status.TLabel").pack(anchor="w", pady=(6, 0))
+        self.mode = mode
         self.refresh()
 
     @staticmethod

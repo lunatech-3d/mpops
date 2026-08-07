@@ -59,6 +59,9 @@ class TechnicianFinanceService:
             ledger = connection.execute("""SELECT
               COALESCE(SUM(CASE WHEN earning_status='Pending' THEN net_earning_cents ELSE 0 END),0) pending_cents,
               COALESCE(SUM(CASE WHEN earning_status='Approved' THEN net_earning_cents ELSE 0 END),0) balance_due_cents,
+              COALESCE(SUM(CASE WHEN entry_type='Calculated' AND earning_status='Pending' THEN net_earning_cents ELSE 0 END),0) pending_approval_cents,
+              COALESCE(SUM(CASE WHEN entry_type='Manual Adjustment' AND earning_status IN ('Pending','Approved') THEN net_earning_cents ELSE 0 END),0) pending_direct_cents,
+              COALESCE(SUM(CASE WHEN entry_type='Calculated' AND earning_status<>'Voided' THEN net_earning_cents ELSE 0 END),0) completed_earnings_cents,
               COUNT(CASE WHEN earning_status='Approved' THEN 1 END) unpaid_earning_count
               FROM TechnicianJobEarnings WHERE tech_id=? AND earning_status<>'Voided'""",
               (technician_id,)).fetchone()
@@ -66,10 +69,15 @@ class TechnicianFinanceService:
               CASE WHEN payment_status='Paid' THEN COALESCE(actual_amount_cents,payment_amount_cents)
                    ELSE 0 END),0) total_paid_cents
               FROM TechnicianPayments WHERE tech_id=?""", (technician_id,)).fetchone()
-            return {**dict(jobs), **dict(ledger), **dict(paid)}
+            upcoming = connection.execute("""SELECT COALESCE(SUM(CAST(ROUND((COALESCE(jf.ct_rate,0)+COALESCE(jf.ct_travel_payout,0)+COALESCE(jf.ct_off_hours_payout,0))*100) AS INTEGER)),0)
+              FROM (SELECT DISTINCT job_id FROM JobAssignments WHERE tech_id=? AND assignment_status NOT IN ('Declined','Unassigned','Reassigned')) a
+              JOIN Jobs j ON j.job_id=a.job_id LEFT JOIN JobFinancials jf ON jf.job_id=j.job_id
+              WHERE date(j.scheduled_start_at)>=date(?) AND j.completed_at IS NULL AND j.cancelled_at IS NULL""",
+              (technician_id,date.today().isoformat())).fetchone()[0]
+            return {**dict(jobs), **dict(ledger), **dict(paid), "upcoming_expected_cents": upcoming}
 
     def list_jobs(self, technician_id: int, view="All"):
-        allowed = {"All", "Upcoming", "Completed", "Owed"}
+        allowed = {"All", "Upcoming", "Completed", "Cancelled", "Owed"}
         if view not in allowed:
             raise ValueError("Unsupported technician job view")
         clauses = ["a.tech_id=?"]
@@ -81,6 +89,8 @@ class TechnicianFinanceService:
             params.append(today)
         elif view == "Completed":
             clauses.append("(j.completed_at IS NOT NULL OR j.job_status='Completed')")
+        elif view == "Cancelled":
+            clauses.append("(j.cancelled_at IS NOT NULL OR j.job_status IN ('Cancelled','Archived'))")
         elif view == "Owed":
             clauses.append("EXISTS(SELECT 1 FROM TechnicianJobEarnings due "
                            "WHERE due.job_id=j.job_id AND due.tech_id=a.tech_id "
@@ -127,6 +137,7 @@ class TechnicianFinanceService:
         result = []
         for job in jobs.values():
             statuses = job.pop("earning_statuses")
+            job["approved_due_cents"] = max(0, job["approved_due_cents"] - job["paid_cents"])
             job["finance_status"] = ("Owed" if job["approved_due_cents"] else
                 "Paid" if "Paid" in statuses and statuses <= {"Paid"} else
                 "Pending Review" if "Pending" in statuses else
@@ -157,6 +168,11 @@ class TechnicianFinanceService:
                   (payment["technician_payment_id"],))]
                 for item in payment["jobs"]:
                     base, travel, off_hours = self._component_amounts(item.pop("calculation_details_json"))
+                    if payment.get("payment_kind") == "Direct":
+                        component = payment.get("financial_component")
+                        base = item["amount_applied_cents"] if component == "Capture" else None
+                        travel = item["amount_applied_cents"] if component == "Travel" else None
+                        off_hours = item["amount_applied_cents"] if component == "Off Hours" else None
                     item.update(base_pay_cents=base, travel_pay_cents=travel,
                                 off_hours_pay_cents=off_hours)
             return payments
