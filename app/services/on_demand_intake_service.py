@@ -9,10 +9,12 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.date_utils import utc_now_iso
+from app.date_utils import format_display_datetime, utc_now_iso
 from app.security.audit import record_event
 from app.services.assignment_service import AssignmentService
+from app.services.compensation_service import CompensationService
 from app.services.jobs_service import JobsService
+from app.services.technician_service import TechnicianService
 
 
 SOURCE_SYSTEM = "Skedulo / Matterport Capture Services Email"
@@ -126,17 +128,116 @@ def combine_sources(email_text: str, notes_text: str) -> dict[str, Any]:
     return result
 
 
+def _calendar_phone(value: Any) -> str:
+    digits = re.sub(r"\D", "", str(value or ""))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return f"({digits[:3]}) {digits[3:6]}-{digits[6:]}" if len(digits) == 10 else str(value or "")
+
+
+def _calendar_duration(value: Any) -> str:
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        return str(value or "")
+    hours, remainder = divmod(minutes, 60)
+    return " ".join(filter(None, (f"{hours} hours" if hours else "",
+                                  f"{remainder} minutes" if remainder else "")))
+
+
+def calendar_details(data: dict[str, Any], technician: dict[str, Any],
+                     payout: dict[str, Any]) -> str:
+    """Format technician-facing calendar copy without exposing gross revenue."""
+    address = "\n".join(filter(None, (data.get("address_1") or data.get("address"),
+        " ".join(filter(None, (", ".join(filter(None, (data.get("city"), data.get("state")))),
+                                data.get("postal_code")))))))
+    property_size = str(data.get("property_size") or "")
+    numeric_size = re.sub(r"[^\d.]", "", property_size)
+    try:
+        size = f"{float(numeric_size):,.0f} sq ft" if numeric_size else ""
+    except ValueError:
+        size = property_size
+    attendee = (f"{technician['name']} <{technician['email']}>" if technician.get("email")
+                else f"{technician['name']} — No email on file")
+    amount = f"${payout['amount_cents'] / 100:,.2f}"
+    return f"""Matterport On-Demand Capture
+
+Technician: {technician['name']}
+Technician Attendee: {attendee}
+
+Job ID: {data.get('job_id') or ''}
+Job Link: {data.get('job_link') or ''}
+
+Address:
+{address}
+
+Scheduled:
+{format_display_datetime(data.get('scheduled_start_at'))}
+
+Estimated Duration:
+{_calendar_duration(data.get('estimated_minutes'))}
+
+Property Type:
+{data.get('property_type') or ''}
+
+Property Size:
+{size}
+
+Capture Type:
+{data.get('capture_type') or ''}
+
+Contact:
+{data.get('contact_name') or ''}
+{data.get('contact_email') or ''}
+{_calendar_phone(data.get('contact_phone'))}
+Will be onsite: {data.get('contact_onsite') or ''}
+
+Site Instructions:
+{data.get('site_info') or ''}
+
+Your Expected Payout:
+{amount}"""
+
+
 class OnDemandIntakeService:
     def __init__(self, auth):
         self.auth = auth
         self.jobs = JobsService(auth)
         self.assignments = AssignmentService(auth)
+        self.technicians = TechnicianService(auth)
+        self.compensation = CompensationService(auth)
 
     def list_active_technicians(self):
         rows = self.assignments.list_active_technicians()
         return sorted(rows, key=lambda row: ((row.get("first_name") or "").casefold(), (row.get("last_name") or "").casefold()))
 
-    def import_job(self, session, data: dict[str, Any], email_text: str, notes_text: str, tech_id: int) -> tuple[int, bool]:
+    def technician_calendar_identity(self, tech_id: int) -> dict[str, Any]:
+        """Return the selected technician's display name and stored attendee email."""
+        technician = self.technicians.get_technician(int(tech_id))
+        if technician is None:
+            raise LookupError("Technician not found")
+        name = " ".join(filter(None, (technician.get("preferred_name") or
+                                      technician.get("first_name"), technician.get("last_name"))))
+        primary = str(technician.get("email") or "").strip()
+        alternate = str(technician.get("alternate_email") or "").strip()
+        return {"tech_id": int(tech_id), "name": name,
+                "email": primary or alternate or None,
+                "email_source": "Primary" if primary else ("Alternate" if alternate else None)}
+
+    def expected_technician_payout(self, data: dict[str, Any], tech_id: int) -> dict[str, Any]:
+        """Preview compensation for a saved intake Job using the shared engine."""
+        external_id = str(data.get("job_id") or "").strip()
+        if not external_id:
+            raise ValueError("Parse and save the Job before calculating technician payout.")
+        job = self.jobs.get_job_by_external_id(external_id)
+        if job is None:
+            raise ValueError("Import the Job before calculating technician payout.")
+        return self.compensation.preview_job_payout(
+            job_id=int(job["job_id"]), tech_id=int(tech_id),
+            gross_revenue=data.get("expected_payout"))
+
+    def import_job(self, session, data: dict[str, Any], email_text: str, notes_text: str,
+                   tech_id: int, *, update_protected: bool = False) -> tuple[int, bool]:
         self.jobs._require_operator(session)
         required = (("job_id", "External Job ID"), ("address", "Address"),
                     ("scheduled_start_at", "Scheduled start"), ("expected_payout", "Expected payout"))
@@ -161,6 +262,12 @@ class OnDemandIntakeService:
                       "onsite_contact_phone": re.sub(r"\D", "", str(data.get("contact_phone") or "")) or None}
         existing = self.jobs.get_job_by_external_id(data["job_id"])
         if existing:
+            if (str(existing.get("job_status")).casefold() in {"cancelled", "archived"}
+                    and not update_protected):
+                raise ValueError(
+                    f"Job {data['job_id']} is {existing['job_status']}. Explicitly confirm an update; "
+                    "the import will preserve that lifecycle status."
+                )
             # The UI confirms updates; only source-owned fields are supplied here.
             # Blank source controls never erase established operational data. Hayley
             # can still explicitly edit populated values in the reviewed preview.

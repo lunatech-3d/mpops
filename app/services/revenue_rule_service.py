@@ -298,21 +298,26 @@ class RevenueRuleService:
         raise RuleConfigurationError(
             f"No {compensation_component} technician compensation rule applies on {when}")
 
-    def resolve_technician_rule(self, *, job_id: int, tech_id: int, market_id: int,
+    def resolve_technician_rule(self, *, job_id: int, tech_id: int, market_id: int | None,
                                 effective_date: date,
                                 compensation_component: str = "Overall") -> dict[str, Any]:
         ids = (self._id(job_id, "job_id"), self._id(tech_id, "tech_id"),
-               self._id(market_id, "market_id"))
+               self._id(market_id, "market_id") if market_id is not None else None)
         when = self._effective_date(effective_date)
         if compensation_component not in self.COMPONENTS:
             raise ValueError("Unsupported compensation_component")
         with self.auth.connection() as connection:
-            for table, column, identifier, label in (("Jobs", "job_id", ids[0], "Job"),
-                    ("Techs", "tech_id", ids[1], "Technician"),
-                    ("Markets", "market_id", ids[2], "Market")):
+            required = [("Jobs", "job_id", ids[0], "Job"),
+                        ("Techs", "tech_id", ids[1], "Technician")]
+            if ids[2] is not None:
+                required.append(("Markets", "market_id", ids[2], "Market"))
+            for table, column, identifier, label in required:
                 self._exists(connection, table, column, identifier, label)
-            for scope, scope_id in (("Job", ids[0]), ("Technician", ids[1]),
-                                    ("Market", ids[2]), ("System", None)):
+            scopes = [("Job", ids[0]), ("Technician", ids[1])]
+            if ids[2] is not None:
+                scopes.append(("Market", ids[2]))
+            scopes.append(("System", None))
+            for scope, scope_id in scopes:
                 components = (compensation_component,) if compensation_component == "Overall" else (
                     compensation_component, "Overall")
                 for component in components:

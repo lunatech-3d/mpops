@@ -347,7 +347,11 @@ class OpenTableImportService:
                     changed += 1
 
             job_changes = self._job_changes(group["job"], existing_job) if existing_job else {}
-            if imported == group["source_row_count"] and changed == 0 and not job_changes:
+            protected_status = (str(existing_job["job_status"]).casefold()
+                                if existing_job is not None else "")
+            if protected_status in {"cancelled", "archived"}:
+                action = "Decision Required"
+            elif imported == group["source_row_count"] and changed == 0 and not job_changes:
                 action = "Skipped"
             elif existing_job is not None:
                 action = "Updated"
@@ -368,6 +372,7 @@ class OpenTableImportService:
                 "changed_source_rows": changed,
                 "changed_job_fields": sorted(job_changes),
                 "parent_record_count": group["parent_record_count"],
+                "existing_job_status": existing_job["job_status"] if existing_job else None,
             })
         return {
             "file_name": Path(file_path).name,
@@ -376,7 +381,7 @@ class OpenTableImportService:
             "counts": dict(counts),
         }
 
-    def import_csv(self, session: Session, file_path: str) -> dict[str, Any]:
+    def import_csv(self, session: Session, file_path: str, *, update_protected: bool = False) -> dict[str, Any]:
         self._require_operator(session)
         preview = self.preview(file_path)
         now = utc_now_iso()
@@ -397,6 +402,12 @@ class OpenTableImportService:
                 ).fetchone()
                 job_data = group["job"]
                 job_changed = False
+                if (existing is not None
+                        and str(existing["job_status"]).casefold() in {"cancelled", "archived"}
+                        and not update_protected):
+                    result["skipped"] += 1
+                    result.setdefault("protected", []).append(external_job_id)
+                    continue
                 if existing is None:
                     fields = [field for field, value in job_data.items() if value is not None]
                     cursor = connection.execute(
@@ -409,6 +420,12 @@ class OpenTableImportService:
                 else:
                     job_id = int(existing["job_id"])
                     changes = self._job_changes(job_data, existing)
+                    # An import may update source-owned details after explicit approval,
+                    # but it must never silently reactivate a lifecycle-protected Job.
+                    if str(existing["job_status"]).casefold() in {"cancelled", "archived"}:
+                        changes.pop("job_status", None)
+                        changes.pop("cancelled_at", None)
+                        changes.pop("cancellation_reason", None)
                     job_changed = bool(changes)
                     assignments = ",".join(f"{field} = ?" for field in changes)
                     if assignments:

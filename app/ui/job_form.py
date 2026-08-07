@@ -19,7 +19,7 @@ PRIMARY_TECHNICIAN_FIELD = "primary_technician_id"
 
 STATUS_VALUES = (
     "Requested", "Scheduling", "Scheduled", "Assigned", "In Progress",
-    "Completed", "Cancelled", "On Hold",
+    "Completed", "Cancelled", "Archived", "On Hold",
 )
 
 JOB_FORM_MIN_WIDTH = 720
@@ -81,7 +81,8 @@ def changed_fields(original: dict, submitted: dict) -> dict:
     return changes
 
 
-def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -> dict | None:
+def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *,
+                  lifecycle_permissions: dict | None = None) -> dict | None:
     """Show a compact modal Job editor and return submitted values."""
     result = None
     dialog = tk.Toplevel(parent)
@@ -239,6 +240,11 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     def cancel(_event=None):
         close_modal(dialog)
 
+    def lifecycle(action):
+        nonlocal result
+        result = {"__lifecycle_action": action}
+        close_modal(dialog)
+
     def save(_event=None):
         nonlocal result
         values = {name: variable.get() for name, variable in variables.items()}
@@ -263,6 +269,15 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=()) -
     buttons.pack(fill="x")
     ttk.Button(buttons, text="Cancel", command=cancel).pack(side="right", padx=3)
     ttk.Button(buttons, text="Save", command=save).pack(side="right", padx=3)
+    permissions = lifecycle_permissions or {}
+    if job is not None:
+        ttk.Button(buttons, text="Cancel Job", command=lambda: lifecycle("cancel"),
+                   state="normal" if permissions.get("cancel") else "disabled").pack(side="left", padx=3)
+        ttk.Button(buttons, text="Archive Job", command=lambda: lifecycle("archive"),
+                   state="normal" if permissions.get("archive") else "disabled").pack(side="left", padx=3)
+        if permissions.get("delete_visible"):
+            ttk.Button(buttons, text="Delete Draft", command=lambda: lifecycle("delete"),
+                       state="normal" if permissions.get("delete") else "disabled").pack(side="left", padx=3)
 
     # Size from the completed layout, but reserve desktop chrome and rely on
     # the shared scrolling container whenever the content exceeds that space.

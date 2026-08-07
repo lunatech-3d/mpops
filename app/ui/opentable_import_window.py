@@ -194,8 +194,26 @@ class OpenTableImportWindow(tk.Toplevel):
             parent=self,
         ):
             return
+        protected = [item for item in self.preview_data.get("items", [])
+                     if item.get("action") == "Decision Required"]
+        update_protected = False
+        if protected:
+            labels = "\n".join(
+                f"- {item['external_job_id']} ({item.get('existing_job_status')})"
+                for item in protected
+            )
+            choice = messagebox.askyesnocancel(
+                "Cancelled or Archived Jobs",
+                "These external Job IDs already exist and will not be duplicated:\n\n"
+                + labels + "\n\nYes: update source details while preserving lifecycle status.\n"
+                "No: leave these Jobs unchanged.\nCancel: stop the import.", parent=self)
+            if choice is None:
+                return
+            update_protected = choice
         try:
-            result = self.service.import_csv(self.session, self.path_var.get().strip())
+            result = self.service.import_csv(
+                self.session, self.path_var.get().strip(), update_protected=update_protected
+            )
         except EXPECTED_ERRORS as exc:
             messagebox.showerror("Matterport Job Intake Center", str(exc), parent=self)
             return
