@@ -11,6 +11,7 @@ from app.security.user_manager import AuthorizationError
 from app.services.jobs_service import JobsService
 from app.ui.job_form import changed_fields, show_job_form
 from app.ui.styles import PADDING
+from app.ui.treeview_utils import natural_sort_key, ordered_tree_items
 
 
 EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
@@ -76,14 +77,6 @@ def format_currency(value):
 
 
 format_datetime = format_display_datetime
-
-
-def natural_sort_key(value):
-    """Sort mixed text and numeric identifiers naturally."""
-    return tuple(
-        int(part) if part.isdigit() else part.casefold()
-        for part in re.split(r"(\d+)", str(value or ""))
-    )
 
 
 def job_sort_key(row, column):
@@ -289,10 +282,11 @@ class JobsManager(ttk.Frame):
         if not column:
             return
 
-        ordered = sorted(
+        ordered = ordered_tree_items(
             self.tree.get_children(""),
-            key=lambda iid: job_sort_key(self.rows[iid], column),
-            reverse=self.sort_descending,
+            lambda iid: (self.tree.set(iid, column),
+                         job_sort_key(self.rows[iid], column)),
+            self.sort_descending,
         )
         for index, iid in enumerate(ordered):
             self.tree.move(iid, "", index)
