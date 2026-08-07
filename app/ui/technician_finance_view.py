@@ -18,7 +18,8 @@ class TechnicianFinanceController:
 
 
 class TechnicianFinanceView(ttk.Frame):
-    JOB_COLUMNS = ("date", "job", "project", "status", "earned", "base", "travel", "paid", "due")
+    JOB_COLUMNS = ("date", "job", "project", "job_status", "earnings_status",
+                   "earned", "base", "travel", "paid", "due")
 
     def __init__(self, parent, auth, technician_id, mode="all"):
         super().__init__(parent, padding=PADDING)
@@ -46,8 +47,8 @@ class TechnicianFinanceView(ttk.Frame):
                      state="readonly", width=12).pack(side="left", padx=6)
         ttk.Button(filters, text="Refresh", command=self.refresh).pack(side="left")
         self.jobs_tree = ttk.Treeview(jobs_tab, columns=self.JOB_COLUMNS, show="headings")
-        headings = ("Job Date", "Job", "Project / Address", "Job / Pay Status", "Earned", "Base Pay",
-                    "Travel Pay", "Paid", "Balance Due")
+        headings = ("Job Date", "Job", "Project / Address", "Job Status", "Earnings Status",
+                    "Earned", "Base Pay", "Travel Pay", "Paid", "Balance Due")
         for column, heading in zip(self.JOB_COLUMNS, headings):
             self.jobs_tree.heading(column, text=heading)
             self.jobs_tree.column(column, width=105, anchor="e" if column in {"earned","base","travel","paid","due"} else "w")
@@ -82,11 +83,10 @@ class TechnicianFinanceView(ttk.Frame):
             iid = f"job-{job['job_id']}"; self.job_rows[iid] = job
             job_date = (job.get("completed_at") or job.get("scheduled_start_at") or "")[:10]
             project = job.get("project_name_source") or job.get("job_address") or ""
-            combined_status = f"{job.get('job_status') or ''} / {job['finance_status']}"
             self.jobs_tree.insert("", "end", iid=iid, values=(job_date, job["external_job_id"], project,
-                combined_status, format_cents(job["earned_cents"]), self._money(job["base_pay_cents"]),
-                self._money(job["travel_pay_cents"]), format_cents(job["paid_cents"]),
-                format_cents(job["approved_due_cents"])))
+                job.get("job_status") or "", job["finance_status"], self._money(job["earned_cents"]),
+                self._money(job["base_pay_cents"]), self._money(job["travel_pay_cents"]),
+                self._money(job["paid_cents"]), self._money(job["approved_due_cents"])))
         self.payments_tree.delete(*self.payments_tree.get_children()); self.payment_rows.clear()
         for payment in payments:
             pid = payment["technician_payment_id"]; iid = f"payment-{pid}"; self.payment_rows[iid] = payment

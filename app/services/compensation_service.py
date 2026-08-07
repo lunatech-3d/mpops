@@ -177,6 +177,90 @@ class CompensationService:
                 "component_reconciliation_warning": warning,
                 "components_reconciled": component_sum == gross_revenue_cents}
 
+    def calculate_technician_compensation(self, connection: sqlite3.Connection, *,
+            job_id: int, tech_id: int, market_id: int | None, effective_date: str,
+            gross_revenue_cents: int, component_values: dict[str, int]) -> dict[str, Any]:
+        """Apply the ledger's technician-rule algorithm without writing a ledger row.
+
+        Both earnings generation and read-only operational previews call this method so
+        component fallback, reconciliation, rounding, and rule precedence cannot drift.
+        """
+        resolver = RevenueRuleService(self.auth)
+        overall_rule = resolver.resolve_technician_rule(job_id=job_id, tech_id=tech_id,
+            market_id=market_id, effective_date=effective_date,
+            compensation_component="Overall")
+        resolved_component_rules = []
+        for component, basis in component_values.items():
+            if not basis:
+                continue
+            try:
+                rule = resolver.resolve_technician_rule(job_id=job_id, tech_id=tech_id,
+                    market_id=market_id, effective_date=effective_date,
+                    compensation_component=component)
+            except RuleConfigurationError:
+                continue
+            if rule["compensation_component"] != "Overall":
+                resolved_component_rules.append((component, basis, rule))
+
+        if resolved_component_rules:
+            reconciliation = self.reconcile_financial_components(
+                gross_revenue_cents, component_values)
+            if not reconciliation["components_reconciled"]:
+                raise ValueError("FINANCIAL_COMPONENTS_DO_NOT_RECONCILE: component-specific "
+                                 "rules require financial components that reconcile to gross")
+            calculation_parts = []
+            for component, basis in component_values.items():
+                if not basis:
+                    continue
+                rule = resolver.resolve_technician_rule(job_id=job_id, tech_id=tech_id,
+                    market_id=market_id, effective_date=effective_date,
+                    compensation_component=component)
+                calculation_parts.append((component, basis, rule))
+        else:
+            reconciliation = {"component_sum_cents": sum(component_values.values()),
+                "component_reconciliation_status": "Not applicable to Overall rule",
+                "component_reconciliation_warning": None, "components_reconciled": None}
+            calculation_parts = [("Overall", gross_revenue_cents, overall_rule)]
+
+        components, amount = [], 0
+        for component, basis, rule in calculation_parts:
+            calculated = self.calculate_amount(basis, rule["rule_type"], int(rule["rule_value"]))
+            amount += calculated
+            components.append({"component": component, "revenue_basis_cents": basis,
+                "compensation_rule_id": int(rule["compensation_rule_id"]),
+                "rule_type": rule["rule_type"], "rule_value": int(rule["rule_value"]),
+                "rule_scope_type": rule["scope_type"], "rule_scope_id": rule["scope_id"],
+                "resolved_component": rule["compensation_component"],
+                "rule_source": self._rule_source(rule),
+                "calculated_amount_cents": calculated})
+        return {"amount_cents": amount, "components": components,
+                "calculation_parts": calculation_parts, **reconciliation}
+
+    def preview_completed_job_compensation(self, connection: sqlite3.Connection, *,
+            job: sqlite3.Row, tech_id: int) -> dict[str, Any]:
+        """Calculate a completed JobFinancials-based display value, without writes."""
+        effective_date = self.rule_effective_date(job, None)
+        if effective_date is None:
+            raise ValueError("No applicable job date")
+        financial_rows = connection.execute("""SELECT ct_rate,ct_travel_payout,
+          ct_off_hours_payout FROM JobFinancials WHERE job_id=?""", (job["job_id"],)).fetchall()
+        if not financial_rows:
+            raise ValueError("Missing job financial data")
+        try:
+            component_values = {"Base": sum(self._financial_cents(r[0]) for r in financial_rows),
+                "Travel": sum(self._financial_cents(r[1]) for r in financial_rows),
+                "Off Hours": sum(self._financial_cents(r[2]) for r in financial_rows)}
+        except ValueError as exc:
+            raise ValueError("Missing job financial data") from exc
+        gross = sum(component_values.values())
+        if gross <= 0:
+            raise ValueError("Missing job financial data")
+        result = self.calculate_technician_compensation(connection, job_id=job["job_id"],
+            tech_id=tech_id, market_id=job["market_id"], effective_date=effective_date,
+            gross_revenue_cents=gross, component_values=component_values)
+        result.update(effective_date=effective_date, gross_revenue_cents=gross)
+        return result
+
     @staticmethod
     def _exception(base: dict[str, Any], code: str, message: str) -> dict[str, Any]:
         return {**base, "reason_code": code, "message": message}
@@ -236,72 +320,29 @@ class CompensationService:
                                         "Off Hours": self._financial_cents(financial[2])}
                 except ValueError as exc:
                     exceptions.append(self._exception(base, "INVALID_FINANCIAL_AMOUNT", str(exc))); continue
-                resolver = RevenueRuleService(self.auth)
                 try:
-                    overall_rule = resolver.resolve_technician_rule(job_id=item["job_id"],
-                        tech_id=tech["tech_id"], market_id=item["market_id"],
-                        effective_date=effective_date, compensation_component="Overall")
+                    calculation = self.calculate_technician_compensation(connection,
+                        job_id=item["job_id"], tech_id=tech["tech_id"],
+                        market_id=item["market_id"], effective_date=effective_date,
+                        gross_revenue_cents=gross_revenue_cents,
+                        component_values=component_values)
                 except RuleConfigurationError as exc:
                     exceptions.append(self._exception(base, "NO_TECHNICIAN_RULE", str(exc))); continue
                 except RuleDataIntegrityError as exc:
                     exceptions.append(self._exception(base, "AMBIGUOUS_TECHNICIAN_RULE", str(exc))); continue
-
-                resolved_component_rules = []
-                for component, basis in component_values.items():
-                    if not basis: continue
-                    try:
-                        rule = resolver.resolve_technician_rule(job_id=item["job_id"],
-                            tech_id=tech["tech_id"], market_id=item["market_id"],
-                            effective_date=effective_date, compensation_component=component)
-                    except RuleConfigurationError:
-                        continue
-                    except RuleDataIntegrityError as exc:
-                        exceptions.append(self._exception(base, "AMBIGUOUS_TECHNICIAN_RULE", str(exc))); break
-                    if rule["compensation_component"] != "Overall":
-                        resolved_component_rules.append((component, basis, rule))
-                else:
-                    pass
-                if exceptions and exceptions[-1].get("payment_item_id") == item["payment_item_id"]:
-                    continue
-
-                components, amount = [], 0
-                if resolved_component_rules:
-                    reconciliation = self.reconcile_financial_components(
-                        gross_revenue_cents, component_values)
-                    if not reconciliation["components_reconciled"]:
+                except ValueError as exc:
+                    if str(exc).startswith("FINANCIAL_COMPONENTS_DO_NOT_RECONCILE"):
                         exceptions.append(self._exception(base,
                             "FINANCIAL_COMPONENTS_DO_NOT_RECONCILE",
                             "Component-specific technician rules require financial components "
                             "that reconcile exactly to matched gross payment.")); continue
-                    calculation_parts = []
-                    for component, basis in component_values.items():
-                        if not basis: continue
-                        rule = resolver.resolve_technician_rule(job_id=item["job_id"],
-                            tech_id=tech["tech_id"], market_id=item["market_id"],
-                            effective_date=effective_date, compensation_component=component)
-                        calculation_parts.append((component, basis, rule))
-                else:
-                    # Overall rules use the matched payment as their complete basis.  Imported
-                    # component fields remain useful audit metadata, but are not a gross
-                    # breakdown and therefore have no reconciliation requirement.
-                    reconciliation = {
-                        "component_sum_cents": sum(component_values.values()),
-                        "component_reconciliation_status": "Not applicable to Overall rule",
-                        "component_reconciliation_warning": None,
-                        "components_reconciled": None,
-                    }
-                    calculation_parts = [("Overall", gross_revenue_cents, overall_rule)]
-
-                for component, basis, rule in calculation_parts:
-                    source = self._rule_source(rule)
-                    calculated = self.calculate_amount(basis, rule["rule_type"], int(rule["rule_value"]))
-                    amount += calculated
-                    components.append({"component": component, "revenue_basis_cents": basis,
-                        "compensation_rule_id": int(rule["compensation_rule_id"]),
-                        "rule_type": rule["rule_type"], "rule_value": int(rule["rule_value"]),
-                        "rule_scope_type": rule["scope_type"], "rule_scope_id": rule["scope_id"],
-                        "resolved_component": rule["compensation_component"],
-                        "rule_source": source, "calculated_amount_cents": calculated})
+                    raise
+                amount, components = calculation["amount_cents"], calculation["components"]
+                calculation_parts = calculation["calculation_parts"]
+                reconciliation = {key: calculation[key] for key in (
+                    "component_sum_cents", "component_reconciliation_status",
+                    "component_reconciliation_warning", "components_reconciled")}
+                resolver = RevenueRuleService(self.auth)
                 try:
                     east_rule = resolver.resolve_market_revenue_rule(market_id=item["market_id"],
                         effective_date=effective_date, recipient_code="LUNATECH_EAST")

@@ -15,7 +15,7 @@ class TechnicianFinanceServiceTests(CompensationServiceTests):
             self.session, self.batch)["earning_ids"][0]
         jobs = self.finance.list_jobs(self.tech)
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(jobs[0]["finance_status"], "Pending Review")
+        self.assertEqual(jobs[0]["finance_status"], "Generated")
         summary = self.finance.get_summary(self.tech)
         self.assertEqual(summary["balance_due_cents"], 0)
         self.assertEqual(summary["pending_cents"], 71)
@@ -73,3 +73,95 @@ class TechnicianFinanceServiceTests(CompensationServiceTests):
         with self.auth.connection() as connection:
             connection.execute("UPDATE Jobs SET job_status='Cancelled',cancelled_at='2026-08-07' WHERE job_id=?", (self.job,))
         self.assertEqual(self.finance.list_jobs(self.tech, "Cancelled")[0]["job_id"], self.job)
+
+    def test_completed_job_without_ledger_uses_percentage_rule_read_only(self):
+        with self.auth.connection() as connection:
+            connection.execute("INSERT INTO JobFinancials(job_id,ct_rate,ct_travel_payout) "
+                               "VALUES(?,?,?)", (self.job, "100.00", "25.00"))
+            before = connection.execute("SELECT COUNT(*) FROM TechnicianJobEarnings").fetchone()[0]
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertEqual(job["earned_cents"], 8750)
+        self.assertEqual(job["finance_status"], "Calculated—not generated")
+        self.assertIsNone(job["base_pay_cents"])
+        self.assertIsNone(job["paid_cents"])
+        self.assertIsNone(job["approved_due_cents"])
+        with self.auth.connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT COUNT(*) FROM TechnicianJobEarnings").fetchone()[0], before)
+
+    def test_component_rules_include_travel_and_off_hours_once(self):
+        with self.auth.connection() as connection:
+            connection.execute("INSERT INTO JobFinancials(job_id,ct_rate,ct_travel_payout,"
+                               "ct_off_hours_payout) VALUES(?,?,?,?)",
+                               (self.job, "100.00", "20.00", "10.00"))
+            connection.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,"
+                               "rule_type,rule_value,compensation_component,created_by) "
+                               "VALUES('Technician',?,'Percentage',5000,'Travel',?)",
+                               (self.tech, self.admin_id))
+            connection.execute("INSERT INTO TechnicianCompensationRules(scope_type,scope_id,"
+                               "rule_type,rule_value,compensation_component,created_by) "
+                               "VALUES('Technician',?,'Flat Amount',300,'Off Hours',?)",
+                               (self.tech, self.admin_id))
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertEqual(job["earned_cents"], 8300)
+        self.assertEqual((job["base_pay_cents"], job["travel_pay_cents"],
+                          job["off_hours_pay_cents"]), (7000, 1000, 300))
+
+    def test_missing_rule_or_financial_data_is_not_reported_as_zero(self):
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertIsNone(job["earned_cents"])
+        self.assertEqual(job["finance_status"], "Missing job financial data")
+        with self.auth.connection() as connection:
+            connection.execute("INSERT INTO JobFinancials(job_id,ct_rate) VALUES(?,?)",
+                               (self.job, "100.00"))
+            connection.execute("DELETE FROM TechnicianCompensationRules")
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertIsNone(job["earned_cents"])
+        self.assertEqual(job["finance_status"], "No applicable compensation rule")
+
+    def test_persisted_earning_precedes_changed_display_inputs(self):
+        earning_id = self.service.generate_technician_earnings(
+            self.session, self.batch)["earning_ids"][0]
+        with self.auth.connection() as connection:
+            connection.execute("INSERT INTO JobFinancials(job_id,ct_rate) VALUES(?,?)",
+                               (self.job, "999.00"))
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertEqual(job["earned_cents"], 71)
+        self.assertEqual(job["finance_status"], "Generated")
+        self.assertEqual(earning_id > 0, True)
+
+    def test_multiple_partial_allocations_do_not_duplicate_earned_amount(self):
+        earning_id = self.service.generate_technician_earnings(
+            self.session, self.batch)["earning_ids"][0]
+        self.service.approve_technician_earning(self.session, earning_id)
+        with self.auth.connection() as connection:
+            for amount in (30, 20):
+                run_id = connection.execute("""INSERT INTO TechnicianPaymentRuns
+                  (payment_run_date,payment_status,total_amount_cents,created_by)
+                  VALUES('2026-08-07','Paid',?,?)""", (amount, self.admin_id)).lastrowid
+                payment_id = connection.execute("""INSERT INTO TechnicianPayments
+                  (technician_payment_run_id,tech_id,payment_amount_cents,payment_status,
+                   actual_amount_cents,payment_date) VALUES(?,?,?,'Paid',?,'2026-08-07')""",
+                  (run_id, self.tech, amount, amount)).lastrowid
+                connection.execute("""INSERT INTO TechnicianPaymentEarnings
+                  (technician_payment_id,technician_earning_id,amount_applied_cents)
+                  VALUES(?,?,?)""", (payment_id, earning_id, amount))
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertEqual(job["earned_cents"], 71)
+        self.assertEqual(job["paid_cents"], 50)
+        self.assertEqual(job["approved_due_cents"], 21)
+        self.assertEqual(job["finance_status"], "Approved")
+
+    def test_upcoming_and_cancelled_jobs_do_not_calculate(self):
+        with self.auth.connection() as connection:
+            connection.execute("INSERT INTO JobFinancials(job_id,ct_rate) VALUES(?,?)",
+                               (self.job, "100.00"))
+            connection.execute("UPDATE Jobs SET completed_at=NULL,job_status='Scheduled',"
+                               "scheduled_start_at='2099-01-01' WHERE job_id=?", (self.job,))
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertIsNone(job["earned_cents"])
+        with self.auth.connection() as connection:
+            connection.execute("UPDATE Jobs SET job_status='Cancelled',cancelled_at='2026-08-07' "
+                               "WHERE job_id=?", (self.job,))
+        job = self.finance.list_jobs(self.tech)[0]
+        self.assertIsNone(job["earned_cents"])

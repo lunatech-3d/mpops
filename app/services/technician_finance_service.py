@@ -6,6 +6,8 @@ import json
 from datetime import date
 
 from app.security.auth import AuthService
+from app.services.compensation_service import CompensationService
+from app.services.revenue_rule_service import RuleConfigurationError, RuleDataIntegrityError
 
 
 class TechnicianFinanceService:
@@ -96,54 +98,80 @@ class TechnicianFinanceService:
                            "WHERE due.job_id=j.job_id AND due.tech_id=a.tech_id "
                            "AND due.earning_status='Approved')")
         sql = """SELECT j.job_id,j.external_job_id,j.project_name_source,j.client_name_source,
-          j.job_status,j.scheduled_start_at,j.completed_at,
-          COALESCE(j.capture_address_raw,j.address_1,'') job_address,
-          e.technician_earning_id,e.entry_type,e.net_earning_cents,e.earning_status,
-          e.calculation_details_json,pe.amount_applied_cents,p.payment_status,
-          p.technician_payment_id,p.payment_date
+          j.job_status,j.scheduled_start_at,j.actual_start_at,j.completed_at,j.cancelled_at,j.market_id,
+          COALESCE(j.capture_address_raw,j.address_1,'') job_address
           FROM (SELECT DISTINCT job_id,tech_id FROM JobAssignments
                 WHERE assignment_status NOT IN ('Declined','Unassigned','Reassigned')) a
           JOIN Jobs j ON j.job_id=a.job_id
-          LEFT JOIN TechnicianJobEarnings e ON e.job_id=j.job_id AND e.tech_id=a.tech_id
-            AND e.earning_status<>'Voided'
-          LEFT JOIN TechnicianPaymentEarnings pe ON pe.technician_earning_id=e.technician_earning_id
-          LEFT JOIN TechnicianPayments p ON p.technician_payment_id=pe.technician_payment_id
           WHERE """ + " AND ".join(clauses) + " ORDER BY COALESCE(j.scheduled_start_at,j.completed_at) DESC,j.job_id DESC"
         with self.auth.connection() as connection:
             self._require_technician(connection, technician_id)
-            rows = connection.execute(sql, params).fetchall()
-        jobs = {}
-        for raw in rows:
-            row = dict(raw); job = jobs.setdefault(row["job_id"], {
-                key: row[key] for key in ("job_id", "external_job_id", "project_name_source",
-                    "client_name_source", "job_status", "scheduled_start_at", "completed_at", "job_address")})
-            job.setdefault("earned_cents", 0); job.setdefault("approved_due_cents", 0)
-            job.setdefault("paid_cents", 0); job.setdefault("base_pay_cents", None)
-            job.setdefault("travel_pay_cents", None); job.setdefault("off_hours_pay_cents", None)
-            job.setdefault("earning_statuses", set())
-            if row["technician_earning_id"] is None:
-                continue
-            job["earned_cents"] += row["net_earning_cents"]
-            if row["earning_status"] == "Approved":
-                job["approved_due_cents"] += row["net_earning_cents"]
-            if row["payment_status"] == "Paid":
-                job["paid_cents"] += row["amount_applied_cents"]
-            base, travel, off_hours = self._component_amounts(row["calculation_details_json"])
-            if base is not None:
-                job["base_pay_cents"] = (job["base_pay_cents"] or 0) + base
-                job["travel_pay_cents"] = (job["travel_pay_cents"] or 0) + travel
-                job["off_hours_pay_cents"] = (job["off_hours_pay_cents"] or 0) + off_hours
-            job["earning_statuses"].add(row["earning_status"])
-        result = []
-        for job in jobs.values():
-            statuses = job.pop("earning_statuses")
-            job["approved_due_cents"] = max(0, job["approved_due_cents"] - job["paid_cents"])
-            job["finance_status"] = ("Owed" if job["approved_due_cents"] else
-                "Paid" if "Paid" in statuses and statuses <= {"Paid"} else
-                "Pending Review" if "Pending" in statuses else
-                "Not Calculated")
-            result.append(job)
-        return result
+            jobs = [dict(row) for row in connection.execute(sql, params)]
+            calculator = CompensationService(self.auth)
+            for job in jobs:
+                earnings = connection.execute("""SELECT technician_earning_id,
+                  net_earning_cents,earning_status,calculation_details_json
+                  FROM TechnicianJobEarnings WHERE job_id=? AND tech_id=?
+                    AND earning_status<>'Voided' ORDER BY technician_earning_id""",
+                    (job["job_id"], technician_id)).fetchall()
+                job.update(earned_cents=None, paid_cents=None, approved_due_cents=None,
+                    base_pay_cents=None, travel_pay_cents=None, off_hours_pay_cents=None)
+                if earnings:
+                    job["earned_cents"] = sum(row["net_earning_cents"] for row in earnings)
+                    statuses = {row["earning_status"] for row in earnings}
+                    component_totals = [0, 0, 0]; has_components = False
+                    for row in earnings:
+                        amounts = self._component_amounts(row["calculation_details_json"])
+                        if amounts[0] is not None:
+                            has_components = True
+                            component_totals = [a + b for a, b in zip(component_totals, amounts)]
+                    if has_components:
+                        (job["base_pay_cents"], job["travel_pay_cents"],
+                         job["off_hours_pay_cents"]) = component_totals
+                    approved_ids = [row["technician_earning_id"] for row in earnings
+                                    if row["earning_status"] in {"Approved", "Paid"}]
+                    if approved_ids:
+                        placeholders = ",".join("?" for _ in approved_ids)
+                        paid = connection.execute(f"""SELECT COALESCE(SUM(pe.amount_applied_cents),0)
+                          FROM TechnicianPaymentEarnings pe JOIN TechnicianPayments p
+                            ON p.technician_payment_id=pe.technician_payment_id
+                          WHERE pe.technician_earning_id IN ({placeholders})
+                            AND p.payment_status='Paid'""", approved_ids).fetchone()[0]
+                        approved = sum(row["net_earning_cents"] for row in earnings
+                                       if row["earning_status"] in {"Approved", "Paid"})
+                        job["paid_cents"] = paid
+                        job["approved_due_cents"] = max(0, approved - paid)
+                    job["finance_status"] = ("Paid" if statuses == {"Paid"} else
+                        "Approved" if statuses & {"Approved", "Paid"} else "Generated")
+                    continue
+
+                completed = job["completed_at"] is not None or job["job_status"] == "Completed"
+                cancelled = job["cancelled_at"] is not None or job["job_status"] in {"Cancelled", "Archived"}
+                if not completed or cancelled:
+                    job["finance_status"] = "Not generated"
+                    continue
+                try:
+                    preview = calculator.preview_completed_job_compensation(
+                        connection, job=job, tech_id=technician_id)
+                    job["earned_cents"] = preview["amount_cents"]
+                    parts = preview["components"]
+                    if not (len(parts) == 1 and parts[0]["component"] == "Overall"):
+                        totals = {"Base": 0, "Travel": 0, "Off Hours": 0}
+                        for part in parts:
+                            if part["component"] in totals:
+                                totals[part["component"]] += part["calculated_amount_cents"]
+                        job.update(base_pay_cents=totals["Base"],
+                            travel_pay_cents=totals["Travel"],
+                            off_hours_pay_cents=totals["Off Hours"])
+                    job["finance_status"] = "Calculated—not generated"
+                except RuleConfigurationError:
+                    job["finance_status"] = "No applicable compensation rule"
+                except RuleDataIntegrityError:
+                    job["finance_status"] = "Ambiguous compensation rules"
+                except ValueError as exc:
+                    job["finance_status"] = ("Missing job financial data"
+                        if "financial" in str(exc).lower() else "Unable to calculate")
+            return jobs
 
     def list_payments(self, technician_id: int):
         with self.auth.connection() as connection:
