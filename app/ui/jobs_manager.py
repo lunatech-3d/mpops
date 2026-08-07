@@ -153,6 +153,17 @@ class JobsController:
         )
 
 
+def open_job_details(parent, auth, job_id, *, service=None, wait=False):
+    """Load an internal Job id and open the application's shared detail form."""
+    job = (service or JobsService(auth)).get_job(int(job_id))
+    if not job:
+        raise LookupError("Job not found")
+    details = JobDetails(parent, job)
+    if wait:
+        details.window.wait_window()
+    return details
+
+
 class JobsManager(ttk.Frame):
     """Searchable operational Job grid with basic create and edit actions."""
 
@@ -424,14 +435,11 @@ class JobsManager(ttk.Frame):
         if not row:
             return
         try:
-            job = self.controller.service.get_job(int(row["job_id"]))
+            return open_job_details(self, None, int(row["job_id"]),
+                                    service=self.controller.service)
         except EXPECTED_ERRORS as exc:
             self._error(exc)
             return
-        if not job:
-            self._error(LookupError("Job not found"))
-            return
-        JobDetails(self, job)
 
     @staticmethod
     def _identity(job):

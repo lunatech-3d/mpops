@@ -1,13 +1,19 @@
 """Focused tests for Technician Details -> Jobs sorting and searching."""
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 from app.ui.technician_finance_view import (
+    JOB_COLUMN_WIDTHS,
     JOB_COLUMNS,
+    TechnicianFinanceView,
     search_technician_jobs,
     technician_job_sort_value,
     technician_job_visible_values,
 )
+from app.ui.technician_manager import (TECHNICIAN_DETAILS_DEFAULT_SIZE,
+                                       TECHNICIAN_DETAILS_MIN_SIZE)
 from app.ui.treeview_utils import ordered_tree_items
 
 
@@ -47,6 +53,24 @@ class TechnicianJobsSortingTests(unittest.TestCase):
         rows = [job(1, scheduled_start_at="2026-12-01T09:00:00"),
                 job(2, scheduled_start_at="2025-01-31T09:00:00")]
         self.assertEqual([row["job_id"] for row in sorted_jobs(rows, "date")], [2, 1])
+
+    def test_full_and_blank_dates_use_shared_display_convention(self):
+        full = technician_job_visible_values(job(1, completed_at="2025-09-27T16:30:00"))
+        blank = technician_job_visible_values(
+            job(2, completed_at=None, scheduled_start_at=None)
+        )
+        self.assertEqual(full["date"], "09/27/2025")
+        self.assertEqual(blank["date"], "")
+
+    def test_date_presentation_does_not_mutate_stored_value(self):
+        row = job(1, scheduled_start_at="2025-09-27T16:30:00")
+        before = dict(row)
+        technician_job_visible_values(row)
+        self.assertEqual(row, before)
+
+    def test_invalid_legacy_date_remains_distinguishable(self):
+        row = job(1, scheduled_start_at="legacy-unknown")
+        self.assertEqual(technician_job_visible_values(row)["date"], "legacy-unknown")
 
     def test_currency_uses_typed_cents_including_commas_and_negatives(self):
         rows = [job(1, earned_cents=104609), job(2, earned_cents=-500),
@@ -122,6 +146,48 @@ class TechnicianJobsSearchTests(unittest.TestCase):
         self.assertEqual(self.row, before)
         self.assertEqual(self.row["earned_cents"], 104609)
         self.assertEqual(self.row["finance_status"], "Approved")
+
+
+class TechnicianJobsInteractionTests(unittest.TestCase):
+    class Tree:
+        def __init__(self, region="cell", row="job-42"):
+            self.region, self.row = region, row
+            self.selected = None
+
+        def identify_region(self, _x, _y): return self.region
+        def identify_row(self, _y): return self.row
+        def selection_set(self, iid): self.selected = iid
+        def focus(self, _iid): pass
+
+    def view(self, tree=None):
+        view = TechnicianFinanceView.__new__(TechnicianFinanceView)
+        view.jobs_tree = tree or self.Tree()
+        view.job_rows = {"job-42": job(42)}
+        view.auth = object()
+        view.job_opener = Mock()
+        view.refresh = Mock()
+        return view
+
+    def test_double_click_passes_internal_job_id_to_shared_opener(self):
+        view = self.view()
+        view._open_double_clicked_job(SimpleNamespace(x=4, y=8))
+        view.job_opener.assert_called_once_with(view, view.auth, 42, wait=True)
+        view.refresh.assert_called_once_with()
+        self.assertEqual(view.jobs_tree.selected, "job-42")
+
+    def test_double_click_empty_space_or_missing_row_is_safe(self):
+        for tree in (self.Tree(region="nothing"), self.Tree(row="")):
+            view = self.view(tree)
+            view._open_double_clicked_job(SimpleNamespace(x=4, y=8))
+            view.job_opener.assert_not_called()
+            view.refresh.assert_not_called()
+
+    def test_layout_allocates_project_the_largest_width(self):
+        self.assertEqual(TECHNICIAN_DETAILS_DEFAULT_SIZE, (1400, 800))
+        self.assertEqual(TECHNICIAN_DETAILS_MIN_SIZE, (1050, 650))
+        self.assertGreater(JOB_COLUMN_WIDTHS["project"][0],
+                           max(width for column, (width, _minimum) in
+                               JOB_COLUMN_WIDTHS.items() if column != "project"))
 
 
 if __name__ == "__main__":

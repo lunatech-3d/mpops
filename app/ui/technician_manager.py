@@ -16,6 +16,8 @@ from app.ui.revenue_rule_views import TechnicianCompensationView
 from app.ui.technician_finance_view import TechnicianFinanceView
 
 EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
+TECHNICIAN_DETAILS_DEFAULT_SIZE = (1400, 800)
+TECHNICIAN_DETAILS_MIN_SIZE = (1050, 650)
 
 
 def display_name(technician):
@@ -227,7 +229,13 @@ class TechnicianDetails:
         try: technician = controller.service.get_technician(tech_id)
         except EXPECTED_ERRORS as exc: messagebox.showerror("Technician Details", str(exc), parent=parent); return
         if not technician: messagebox.showerror("Technician Details", "Technician not found.", parent=parent); return
-        self.window = tk.Toplevel(parent); self.window.withdraw(); self.window.title("Technician Details"); self.window.geometry("1000x700")
+        self.window = tk.Toplevel(parent); self.window.withdraw(); self.window.title("Technician Details")
+        screen_width, screen_height = self.window.winfo_screenwidth(), self.window.winfo_screenheight()
+        width = min(TECHNICIAN_DETAILS_DEFAULT_SIZE[0], screen_width)
+        height = min(TECHNICIAN_DETAILS_DEFAULT_SIZE[1], screen_height)
+        self.window.geometry(f"{width}x{height}")
+        self.window.minsize(min(TECHNICIAN_DETAILS_MIN_SIZE[0], screen_width),
+                            min(TECHNICIAN_DETAILS_MIN_SIZE[1], screen_height))
         body = ttk.Frame(self.window, padding=PADDING); body.pack(fill="both", expand=True)
         name = display_name(technician)
         ttk.Label(body, text=name, style="Header.TLabel").pack(anchor="w")

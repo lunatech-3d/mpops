@@ -3,7 +3,9 @@
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.date_utils import format_display_date
 from app.services.technician_finance_service import TechnicianFinanceService
+from app.ui.jobs_manager import open_job_details
 from app.ui.payment_helpers import format_cents
 from app.ui.styles import PADDING
 from app.ui.treeview_utils import natural_sort_key, ordered_tree_items
@@ -18,11 +20,18 @@ JOB_MONEY_FIELDS = {
     "travel": "travel_pay_cents", "paid": "paid_cents",
     "due": "approved_due_cents",
 }
+JOB_COLUMN_WIDTHS = {
+    "date": (100, 90), "job": (115, 90), "project": (380, 220),
+    "job_status": (125, 100), "earnings_status": (180, 130),
+    "earned": (110, 95), "base": (110, 95), "travel": (110, 95),
+    "paid": (110, 95), "due": (120, 105),
+}
 
 
 def technician_job_visible_values(job):
     """Return the values displayed by the Technician Jobs tree."""
-    job_date = (job.get("completed_at") or job.get("scheduled_start_at") or "")[:10]
+    stored_job_date = job.get("completed_at") or job.get("scheduled_start_at")
+    job_date = format_display_date(stored_job_date)
     project = job.get("project_name_source") or job.get("job_address") or ""
     money = lambda field: "—" if job.get(field) is None else format_cents(job[field])
     return {
@@ -43,9 +52,9 @@ def technician_job_sort_value(job, column):
         value = job.get(JOB_MONEY_FIELDS[column])
         return raw, 0 if value is None else int(value)
     if column == "date":
-        # ISO dates sort chronologically as text, including timestamps truncated
-        # to their displayed calendar date.
-        return raw, raw
+        # Sort the stored ISO value, never the localized presentation string.
+        stored = job.get("completed_at") or job.get("scheduled_start_at") or ""
+        return raw, str(stored)
     return raw, natural_sort_key(raw)
 
 
@@ -79,8 +88,9 @@ class TechnicianFinanceView(ttk.Frame):
     JOB_COLUMNS = JOB_COLUMNS
     JOB_HEADINGS = JOB_HEADINGS
 
-    def __init__(self, parent, auth, technician_id, mode="all"):
+    def __init__(self, parent, auth, technician_id, mode="all", job_opener=None):
         super().__init__(parent, padding=PADDING)
+        self.auth, self.job_opener = auth, job_opener or open_job_details
         self.controller = TechnicianFinanceController(TechnicianFinanceService(auth), technician_id)
         self.job_rows = {}; self.payment_rows = {}
         self.job_sort_column = None; self.job_sort_descending = False
@@ -115,12 +125,24 @@ class TechnicianFinanceView(ttk.Frame):
         ttk.Button(filters, text="Search", command=self.refresh).pack(side="left", padx=(6, 0))
         ttk.Button(filters, text="Clear", command=self.clear_job_search).pack(side="left", padx=6)
         ttk.Button(filters, text="Refresh", command=self.refresh).pack(side="left")
-        self.jobs_tree = ttk.Treeview(jobs_tab, columns=self.JOB_COLUMNS, show="headings")
+        table = ttk.Frame(jobs_tab)
+        table.pack(fill="both", expand=True, pady=(7, 0))
+        self.jobs_tree = ttk.Treeview(table, columns=self.JOB_COLUMNS, show="headings",
+                                      selectmode="browse")
         for column, heading in zip(self.JOB_COLUMNS, self.JOB_HEADINGS):
             self.jobs_tree.heading(column, text=heading,
                                    command=lambda selected=column: self.sort_jobs_by(selected))
-            self.jobs_tree.column(column, width=105, anchor="e" if column in {"earned","base","travel","paid","due"} else "w")
-        self.jobs_tree.pack(fill="both", expand=True, pady=(7, 0))
+            width, minimum = JOB_COLUMN_WIDTHS[column]
+            self.jobs_tree.column(column, width=width, minwidth=minimum,
+                                  stretch=column == "project",
+                                  anchor="e" if column in JOB_MONEY_FIELDS else "w")
+        ybar = ttk.Scrollbar(table, orient="vertical", command=self.jobs_tree.yview)
+        xbar = ttk.Scrollbar(table, orient="horizontal", command=self.jobs_tree.xview)
+        self.jobs_tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
+        self.jobs_tree.grid(row=0, column=0, sticky="nsew")
+        ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
+        table.rowconfigure(0, weight=1); table.columnconfigure(0, weight=1)
+        self.jobs_tree.bind("<Double-1>", self._open_double_clicked_job)
         ttk.Label(payments_tab, text="Expand a payment to see every job and pay component it covered.").pack(anchor="w")
         self.payments_tree = ttk.Treeview(payments_tab,
             columns=("date","method","reference","status","amount","base","travel","other"), show="tree headings")
@@ -140,6 +162,22 @@ class TechnicianFinanceView(ttk.Frame):
     def clear_job_search(self):
         """Clear only the query, retaining the selected technician job view."""
         self.job_search.set("")
+        self.refresh()
+
+    def _open_double_clicked_job(self, event):
+        """Open the shared Job Details form only for the row under the pointer."""
+        if self.jobs_tree.identify_region(event.x, event.y) not in ("cell", "tree"):
+            return
+        iid = self.jobs_tree.identify_row(event.y)
+        job = self.job_rows.get(iid)
+        if not job:
+            return
+        self.jobs_tree.selection_set(iid); self.jobs_tree.focus(iid)
+        try:
+            self.job_opener(self, self.auth, int(job["job_id"]), wait=True)
+        except Exception as exc:
+            messagebox.showerror("Job Details", str(exc), parent=self)
+            return
         self.refresh()
 
     def sort_jobs_by(self, column):
