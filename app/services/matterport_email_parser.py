@@ -17,8 +17,10 @@ _PAYMENT = re.compile(
     re.IGNORECASE,
 )
 _ITEM = re.compile(
-    r"^\s*(?:USD\s+)?(?P<amount>(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?)?\s*"
-    r"(?P<type>Invoice)\s+(?:(?P<document>\S+)\s+)?"
+    r"^\s*(?P<amount>(?:\(?\s*(?:-\s*)?(?:USD\s*)?(?:-\s*)?"
+    r"(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.\d{1,2})?\s*\)?|USD))\s*(?:\|\s*)?"
+    r"(?P<type>Invoice|Vendor\s+credit|Positive\s+adjustment|Fee(?:\s+or\s+deduction)?|"
+    r"Deduction|Other\s+adjustment)\s*(?:\|\s*)?(?:(?P<document>\S+)\s*)?(?:\|\s*)?"
     r"(?P<date>\d{1,2}/\d{1,2}/\d{4})\s*$", re.IGNORECASE,
 )
 _TABLE_HEADER = re.compile(
@@ -54,6 +56,32 @@ def _payment_date(when: str, received_at: str | None) -> str | None:
         return None
 
 
+def parse_signed_usd_amount(value: str) -> int:
+    """Parse supported Matterport USD representations into signed integer cents."""
+    source = str(value).strip()
+    parenthesized = source.startswith("(") and source.endswith(")")
+    if source.startswith("(") != source.endswith(")"):
+        raise ValueError("Amount has unmatched parentheses")
+    inner = source[1:-1].strip() if parenthesized else source
+    inner = re.sub(r"^\s*-\s*USD\s*", "-", inner, flags=re.IGNORECASE)
+    inner = re.sub(r"^\s*USD\s*", "", inner, flags=re.IGNORECASE).strip()
+    negative = inner.startswith("-")
+    if negative:
+        inner = inner[1:].strip()
+    cents = _amount(inner)
+    if parenthesized and negative:
+        raise ValueError("Amount contains conflicting negative notation")
+    return -cents if parenthesized or negative else cents
+
+
+def _document_type(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value.strip()).casefold()
+    return {"invoice": "Invoice", "vendor credit": "Vendor Credit",
+            "positive adjustment": "Positive Adjustment", "fee": "Fee or Deduction",
+            "fee or deduction": "Fee or Deduction", "deduction": "Fee or Deduction",
+            "other adjustment": "Other Adjustment"}[normalized]
+
+
 def parse_matterport_payment_email(raw_text: str) -> dict[str, Any]:
     """Parse a Matterport payment email into batch header data and import rows.
 
@@ -79,14 +107,21 @@ def parse_matterport_payment_email(raw_text: str) -> dict[str, Any]:
             continue
         document = (match.group("document") or "").strip()
         amount_text = (match.group("amount") or "").strip()
+        document_type = _document_type(match.group("type"))
         errors: list[str] = []
         amount = None
+        signed = None
         # Treat the invoice as an opaque source identifier. On-Demand invoice
         # numbers need not already exist in MPOPS or use an Airtable prefix.
         if not document:
             errors.append("Invoice number is required")
         try:
-            amount = _amount(amount_text)
+            signed = parse_signed_usd_amount(amount_text)
+            if document_type in {"Vendor Credit", "Fee or Deduction"} and signed > 0:
+                errors.append(f"{document_type} must use a negative amount")
+            elif document_type in {"Invoice", "Positive Adjustment"} and signed < 0:
+                errors.append(f"{document_type} must use a positive amount")
+            amount = abs(signed)
         except ValueError as exc:
             errors.append(str(exc))
         document_date = _date(match.group("date"))
@@ -96,8 +131,13 @@ def parse_matterport_payment_email(raw_text: str) -> dict[str, Any]:
         status = "Invalid" if errors else ("Duplicate" if duplicate else "Valid")
         rows.append({
             "source_row_number": number, "document_number": document,
-            "document_type": match.group("type").title(), "document_date": document_date,
-            "description_raw": None, "amount_received_cents": amount, "status": status,
+            "document_type": document_type, "document_date": document_date,
+            "description_raw": None, "amount_received_cents": amount,
+            "signed_effect_cents": signed if amount is not None else None,
+            "allocation_status": ("Account Allocation Required" if document_type == "Vendor Credit"
+                                  else "Not Required"),
+            "direction_status": "Invalid" if errors else "Valid",
+            "original_source_text": line, "status": status,
             "message": "; ".join(errors) if errors else
                        ("Duplicate invoice number in pasted email" if duplicate else None),
             "raw_fields": [value for value in match.groups()],
@@ -113,5 +153,11 @@ def parse_matterport_payment_email(raw_text: str) -> dict[str, Any]:
         "payer_name": "Matterport", "source_system": "Matterport Email",
         "source_email_subject": subject, "source_email_received_at": received_at,
     }
+    summary = _summary(rows)
+    summary["importable_total_cents"] = sum(
+        int(row["signed_effect_cents"]) for row in rows if row["status"] == "Valid")
+    summary["gross_invoice_total_cents"] = sum(
+        int(row["amount_received_cents"]) for row in rows
+        if row["status"] == "Valid" and row["document_type"] == "Invoice")
     return {"format": "matterport-payment-email", "headers_detected": True,
-            "header": header, "rows": rows, "summary": _summary(rows)}
+            "header": header, "rows": rows, "summary": summary}

@@ -91,7 +91,11 @@ class MatterportEmailImportDialog(tk.Toplevel):
         summary = self.result["summary"]
         skipped = f"{summary['duplicate_count']} duplicate rows and {summary['invalid_count']} invalid rows will be skipped."
         if not messagebox.askyesno("Confirm Matterport Email Import", f"Import {summary['valid_count']} valid rows totaling {format_cents(summary['importable_total_cents'])} into this payment batch?\n\n{skipped}", parent=self): return
-        items = [{key: row[key] for key in ("document_number", "document_type", "document_date", "description_raw", "amount_received_cents")} for row in self.result["rows"] if row["status"] == "Valid"]
+        fields = ("document_number", "document_type", "document_date", "description_raw",
+                  "amount_received_cents", "signed_effect_cents", "allocation_status",
+                  "direction_status", "original_source_text")
+        items = [{key: row[key] for key in fields} for row in self.result["rows"]
+                 if row["status"] == "Valid"]
         header_changes = {key: value for key, value in self.result["header"].items()
                           if value is not None}
         try:

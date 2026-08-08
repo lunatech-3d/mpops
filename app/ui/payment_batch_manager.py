@@ -14,7 +14,7 @@ from app.date_utils import (display_date_to_iso, display_datetime_to_iso,
 from app.security.user_manager import AuthorizationError
 from app.services.payment_service import BATCH_STATUSES, PaymentService
 from app.services.compensation_service import CompensationService
-from app.ui.payment_helpers import (format_cents, next_batch_status, parse_currency,
+from app.ui.payment_helpers import (format_adjustment_cents, format_cents, next_batch_status, parse_currency,
                                     payment_item_sort_key, status_permissions,
                                     technician_revenue_subtotals, totals_to_display,
                                     workflow_summary)
@@ -182,16 +182,16 @@ class PaymentBatchDetail(tk.Toplevel):
         self.notes = tk.Text(header, height=3, wrap="word"); self.notes.grid(row=2, column=1, columnspan=7, sticky="ew", pady=4)
         for col in (1, 3, 5, 7): header.columnconfigure(col, weight=1)
         items_frame = ttk.LabelFrame(content, text="Payment Items", padding=6); items_frame.pack(fill="both", expand=True, pady=8)
-        columns = ("technician", "address", "customer", "document_number", "amount_received_cents",
-                   "match_status", "payment_date", "job_date")
-        headings = ("Technician", "Address", "Customer", "Invoice Number", "Amount", "Status",
-                    "Payment Date", "Job Date")
+        columns = ("document_number", "document_date", "document_type", "account_name",
+                   "customer", "amount_received_cents", "signed_effect_cents", "allocation_status")
+        headings = ("Document Number", "Document Date", "Document Type", "Account",
+                    "Job / Invoice", "Gross Amount", "Net Effect", "Allocation Status")
         self.items = ttk.Treeview(items_frame, columns=columns, show="headings", selectmode="browse")
         self.item_headings = dict(zip(columns, headings))
         for key, heading in zip(columns, headings):
             self.items.heading(key, text=heading, command=lambda column=key: self.sort_items(column))
-            self.items.column(key, width=145 if key in {"address", "customer"} else 115,
-                              anchor="e" if key == "amount_received_cents" else "w")
+            self.items.column(key, width=145 if key in {"document_number", "customer"} else 120,
+                              anchor="e" if key in {"amount_received_cents", "signed_effect_cents"} else "w")
         ybar = ttk.Scrollbar(items_frame, orient="vertical", command=self.items.yview); xbar = ttk.Scrollbar(items_frame, orient="horizontal", command=self.items.xview)
         self.items.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.items.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
@@ -247,7 +247,12 @@ class PaymentBatchDetail(tk.Toplevel):
         ttk.Button(transfer_actions, text="View Technician Breakdown",
                    command=self.view_technician_breakdown).pack(side="right")
         totals = ttk.LabelFrame(content, text="Reconciliation", padding=6); totals.pack(fill="x")
-        specs = (("Payment", "payment_amount_cents"), ("Imported", "imported_total_cents"),
+        specs = (("Gross Invoices", "gross_invoice_total_cents"),
+                 ("Positive Adjustments", "positive_adjustments_cents"),
+                 ("Vendor Credits", "vendor_credits_cents"),
+                 ("Fees / Deductions", "fees_and_deductions_cents"),
+                 ("Expected Net Payment", "expected_net_payment_cents"),
+                 ("Actual ACH Received", "payment_amount_cents"),
                  ("Difference", "difference_cents"), ("Matched", "matched_count"),
                  ("Exceptions", "exception_count"))
         for index, (label, key) in enumerate(specs):
@@ -371,6 +376,12 @@ class PaymentBatchDetail(tk.Toplevel):
         else:
             self.history_var.set("No financial history available.")
         for key, var in self.total_vars.items(): var.set(display.get(key, "0"))
+        if "vendor_credits_cents" in self.total_vars:
+            self.total_vars["vendor_credits_cents"].set(
+                format_adjustment_cents(totals.get("vendor_credits_cents")))
+        if "fees_and_deductions_cents" in self.total_vars:
+            self.total_vars["fees_and_deductions_cents"].set(
+                format_adjustment_cents(totals.get("fees_and_deductions_cents")))
         self.snapshot = self._form_values(); self.apply_status_permissions(); self.title(f"Matterport Payment Batch #{self.batch_id}")
 
     def sort_items(self, column: str) -> None:
@@ -392,10 +403,17 @@ class PaymentBatchDetail(tk.Toplevel):
             self.items.heading(key, text=heading + marker)
         for item in rows:
             iid = f"item-{item['payment_item_id']}"
-            self.items.insert("", "end", iid=iid, values=(item.get("technician") or "Unassigned",
-                item.get("address") or "", item.get("customer") or "", item.get("document_number") or "",
-                format_cents(item.get("amount_received_cents")), item.get("match_status") or "",
-                format_display_date(item.get("payment_date")), format_display_datetime(item.get("job_date"))))
+            signed = int(item.get("signed_effect_cents")
+                         if item.get("signed_effect_cents") is not None
+                         else item.get("amount_received_cents") or 0)
+            gross = (format_cents(item.get("amount_received_cents"))
+                     if item.get("document_type") == "Invoice" else "—")
+            effect = format_adjustment_cents(signed) if signed < 0 else format_cents(signed)
+            target = item.get("customer") or (f"Job #{item['job_id']}" if item.get("job_id") else "Unassigned")
+            self.items.insert("", "end", iid=iid, values=(item.get("document_number") or "",
+                format_display_date(item.get("document_date")), item.get("document_type") or "Invoice",
+                item.get("account_name") or "Account allocation required",
+                target, gross, effect, item.get("allocation_status") or "Not Required"))
         if selected_id and self.items.exists(selected_id):
             self.items.selection_set(selected_id); self.items.see(selected_id)
 

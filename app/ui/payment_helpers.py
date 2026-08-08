@@ -27,7 +27,15 @@ EDITABLE_FIELDS = {
 
 MONEY_FIELDS = ("payment_amount_cents", "imported_total_cents", "difference_cents",
                 "effective_total_cents", "matched_total_cents", "excluded_total_cents",
-                "unmatched_total_cents")
+                "unmatched_total_cents", "gross_invoice_total_cents",
+                "positive_adjustments_cents", "vendor_credits_cents",
+                "fees_and_deductions_cents", "expected_net_payment_cents")
+
+
+def format_adjustment_cents(cents: int | None) -> str:
+    """Present deductions using accounting parentheses."""
+    value = abs(int(cents or 0))
+    return f"(${value // 100:,}.{value % 100:02d})"
 
 
 def format_cents(cents: int | None) -> str:
