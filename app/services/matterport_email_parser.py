@@ -159,5 +159,12 @@ def parse_matterport_payment_email(raw_text: str) -> dict[str, Any]:
     summary["gross_invoice_total_cents"] = sum(
         int(row["amount_received_cents"]) for row in rows
         if row["status"] == "Valid" and row["document_type"] == "Invoice")
+    summary["invoice_count"] = sum(
+        row["status"] == "Valid" and row["document_type"] == "Invoice" for row in rows)
+    summary["vendor_credit_count"] = sum(
+        row["status"] == "Valid" and row["document_type"] == "Vendor Credit" for row in rows)
+    summary["vendor_credit_total_cents"] = sum(
+        int(row["signed_effect_cents"]) for row in rows
+        if row["status"] == "Valid" and row["document_type"] == "Vendor Credit")
     return {"format": "matterport-payment-email", "headers_detected": True,
             "header": header, "rows": rows, "summary": summary}

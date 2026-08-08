@@ -14,6 +14,20 @@ from app.ui.styles import PADDING
 LOGGER = logging.getLogger(__name__)
 
 
+def confirmation_message(summary: dict) -> str:
+    """Build an unambiguous gross-credit-net import reconciliation."""
+    invoice_label = "invoice" if summary["invoice_count"] == 1 else "invoices"
+    credit_label = "vendor credit" if summary["vendor_credit_count"] == 1 else "vendor credits"
+    credit = summary["vendor_credit_total_cents"]
+    credit_amount = f"({format_cents(-credit)})" if credit < 0 else format_cents(credit)
+    skipped = (f"{summary['duplicate_count']} duplicate rows and "
+               f"{summary['invalid_count']} invalid rows will be skipped.")
+    return (f"Import {summary['valid_count']} valid rows into this payment batch?\n\n"
+            f"{summary['invoice_count']} {invoice_label}: {format_cents(summary['gross_invoice_total_cents'])}\n"
+            f"{summary['vendor_credit_count']} {credit_label}: {credit_amount}\n"
+            f"Net payment: {format_cents(summary['importable_total_cents'])}\n\n{skipped}")
+
+
 class MatterportEmailImportDialog(tk.Toplevel):
     def __init__(self, parent, service, session, batch_id: int, batch: dict, totals: dict,
                  on_imported):
@@ -89,8 +103,8 @@ class MatterportEmailImportDialog(tk.Toplevel):
 
     def import_rows(self):
         summary = self.result["summary"]
-        skipped = f"{summary['duplicate_count']} duplicate rows and {summary['invalid_count']} invalid rows will be skipped."
-        if not messagebox.askyesno("Confirm Matterport Email Import", f"Import {summary['valid_count']} valid rows totaling {format_cents(summary['importable_total_cents'])} into this payment batch?\n\n{skipped}", parent=self): return
+        if not messagebox.askyesno("Confirm Matterport Email Import",
+                                   confirmation_message(summary), parent=self): return
         fields = ("document_number", "document_type", "document_date", "description_raw",
                   "amount_received_cents", "signed_effect_cents", "allocation_status",
                   "direction_status", "original_source_text")

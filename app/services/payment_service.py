@@ -47,11 +47,14 @@ _BATCH_FIELDS = frozenset({
 })
 _ITEM_FIELDS = frozenset({
     "document_number", "document_type", "document_date", "description_raw",
-    "amount_received_cents", "job_id", "match_status", "match_method", "match_notes",
+    "amount_received_cents", "signed_effect_cents", "allocation_status",
+    "direction_status", "original_source_text", "job_id", "match_status",
+    "match_method", "match_notes",
 })
 _IMPORT_FIELDS = frozenset({
     "document_number", "document_type", "document_date", "description_raw",
-    "amount_received_cents",
+    "amount_received_cents", "signed_effect_cents", "allocation_status",
+    "direction_status", "original_source_text",
 })
 _BATCH_EDIT_FIELDS = {
     "Draft": _BATCH_FIELDS,
@@ -67,7 +70,7 @@ _TEXT_LIMITS = {
     "payment_method": 100, "payer_name": 255, "source_system": 100,
     "source_email_subject": 1000, "notes": 4000, "document_number": 255,
     "document_type": 100, "description_raw": 4000, "match_method": 255,
-    "match_notes": 4000,
+    "match_notes": 4000, "original_source_text": 4000,
 }
 EXCEPTION_STATUSES = frozenset({"Unmatched", "Missing Job", "Ambiguous",
                                 "Amount Review", "Excluded"})
@@ -79,7 +82,8 @@ EXCEPTION_GROUPS = {
 }
 
 # The single authoritative expression for money used by reconciliation.
-EFFECTIVE_AMOUNT_SQL = "COALESCE(resolved_amount_cents, amount_received_cents)"
+SIGNED_AMOUNT_SQL = "COALESCE(signed_effect_cents, amount_received_cents)"
+EFFECTIVE_AMOUNT_SQL = f"COALESCE(resolved_amount_cents, {SIGNED_AMOUNT_SQL})"
 
 
 class PaymentService:
@@ -105,6 +109,12 @@ class PaymentService:
             raise ValueError(f"{field} must be integer cents")
         if value < 0:
             raise ValueError(f"{field} cannot be negative")
+        return value
+
+    @staticmethod
+    def _signed_cents(value: Any, field: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"{field} must be integer cents")
         return value
 
     @staticmethod
@@ -207,6 +217,8 @@ class PaymentService:
         for field, value in data.items():
             if field == "amount_received_cents":
                 clean[field] = cls._cents(value, field)
+            elif field == "signed_effect_cents":
+                clean[field] = cls._signed_cents(value, field)
             elif field == "job_id":
                 clean[field] = None if value in (None, "") else cls._positive_id(value, field)
             elif field == "match_status":
@@ -217,6 +229,16 @@ class PaymentService:
                 clean[field] = cls._text(field, value, required=field == "document_number")
         if creating:
             clean.setdefault("match_status", "Unmatched")
+            amount = clean["amount_received_cents"]
+            document_type = clean.get("document_type") or "Invoice"
+            clean.setdefault("signed_effect_cents", -amount if document_type in {
+                "Vendor Credit", "Fee or Deduction"
+            } else amount)
+            expected_sign = -1 if document_type in {"Vendor Credit", "Fee or Deduction"} else 1
+            direction_valid = clean["signed_effect_cents"] * expected_sign >= 0
+            clean.setdefault("direction_status", "Valid" if direction_valid else "Invalid")
+            clean.setdefault("allocation_status", "Account Allocation Required"
+                             if document_type == "Vendor Credit" else "Not Required")
         return clean
 
     @staticmethod
@@ -275,7 +297,7 @@ class PaymentService:
         ).fetchall()
         counts = {status: sum(row["match_status"] == status for row in rows)
                   for status in PAYMENT_ITEM_STATUSES}
-        imported = sum(int(row["amount_received_cents"]) for row in rows)
+        imported = sum(int(row["effective_amount_cents"]) for row in rows)
         effective = sum(int(row["effective_amount_cents"]) for row in rows)
         payment = int(batch["payment_amount_cents"])
         difference = payment - effective
@@ -309,6 +331,11 @@ class PaymentService:
             "excluded_count": counts["Excluded"],
             "item_count": len(rows),
             "manual_resolution_count": manual_count,
+            "allocation_required": any(
+                row["allocation_status"] == "Account Allocation Required"
+                for row in connection.execute(
+                    "SELECT allocation_status FROM MatterportPaymentItems "
+                    "WHERE payment_batch_id = ?", (batch["payment_batch_id"],))),
         }
         return {"ready": not errors, "errors": errors, "warnings": warnings,
                 "summary": summary}
@@ -443,12 +470,15 @@ class PaymentService:
             rows = connection.execute(
                 """
                 SELECT b.*,
-                       COALESCE(SUM(i.amount_received_cents), 0) AS imported_total_cents,
+                       COALESCE(SUM(COALESCE(i.signed_effect_cents,
+                                            i.amount_received_cents)), 0) AS imported_total_cents,
                        COALESCE(SUM(COALESCE(i.resolved_amount_cents,
+                                            i.signed_effect_cents,
                                             i.amount_received_cents)), 0)
                          AS effective_total_cents,
                        b.payment_amount_cents
                          - COALESCE(SUM(COALESCE(i.resolved_amount_cents,
+                                                i.signed_effect_cents,
                                                 i.amount_received_cents)), 0)
                          AS difference_cents,
                        COUNT(i.payment_item_id) AS item_count,
@@ -550,7 +580,7 @@ class PaymentService:
                 except sqlite3.IntegrityError as exc:
                     raise ValueError("Payment item conflicts with an existing record") from exc
                 ids.append(int(cursor.lastrowid))
-            total = sum(item["amount_received_cents"] for item in clean_items)
+            total = sum(item["signed_effect_cents"] for item in clean_items)
             record_event(connection, "tipalti_payment_items_imported",
                          actor_user_id=session.user_id,
                          details={"payment_batch_id": payment_batch_id,
@@ -604,6 +634,44 @@ class PaymentService:
                                   "payment_batch_id": payment_batch_id,
                                   "document_number": clean["document_number"]})
             return item_id
+
+    def allocate_adjustment(self, session: Session, payment_item_id: int,
+                            allocation_amount_cents: int, *, account_name: str | None = None,
+                            target_payment_item_id: int | None = None,
+                            job_id: int | None = None, reason: str | None = None) -> dict[str, Any]:
+        """Allocate a vendor credit while retaining its signed remittance value."""
+        self._require_operator(session)
+        amount = self._cents(allocation_amount_cents, "allocation_amount_cents")
+        if not amount:
+            raise ValueError("allocation_amount_cents must be positive")
+        with self.auth.connection() as connection:
+            item = self._require_item(connection, payment_item_id)
+            if item["document_type"] != "Vendor Credit":
+                raise ValueError("Only vendor credits can be allocated")
+            allocated = int(connection.execute(
+                "SELECT COALESCE(SUM(allocation_amount_cents),0) "
+                "FROM MatterportAdjustmentAllocations WHERE payment_item_id=?",
+                (payment_item_id,)).fetchone()[0])
+            credit = -int(item["signed_effect_cents"])
+            if allocated + amount > credit:
+                raise ValueError("Allocation cannot exceed the vendor credit")
+            connection.execute(
+                "INSERT INTO MatterportAdjustmentAllocations "
+                "(payment_item_id,account_name,target_payment_item_id,job_id,"
+                "allocation_amount_cents,reason,created_by) VALUES (?,?,?,?,?,?,?)",
+                (payment_item_id, account_name, target_payment_item_id, job_id,
+                 amount, reason, session.user_id))
+            status = "Allocated" if allocated + amount == credit else "Partially Allocated"
+            connection.execute("UPDATE MatterportPaymentItems SET allocation_status=? "
+                               "WHERE payment_item_id=?", (status, payment_item_id))
+            return {"allocation_status": status, "allocated_cents": allocated + amount}
+
+    def list_adjustment_allocations(self, payment_item_id: int) -> list[dict[str, Any]]:
+        self._positive_id(payment_item_id, "payment_item_id")
+        with self.auth.connection() as connection:
+            return [dict(row) for row in connection.execute(
+                "SELECT * FROM MatterportAdjustmentAllocations WHERE payment_item_id=? "
+                "ORDER BY adjustment_allocation_id", (payment_item_id,))]
 
     def update_payment_item(
         self, session: Session, payment_item_id: int, changes: dict[str, Any]
@@ -1066,16 +1134,20 @@ class PaymentService:
             batch = self._require_batch(connection, payment_batch_id)
             totals = connection.execute(
                 """
-                SELECT COALESCE(SUM(amount_received_cents), 0) AS imported_total_cents,
-                       COALESCE(SUM(COALESCE(resolved_amount_cents, amount_received_cents)), 0)
+                SELECT COALESCE(SUM(COALESCE(signed_effect_cents, amount_received_cents)), 0)
+                           AS imported_total_cents,
+                       COALESCE(SUM(COALESCE(resolved_amount_cents, signed_effect_cents,
+                                            amount_received_cents)), 0)
                            AS effective_total_cents,
                        COALESCE(SUM(CASE WHEN match_status = 'Matched'
-                                        THEN COALESCE(resolved_amount_cents, amount_received_cents) ELSE 0 END), 0)
+                                        THEN COALESCE(resolved_amount_cents, signed_effect_cents,
+                                                      amount_received_cents) ELSE 0 END), 0)
                            AS matched_total_cents,
                        COALESCE(SUM(CASE WHEN match_status IN
                                              ('Unmatched', 'Missing Job', 'Ambiguous',
                                               'Amount Review')
-                                        THEN COALESCE(resolved_amount_cents, amount_received_cents) ELSE 0 END), 0)
+                                        THEN COALESCE(resolved_amount_cents, signed_effect_cents,
+                                                      amount_received_cents) ELSE 0 END), 0)
                            AS unmatched_total_cents,
                        COALESCE(SUM(CASE WHEN match_status = 'Matched' THEN 1 ELSE 0 END), 0)
                            AS matched_count,
@@ -1090,8 +1162,21 @@ class PaymentService:
                        COALESCE(SUM(CASE WHEN match_status = 'Excluded' THEN 1 ELSE 0 END), 0)
                            AS excluded_count,
                        COALESCE(SUM(CASE WHEN match_status = 'Excluded'
-                                        THEN COALESCE(resolved_amount_cents, amount_received_cents) ELSE 0 END), 0)
+                                        THEN COALESCE(resolved_amount_cents, signed_effect_cents,
+                                                      amount_received_cents) ELSE 0 END), 0)
                            AS excluded_total_cents,
+                       COALESCE(SUM(CASE WHEN document_type = 'Invoice'
+                                        THEN amount_received_cents ELSE 0 END), 0)
+                           AS gross_invoice_total_cents,
+                       COALESCE(SUM(CASE WHEN document_type = 'Positive Adjustment'
+                                        THEN signed_effect_cents ELSE 0 END), 0)
+                           AS positive_adjustments_cents,
+                       -COALESCE(SUM(CASE WHEN document_type = 'Vendor Credit'
+                                         THEN signed_effect_cents ELSE 0 END), 0)
+                           AS vendor_credits_cents,
+                       -COALESCE(SUM(CASE WHEN document_type = 'Fee or Deduction'
+                                         THEN signed_effect_cents ELSE 0 END), 0)
+                           AS fees_and_deductions_cents,
                        COUNT(*) AS item_count
                 FROM MatterportPaymentItems WHERE payment_batch_id = ?
                 """, (payment_batch_id,)
@@ -1105,7 +1190,7 @@ class PaymentService:
                 "unmatched_status_count", "missing_job_count", "ambiguous_count",
                 "amount_review_count",
             ))
-            return {
+            result = {
                 "payment_amount_cents": payment,
                 "imported_total_cents": imported,
                 "difference_cents": payment - effective,
@@ -1122,3 +1207,14 @@ class PaymentService:
                 "resolved_count": matched_count + excluded_count,
                 "exception_count": exception_count,
             }
+            if any(int(totals[key]) for key in ("positive_adjustments_cents",
+                                                "vendor_credits_cents",
+                                                "fees_and_deductions_cents")):
+                result.update({
+                    "gross_invoice_total_cents": int(totals["gross_invoice_total_cents"]),
+                    "positive_adjustments_cents": int(totals["positive_adjustments_cents"]),
+                    "vendor_credits_cents": int(totals["vendor_credits_cents"]),
+                    "fees_and_deductions_cents": int(totals["fees_and_deductions_cents"]),
+                    "expected_net_payment_cents": effective,
+                })
+            return result

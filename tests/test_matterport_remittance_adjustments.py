@@ -10,6 +10,7 @@ from app.security.user_manager import UserManager
 from app.services.matterport_email_parser import (parse_matterport_payment_email,
                                                    parse_signed_usd_amount)
 from app.services.payment_service import PaymentService
+from app.ui.matterport_email_import_dialog import confirmation_message
 
 
 class MatterportRemittanceAdjustmentTests(unittest.TestCase):
@@ -76,7 +77,31 @@ class MatterportRemittanceAdjustmentTests(unittest.TestCase):
         self.assertEqual(invoice_total, 383247)
         self.assertEqual(earnings, 0)
         self.assertEqual(self.service.get_payment_batch(batch)["payment_amount_cents"], 374481)
-        self.assertEqual(self.service.list_payment_items(batch)[-1]["payment_item_id"], credit)
+        rows = self.service.list_payment_items(batch)
+        self.assertEqual(len(rows), 18)
+        self.assertEqual(rows[-1]["payment_item_id"], credit)
+        self.assertEqual(rows[-1]["signed_effect_cents"], -8766)
+        self.assertEqual(totals["imported_total_cents"], 374481)
+        self.assertNotEqual(totals["imported_total_cents"], 392013)
+
+    def test_full_import_preview_and_confirmation_show_gross_credit_and_net(self):
+        invoice_lines = "\n".join(
+            f"USD {amount / 100:.2f} | Invoice | INV-{number} | 06/07/2026"
+            for number, amount in enumerate([22500] * 16 + [23247]))
+        parsed = parse_matterport_payment_email(
+            "A USD 3,744.81 payment was sent to you today by ACH and covers\n"
+            "Amount Type Document number Document date\n" + invoice_lines +
+            "\n(USD 87.66) | Vendor credit | CREDIT-1 | 06/08/2026\n")
+        summary = parsed["summary"]
+        self.assertEqual(summary["gross_invoice_total_cents"], 383247)
+        self.assertEqual(summary["vendor_credit_total_cents"], -8766)
+        self.assertEqual(summary["valid_count"], 18)
+        self.assertEqual(summary["importable_total_cents"], 374481)
+        message = confirmation_message(summary)
+        self.assertIn("17 invoices: $3,832.47", message)
+        self.assertIn("1 vendor credit: ($87.66)", message)
+        self.assertIn("Net payment: $3,744.81", message)
+        self.assertNotIn("$3,920.13", message)
 
     def test_credit_can_split_and_cannot_be_overallocated(self):
         batch, credit = self._example_batch()

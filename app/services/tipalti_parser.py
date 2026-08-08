@@ -190,6 +190,16 @@ def mark_imported_duplicates(result: dict[str, Any], duplicate_documents: set[st
             row["status"] = "Duplicate"
             row["message"] = "Document number has already been imported"
     result["summary"] = _summary(result["rows"])
+    if result.get("format") == "matterport-payment-email":
+        valid = [row for row in result["rows"] if row["status"] == "Valid"]
+        invoices = [row for row in valid if row["document_type"] == "Invoice"]
+        credits = [row for row in valid if row["document_type"] == "Vendor Credit"]
+        result["summary"].update({
+            "importable_total_cents": sum(int(row["signed_effect_cents"]) for row in valid),
+            "gross_invoice_total_cents": sum(int(row["amount_received_cents"]) for row in invoices),
+            "invoice_count": len(invoices), "vendor_credit_count": len(credits),
+            "vendor_credit_total_cents": sum(int(row["signed_effect_cents"]) for row in credits),
+        })
     return result
 
 
