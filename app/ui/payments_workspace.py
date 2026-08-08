@@ -11,6 +11,7 @@ from app.services.technician_payment_service import (
 from app.services.technician_service import TechnicianService
 from app.ui.payment_batch_manager import PaymentBatchManager
 from app.ui.payment_helpers import parse_currency
+from app.ui.technician_payment_form import TechnicianPaymentForm
 from app.ui.technician_earnings_manager import TechnicianEarningsManager
 from app.ui.technician_payment_run_manager import TechnicianPaymentRunManager
 from app.ui.styles import PADDING
@@ -64,7 +65,7 @@ class DirectPaymentPanel(ttk.Frame):
 
 class PaymentsWorkspace(ttk.Frame):
     TAB_NAMES=("Matterport Payments","Earnings Review","Technician Payment Runs",
-               "Direct Technician Payments","Exceptions / Reconciliation")
+               "Issue Technician Payment","Exceptions / Reconciliation")
     def __init__(self,parent,auth,session):
         super().__init__(parent,padding=PADDING,style="App.TFrame")
         ttk.Label(self,text="Payments",style="Header.TLabel").pack(anchor="w",pady=(0,8))
@@ -74,5 +75,5 @@ class PaymentsWorkspace(ttk.Frame):
         PaymentBatchManager(tabs[0],auth,session).pack(fill="both",expand=True)
         TechnicianEarningsManager(tabs[1],auth,session).pack(fill="both",expand=True)
         TechnicianPaymentRunManager(tabs[2],auth,session).pack(fill="both",expand=True)
-        DirectPaymentPanel(tabs[3],auth,session).pack(fill="both",expand=True)
+        TechnicianPaymentForm(tabs[3],auth,session).pack(fill="both",expand=True)
         ttk.Label(tabs[4],text="Reconciliation exceptions are opened from a Matterport payment batch.\nSelect a batch in the first tab to review unmatched, ambiguous, or amount-review items.",padding=PADDING).pack(anchor="w")

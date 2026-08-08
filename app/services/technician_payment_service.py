@@ -13,12 +13,13 @@ from app.security.auth import AuthService, Session
 from app.security.user_manager import AuthorizationError
 from app.services.compensation_service import CompensationService
 
-PAYMENT_METHODS = ("ACH", "Check", "Zelle", "PayPal", "Other")
+PAYMENT_METHODS = ("ACH", "Check", "Zelle", "Venmo", "PayPal", "Other")
 DIRECT_PAYMENT_CATEGORIES = (
     "Expense reimbursement", "Special travel payment", "Bonus",
     "Compensation adjustment", "Payment correction", "Advance", "Miscellaneous",
 )
 DIRECT_PAYMENT_STATUSES = ("Draft", "Approved", "Scheduled", "Paid")
+FINAL_PAYMENT_STATUSES = {"Paid"}
 
 
 class TechnicianPaymentService:
@@ -59,6 +60,169 @@ class TechnicianPaymentService:
                 if row["included_in_payment_run_id"] is None and row["paid_at"] is None and
                 row["voided_at"] is None and row["technician_payment_id"] is None and
                 (row["entry_type"] == "Manual Adjustment" or row["allocation_status"] == "Approved")]
+
+    def list_outstanding_earnings(self, technician_id: int):
+        """Return allocatable balances for exactly one technician.
+
+        Paid value is derived from allocations on valid paid payments, rather
+        than from the legacy all-or-nothing earning status flag.
+        """
+        self._id(technician_id, "technician_id")
+        with self.auth.connection() as c:
+            rows = c.execute("""SELECT e.*,j.external_job_id,j.project_name_source,
+              COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at) service_date,
+              COALESCE(SUM(CASE WHEN p.payment_status='Paid'
+                THEN pe.amount_applied_cents ELSE 0 END),0) previously_paid_cents
+              FROM TechnicianJobEarnings e
+              LEFT JOIN Jobs j ON j.job_id=e.job_id
+              LEFT JOIN TechnicianPaymentEarnings pe ON pe.technician_earning_id=e.technician_earning_id
+              LEFT JOIN TechnicianPayments p ON p.technician_payment_id=pe.technician_payment_id
+              WHERE e.tech_id=? AND e.earning_status IN ('Approved','Paid') AND e.voided_at IS NULL
+              GROUP BY e.technician_earning_id
+              HAVING e.net_earning_cents-previously_paid_cents>0
+              ORDER BY COALESCE(service_date,e.created_at),e.technician_earning_id""", (technician_id,)).fetchall()
+            result=[]
+            for row in rows:
+                item=dict(row)
+                item["balance_due_cents"]=item["net_earning_cents"]-item["previously_paid_cents"]
+                result.append(item)
+            return result
+
+    def find_payment_duplicates(self, *, technician_id: int, payment_date: str,
+                                amount_cents: int, reference: str | None = None):
+        """Return blocking reference matches and review-only likely matches."""
+        self._id(technician_id, "technician_id")
+        with self.auth.connection() as c:
+            reference_matches=[]
+            if str(reference or "").strip():
+                reference_matches=[dict(r) for r in c.execute(
+                    "SELECT * FROM TechnicianPayments WHERE payment_reference=? COLLATE NOCASE",
+                    (str(reference).strip(),))]
+            likely=[dict(r) for r in c.execute("""SELECT * FROM TechnicianPayments
+              WHERE tech_id=? AND payment_date=? AND payment_amount_cents=?
+                AND payment_status<>'Cancelled'""",(technician_id,payment_date,amount_cents))]
+            return {"reference_matches":reference_matches,"likely_matches":likely}
+
+    def create_manual_payment(self, session: Session, *, technician_id: int,
+            payment_date: str, amount_cents: int, payment_method: str,
+            status: str = "Draft", reference: str | None = None,
+            description: str | None = None, notes: str | None = None,
+            allocations: list[dict] | None = None, non_job_items: list[dict] | None = None,
+            historical: bool = False, technician_confirmed: bool = False):
+        """Atomically create a centralized payment and all of its allocations.
+
+        Historical mode only records an already completed transaction; it does
+        not invoke the payment-run scheduling/issuance workflow.
+        """
+        self._write(session); self._id(technician_id,"technician_id")
+        try: paid_date=date.fromisoformat(str(payment_date)).isoformat()
+        except (TypeError,ValueError): raise ValueError("payment_date is required in YYYY-MM-DD format")
+        if isinstance(amount_cents,bool) or not isinstance(amount_cents,int) or amount_cents<=0:
+            raise ValueError("amount_cents must be a positive integer")
+        if payment_method not in PAYMENT_METHODS: raise ValueError("Unsupported payment method")
+        if status not in DIRECT_PAYMENT_STATUSES: raise ValueError("Unsupported payment status")
+        reference=str(reference or "").strip() or None
+        if historical:
+            if status != "Paid": raise ValueError("Historical payments must be recorded as Paid")
+            if not technician_confirmed: raise ValueError("Confirm the technician before recording a historical payment")
+            if not reference: raise ValueError("External bank reference is required for a historical payment")
+        allocations=allocations or []; non_job_items=non_job_items or []
+        normalized=[]
+        for allocation in allocations:
+            eid=self._id(allocation.get("earning_id"),"earning_id")
+            cents=allocation.get("amount_cents")
+            if isinstance(cents,bool) or not isinstance(cents,int) or cents<=0:
+                raise ValueError("Allocation amounts must be positive whole cents")
+            normalized.append((eid,cents))
+        direct=[]
+        allowed={"Reimbursement","Bonus","Adjustment","Other direct payment"}
+        for item in non_job_items:
+            category=item.get("type")
+            cents=item.get("amount_cents")
+            if category not in allowed: raise ValueError("Unsupported non-job payment type")
+            if isinstance(cents,bool) or not isinstance(cents,int) or cents<=0:
+                raise ValueError("Non-job amounts must be positive whole cents")
+            if not str(item.get("description") or "").strip(): raise ValueError("Non-job item description is required")
+            direct.append((category,cents,str(item["description"]).strip(),str(item.get("notes") or "").strip() or None))
+        allocated=sum(x[1] for x in normalized)+sum(x[1] for x in direct)
+        if allocated>amount_cents: raise ValueError("Allocations exceed the payment total")
+        if status in {"Approved","Scheduled","Paid"} and allocated != amount_cents:
+            raise ValueError("Finalized payments cannot have an unclassified remainder")
+        now=utc_now_iso()
+        with self.auth.connection() as c:
+            if not c.execute("SELECT 1 FROM Techs WHERE tech_id=?",(technician_id,)).fetchone(): raise LookupError("Technician not found")
+            if reference and c.execute("SELECT 1 FROM TechnicianPayments WHERE payment_reference=? COLLATE NOCASE",(reference,)).fetchone():
+                raise ValueError("A payment with this external reference already exists")
+            checked=[]
+            for eid,cents in normalized:
+                earning=c.execute("SELECT * FROM TechnicianJobEarnings WHERE technician_earning_id=? AND tech_id=?",(eid,technician_id)).fetchone()
+                if not earning or earning["earning_status"] not in {"Approved","Paid"} or earning["voided_at"] is not None:
+                    raise ValueError(f"Earning {eid} is no longer approved and available")
+                paid=c.execute("""SELECT COALESCE(SUM(pe.amount_applied_cents),0)
+                  FROM TechnicianPaymentEarnings pe JOIN TechnicianPayments p ON p.technician_payment_id=pe.technician_payment_id
+                  WHERE pe.technician_earning_id=? AND p.payment_status='Paid'""",(eid,)).fetchone()[0]
+                if cents>earning["net_earning_cents"]-paid: raise ValueError(f"Allocation exceeds earning {eid} balance")
+                checked.append((earning,cents))
+            run_status={"Draft":"Draft","Approved":"Approved","Scheduled":"Submitted","Paid":"Paid"}[status]
+            run_id=int(c.execute("""INSERT INTO TechnicianPaymentRuns
+              (payment_run_date,payment_status,total_amount_cents,notes,created_at,created_by,run_type)
+              VALUES(?,?,?,?,?,?,'Manual')""",(paid_date,run_status,amount_cents,notes,now,session.user_id)).lastrowid)
+            stored={"Draft":"Pending","Approved":"Approved","Scheduled":"Submitted","Paid":"Paid"}[status]
+            pid=int(c.execute("""INSERT INTO TechnicianPayments
+              (technician_payment_run_id,tech_id,payment_amount_cents,actual_amount_cents,payment_method,
+               payment_status,payment_date,payment_reference,notes,recorded_at,recorded_by,created_at,
+               approved_at,approved_by,payment_kind,description,is_historical)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",(run_id,technician_id,amount_cents,
+              amount_cents if status=="Paid" else None,payment_method,stored,paid_date,reference,notes,
+              now if status=="Paid" else None,session.user_id if status=="Paid" else None,now,
+              now if status in {"Approved","Scheduled","Paid"} else None,
+              session.user_id if status in {"Approved","Scheduled","Paid"} else None,
+              "Historical" if historical else "Manual",description,1 if historical else 0)).lastrowid)
+            for earning,cents in checked:
+                c.execute("INSERT INTO TechnicianPaymentEarnings(technician_payment_id,technician_earning_id,amount_applied_cents,created_at) VALUES(?,?,?,?)",(pid,earning["technician_earning_id"],cents,now))
+                if status=="Paid" and cents==earning["net_earning_cents"]-c.execute("""SELECT COALESCE(SUM(pe.amount_applied_cents),0) FROM TechnicianPaymentEarnings pe JOIN TechnicianPayments p ON p.technician_payment_id=pe.technician_payment_id WHERE pe.technician_earning_id=? AND p.payment_status='Paid' AND p.technician_payment_id<>?""",(earning["technician_earning_id"],pid)).fetchone()[0]:
+                    c.execute("UPDATE TechnicianJobEarnings SET earning_status='Paid',paid_at=? WHERE technician_earning_id=?",(now,earning["technician_earning_id"]))
+            for category,cents,item_description,item_notes in direct:
+                c.execute("INSERT INTO TechnicianPaymentItems(technician_payment_id,item_type,amount_cents,description,notes,created_at) VALUES(?,?,?,?,?,?)",(pid,category,cents,item_description,item_notes,now))
+            record_event(c,"historical_technician_payment_recorded" if historical else "technician_payment_created",actor_user_id=session.user_id,details={"payment_id":pid,"technician_id":technician_id,"amount_cents":amount_cents,"status":status,"reference":reference})
+            return self.get_payment_detail(pid, connection=c)
+
+    def get_payment_detail(self, payment_id: int, connection=None):
+        self._id(payment_id,"technician_payment_id")
+        def read(c):
+            row=c.execute("""SELECT p.*,COALESCE(t.preferred_name,t.first_name)||' '||t.last_name technician_name
+              FROM TechnicianPayments p JOIN Techs t ON t.tech_id=p.tech_id WHERE p.technician_payment_id=?""",(payment_id,)).fetchone()
+            if not row: raise LookupError("Technician payment not found")
+            result=dict(row)
+            result["allocations"]=[dict(x) for x in c.execute("""SELECT pe.*,e.entry_type,e.reason,j.external_job_id,j.project_name_source
+              FROM TechnicianPaymentEarnings pe JOIN TechnicianJobEarnings e ON e.technician_earning_id=pe.technician_earning_id
+              LEFT JOIN Jobs j ON j.job_id=e.job_id WHERE pe.technician_payment_id=? ORDER BY pe.technician_payment_earning_id""",(payment_id,))]
+            result["non_job_items"]=[dict(x) for x in c.execute("SELECT * FROM TechnicianPaymentItems WHERE technician_payment_id=? ORDER BY technician_payment_item_id",(payment_id,))]
+            return result
+        if connection is not None:return read(connection)
+        with self.auth.connection() as c:return read(c)
+
+    def reverse_payment(self, session: Session, payment_id: int, reason: str):
+        """Reverse a paid payment without deleting its header or line detail."""
+        self._write(session);self._id(payment_id,"technician_payment_id")
+        reason=str(reason or "").strip()
+        if not reason:raise ValueError("Reversal reason is required")
+        now=utc_now_iso()
+        with self.auth.connection() as c:
+            payment=c.execute("SELECT * FROM TechnicianPayments WHERE technician_payment_id=?",(payment_id,)).fetchone()
+            if not payment:raise LookupError("Technician payment not found")
+            if payment["payment_status"]!="Paid":raise ValueError("Only a paid payment may be reversed")
+            c.execute("UPDATE TechnicianPayments SET payment_status='Cancelled',reversed_at=?,reversed_by=?,reversal_reason=?,updated_at=? WHERE technician_payment_id=?",(now,session.user_id,reason,now,payment_id))
+            links=c.execute("SELECT technician_earning_id FROM TechnicianPaymentEarnings WHERE technician_payment_id=?",(payment_id,)).fetchall()
+            for link in links:
+                remaining=c.execute("""SELECT COALESCE(SUM(pe.amount_applied_cents),0) FROM TechnicianPaymentEarnings pe
+                  JOIN TechnicianPayments p ON p.technician_payment_id=pe.technician_payment_id
+                  WHERE pe.technician_earning_id=? AND p.payment_status='Paid'""",(link[0],)).fetchone()[0]
+                earning=c.execute("SELECT net_earning_cents FROM TechnicianJobEarnings WHERE technician_earning_id=?",(link[0],)).fetchone()
+                if earning and remaining<earning[0]:c.execute("UPDATE TechnicianJobEarnings SET earning_status='Approved',paid_at=NULL WHERE technician_earning_id=?",(link[0],))
+            c.execute("UPDATE TechnicianPaymentRuns SET payment_status='Cancelled',cancelled_at=?,cancelled_by=?,version=version+1 WHERE technician_payment_run_id=?",(now,session.user_id,payment["technician_payment_run_id"]))
+            record_event(c,"technician_payment_reversed",actor_user_id=session.user_id,details={"payment_id":payment_id,"reason":reason,"timestamp":now})
+            return self.get_payment_detail(payment_id,connection=c)
 
     def create_direct_payment(self, session: Session, *, technician_id: int,
                               payment_date: str, category: str, amount_cents: int,
