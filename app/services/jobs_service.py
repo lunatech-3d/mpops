@@ -37,6 +37,13 @@ _LONG_TEXT_FIELDS = frozenset({
 _EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _TECHNICIAN_UNCHANGED = object()
 
+# Fields whose normalized operational value is initially owned by an external import,
+# but becomes locally owned when an operator explicitly changes it. Adding another
+# import-managed field here extends the same ownership mechanism without schema work.
+IMPORT_PROTECTABLE_JOB_FIELDS = frozenset({
+    "address_1", "address_2", "city", "state", "postal_code", "county", "country",
+})
+
 _JOB_SUMMARY_SELECT = """
     SELECT
         j.*,
@@ -563,6 +570,31 @@ class JobsService:
                         "WHERE job_id = ?",
                         [*clean.values(), utc_now_iso(), session.user_id, job_id],
                     )
+                    changed_import_fields = {
+                        field for field in clean
+                        if field in IMPORT_PROTECTABLE_JOB_FIELDS
+                        and before[field] != clean[field]
+                    }
+                    if changed_import_fields:
+                        source_systems = [row[0] for row in connection.execute(
+                            "SELECT DISTINCT source_system FROM JobSourceRecords WHERE job_id = ?",
+                            (job_id,),
+                        )]
+                        for source_system in source_systems:
+                            for field in changed_import_fields:
+                                cursor = connection.execute(
+                                    "INSERT OR IGNORE INTO JobFieldOverrides "
+                                    "(job_id, field_name, source_system, protected_at, protected_by) "
+                                    "VALUES (?, ?, ?, ?, ?)",
+                                    (job_id, field, source_system, utc_now_iso(), session.user_id),
+                                )
+                                if cursor.rowcount:
+                                    record_event(
+                                        connection, "job_field_override_created",
+                                        actor_user_id=session.user_id,
+                                        details={"job_id": job_id, "field_name": field,
+                                                 "source_system": source_system},
+                                    )
                 assignment_changed = False
                 if primary_technician_id is not _TECHNICIAN_UNCHANGED:
                     assignment_changed = self._set_primary_technician(
@@ -590,6 +622,33 @@ class JobsService:
             if "external_job_id" in message or "unique" in message:
                 raise ValueError("A Job with this external Job ID already exists") from exc
             raise ValueError("Job data conflicts with an existing record") from exc
+
+    def clear_job_field_override(
+        self, session: Session, job_id: int, field_name: str,
+        source_system: str = "OpenTable",
+    ) -> bool:
+        """Return a locally protected Job field to the named importer's ownership."""
+        self._require_operator(session)
+        self._positive_id(job_id, "job_id")
+        if field_name not in IMPORT_PROTECTABLE_JOB_FIELDS:
+            raise ValueError("Field is not import-protectable")
+        source_system = self._clean_text("source_system", source_system, required=True)
+        with self.auth.connection() as connection:
+            self._require_job(connection, job_id)
+            cursor = connection.execute(
+                "DELETE FROM JobFieldOverrides WHERE job_id = ? AND field_name = ? "
+                "AND source_system = ? COLLATE NOCASE",
+                (job_id, field_name, source_system),
+            )
+            removed = bool(cursor.rowcount)
+            if removed:
+                record_event(
+                    connection, "job_field_override_cleared",
+                    actor_user_id=session.user_id,
+                    details={"job_id": job_id, "field_name": field_name,
+                             "source_system": source_system},
+                )
+            return removed
 
     def cancel_job(self, session: Session, job_id: int, reason: str, notes: str | None = None) -> dict[str, Any]:
         """Cancel a Job without removing any operational or financial history."""

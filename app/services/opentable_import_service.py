@@ -266,7 +266,10 @@ class OpenTableImportService:
         }
 
     @staticmethod
-    def _job_changes(job_data: dict[str, Any], existing: Any) -> dict[str, Any]:
+    def _job_changes(
+        job_data: dict[str, Any], existing: Any,
+        protected_fields: set[str] | frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
         """Return import-owned values that differ from an existing job.
 
         Parsed address fields intentionally include null values. This lets a newer
@@ -278,6 +281,7 @@ class OpenTableImportService:
             field: value
             for field, value in job_data.items()
             if field != "external_job_id"
+            and field not in protected_fields
             and (value is not None or field in _ADDRESS_FIELDS)
             and existing[field] != value
         }
@@ -330,6 +334,12 @@ class OpenTableImportService:
                     "WHERE source_system = 'OpenTable'"
                 )
             }
+            overrides = defaultdict(set)
+            for row in connection.execute(
+                "SELECT job_id, field_name FROM JobFieldOverrides "
+                "WHERE source_system = 'OpenTable'"
+            ):
+                overrides[int(row["job_id"])].add(row["field_name"])
 
         items = []
         counts = defaultdict(int)
@@ -346,7 +356,13 @@ class OpenTableImportService:
                 if existing_records[record_number] != self._source_row_json(row):
                     changed += 1
 
-            job_changes = self._job_changes(group["job"], existing_job) if existing_job else {}
+            protected_fields = (overrides[int(existing_job["job_id"])]
+                                if existing_job else set())
+            job_changes = (self._job_changes(group["job"], existing_job, protected_fields)
+                           if existing_job else {})
+            protected_changes = (self._job_changes(group["job"], existing_job)
+                                 if existing_job else {})
+            protected_changes = sorted(set(protected_changes) & protected_fields)
             protected_status = (str(existing_job["job_status"]).casefold()
                                 if existing_job is not None else "")
             if protected_status in {"cancelled", "archived"}:
@@ -371,6 +387,7 @@ class OpenTableImportService:
                 "already_imported_rows": imported,
                 "changed_source_rows": changed,
                 "changed_job_fields": sorted(job_changes),
+                "protected_job_fields": protected_changes,
                 "parent_record_count": group["parent_record_count"],
                 "existing_job_status": existing_job["job_status"] if existing_job else None,
             })
@@ -419,7 +436,12 @@ class OpenTableImportService:
                     result["created"] += 1
                 else:
                     job_id = int(existing["job_id"])
-                    changes = self._job_changes(job_data, existing)
+                    protected_fields = {row[0] for row in connection.execute(
+                        "SELECT field_name FROM JobFieldOverrides WHERE job_id = ? "
+                        "AND source_system = 'OpenTable'",
+                        (job_id,),
+                    )}
+                    changes = self._job_changes(job_data, existing, protected_fields)
                     # An import may update source-owned details after explicit approval,
                     # but it must never silently reactivate a lifecycle-protected Job.
                     if str(existing["job_status"]).casefold() in {"cancelled", "archived"}:

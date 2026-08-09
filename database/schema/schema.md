@@ -44,6 +44,8 @@ The schema includes or plans the following tables:
   weekly engagement therefore creates multiple Jobs linked to one Project.
 * **`JobSourceRecords`** — one row per imported OpenTable report row. Multiple source
   records may belong to one Job, including component rows and a parent compensation row.
+* **`JobFieldOverrides`** — field-level claims that a locally edited normalized Job
+  value is protected from a named external source importer.
 * **`JobAssignments`** — historical technician assignments for a Job, including the
   active primary assignment and any prior, replacement, or supporting technicians.
 * **`SchemaMigrations`** — migration `name` primary key and `applied_at` timestamp.
@@ -415,6 +417,12 @@ The original imported text must be preserved even after normalization. For examp
 `client_name_source`, `project_name_source`, and `capture_address_raw` retain what the
 source system supplied.
 
+Normalized fields remain importer-owned until an operator changes them through the
+normal Job service. Such an edit creates a `JobFieldOverrides` row for that field and
+source system. Later imports continue updating raw evidence and all other unprotected
+fields, but omit that protected field. `capture_address_raw` is source evidence and is
+not protected merely because a normalized address component was corrected.
+
 ## Keys and constraints
 
 * Primary key: `job_id`
@@ -470,6 +478,37 @@ CREATE INDEX idx_Jobs_scheduled_start
 CREATE INDEX idx_Jobs_location
     ON Jobs(state, city, postal_code);
 ```
+
+---
+
+# Table: `JobFieldOverrides`
+
+## Purpose
+
+Records explicit field-level local ownership without duplicating the current value from
+`Jobs`. An absent row means the named importer/parser may continue maintaining that
+field; a present row means the normalized value in `Jobs` wins until the override is
+explicitly cleared. Existing imported Jobs receive no rows during migration.
+
+```sql
+CREATE TABLE JobFieldOverrides (
+    job_field_override_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL,
+    field_name TEXT NOT NULL,
+    source_system TEXT NOT NULL DEFAULT 'OpenTable',
+    protected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    protected_by INTEGER,
+    reason TEXT,
+    FOREIGN KEY (job_id) REFERENCES Jobs(job_id),
+    FOREIGN KEY (protected_by) REFERENCES Users(id),
+    UNIQUE (job_id, field_name, source_system)
+);
+```
+
+The initial protectable set is `address_1`, `address_2`, `city`, `state`,
+`postal_code`, `county`, and `country`. The service owns that allow-list so additional
+import-managed fields can use this table later. Creating and clearing overrides writes
+append-only `AuditLog` events. The corrected value remains solely in `Jobs`.
 
 ---
 
