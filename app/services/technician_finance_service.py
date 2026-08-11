@@ -60,7 +60,6 @@ class TechnicianFinanceService:
               (date.today().isoformat(), technician_id)).fetchone()
             ledger = connection.execute("""SELECT
               COALESCE(SUM(CASE WHEN earning_status='Pending' THEN net_earning_cents ELSE 0 END),0) pending_cents,
-              COALESCE(SUM(CASE WHEN earning_status='Approved' THEN net_earning_cents ELSE 0 END),0) balance_due_cents,
               COALESCE(SUM(CASE WHEN entry_type='Calculated' AND earning_status='Pending' THEN net_earning_cents ELSE 0 END),0) pending_approval_cents,
               COALESCE(SUM(CASE WHEN entry_type='Manual Adjustment' AND earning_status IN ('Pending','Approved') THEN net_earning_cents ELSE 0 END),0) pending_direct_cents,
               COALESCE(SUM(CASE WHEN entry_type='Calculated' AND earning_status<>'Voided' THEN net_earning_cents ELSE 0 END),0) completed_earnings_cents,
@@ -76,7 +75,85 @@ class TechnicianFinanceService:
               JOIN Jobs j ON j.job_id=a.job_id LEFT JOIN JobFinancials jf ON jf.job_id=j.job_id
               WHERE date(j.scheduled_start_at)>=date(?) AND j.completed_at IS NULL AND j.cancelled_at IS NULL""",
               (technician_id,date.today().isoformat())).fetchone()[0]
-            return {**dict(jobs), **dict(ledger), **dict(paid), "upcoming_expected_cents": upcoming}
+            # The vendor-account balance is reproducible from immutable obligations
+            # and actual valid payments.  Status is used only to determine whether an
+            # earning is approved/valid; payment allocations do not become a second
+            # credit and cancelled/reversed payments contribute nothing.
+            approved = connection.execute("""SELECT COALESCE(SUM(net_earning_cents),0)
+              FROM TechnicianJobEarnings WHERE tech_id=? AND earning_status IN ('Approved','Paid')
+                AND voided_at IS NULL""", (technician_id,)).fetchone()[0]
+            balance_due = approved - paid["total_paid_cents"]
+            unpaid_count = connection.execute("""SELECT COUNT(*) FROM TechnicianJobEarnings e
+              WHERE e.tech_id=? AND e.earning_status IN ('Approved','Paid') AND e.voided_at IS NULL
+                AND e.net_earning_cents > COALESCE((SELECT SUM(pe.amount_applied_cents)
+                  FROM TechnicianPaymentEarnings pe JOIN TechnicianPayments p
+                    ON p.technician_payment_id=pe.technician_payment_id
+                  WHERE pe.technician_earning_id=e.technician_earning_id
+                    AND p.payment_status='Paid'),0)""", (technician_id,)).fetchone()[0]
+            result = {**dict(jobs), **dict(ledger), **dict(paid),
+                      "upcoming_expected_cents": upcoming,
+                      "balance_due_cents": balance_due,
+                      "unpaid_earning_count": unpaid_count}
+            return result
+
+    def list_account_activity(self, technician_id: int):
+        """Return a derived vendor-style account statement for one technician.
+
+        Entries sort by activity timestamp/date, then source type, then source ID.
+        This makes same-day output deterministic without inventing a reporting table.
+        """
+        with self.auth.connection() as connection:
+            self._require_technician(connection, technician_id)
+            activity = []
+            earnings = connection.execute("""SELECT e.*,j.external_job_id,
+              j.project_name_source,j.capture_address_raw,
+              COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at,e.created_at) activity_date,
+              dp.payment_date direct_date,dp.payment_category
+              FROM TechnicianJobEarnings e LEFT JOIN Jobs j ON j.job_id=e.job_id
+              LEFT JOIN TechnicianPaymentEarnings dpe ON dpe.technician_earning_id=e.technician_earning_id
+              LEFT JOIN TechnicianPayments dp ON dp.technician_payment_id=dpe.technician_payment_id
+                AND dp.payment_kind='Direct'
+              WHERE e.tech_id=? AND e.earning_status IN ('Approved','Paid') AND e.voided_at IS NULL
+              GROUP BY e.technician_earning_id""", (technician_id,)).fetchall()
+            for row in earnings:
+                category = row["payment_category"]
+                activity.append({
+                    "activity_date": row["direct_date"] or row["activity_date"],
+                    "activity_type": category or
+                        ("Job Compensation" if row["entry_type"] == "Calculated" else "Compensation Adjustment"),
+                    "description": row["reason"] or row["project_name_source"] or
+                        row["capture_address_raw"] or "Technician earning",
+                    "job_id": row["job_id"], "external_job_id": row["external_job_id"],
+                    "amount_owed_cents": row["net_earning_cents"], "payment_cents": 0,
+                    "source_record_type": "Earning",
+                    "source_record_id": row["technician_earning_id"],
+                    "payment_method": None, "payment_reference": None,
+                    "status": row["earning_status"],
+                })
+            payments = connection.execute("""SELECT * FROM TechnicianPayments
+              WHERE tech_id=? AND payment_status='Paid'""", (technician_id,)).fetchall()
+            for row in payments:
+                amount = (row["actual_amount_cents"] if row["actual_amount_cents"] is not None
+                          else row["payment_amount_cents"])
+                activity.append({
+                    "activity_date": row["payment_date"] or row["recorded_at"] or row["created_at"],
+                    "activity_type": f"{row['payment_method'] or 'Technician'} Payment",
+                    "description": row["description"] or
+                        (f"Reference {row['payment_reference']}" if row["payment_reference"] else "Technician payment"),
+                    "job_id": None, "external_job_id": None, "amount_owed_cents": 0,
+                    "payment_cents": amount, "source_record_type": "Payment",
+                    "source_record_id": row["technician_payment_id"],
+                    "payment_method": row["payment_method"],
+                    "payment_reference": row["payment_reference"], "status": row["payment_status"],
+                })
+            activity.sort(key=lambda item: (str(item["activity_date"] or ""),
+                                             item["source_record_type"],
+                                             item["source_record_id"]))
+            balance = 0
+            for item in activity:
+                balance += item["amount_owed_cents"] - item["payment_cents"]
+                item["running_balance_cents"] = balance
+            return activity
 
     def list_jobs(self, technician_id: int, view="All"):
         allowed = {"All", "Upcoming", "Completed", "Cancelled", "Owed"}

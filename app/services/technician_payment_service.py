@@ -15,9 +15,22 @@ from app.services.compensation_service import CompensationService
 
 PAYMENT_METHODS = ("ACH", "Check", "Zelle", "Venmo", "PayPal", "Other")
 DIRECT_PAYMENT_CATEGORIES = (
-    "Expense reimbursement", "Special travel payment", "Bonus",
-    "Compensation adjustment", "Payment correction", "Advance", "Miscellaneous",
+    "Mileage / Additional Travel", "Parking", "Tolls", "Lodging",
+    "Supplies / Out-of-Pocket Expense", "Expense Reimbursement — Other", "Bonus",
+    "Compensation Adjustment", "Payment Correction", "Advance", "Miscellaneous",
 )
+# Names written by older releases remain readable/creatable for compatibility,
+# while every new UI uses the canonical classifications above.
+LEGACY_DIRECT_PAYMENT_CATEGORIES = (
+    "Expense reimbursement", "Special travel payment", "Compensation adjustment",
+    "Payment correction", "Reimbursement", "Adjustment", "Other direct payment",
+)
+_PAYMENT_ITEM_STORAGE_TYPES = {
+    **{name: "Reimbursement" for name in DIRECT_PAYMENT_CATEGORIES[:6]},
+    "Bonus": "Bonus", "Compensation Adjustment": "Adjustment",
+    "Payment Correction": "Adjustment", "Advance": "Other direct payment",
+    "Miscellaneous": "Other direct payment",
+}
 DIRECT_PAYMENT_STATUSES = ("Draft", "Approved", "Scheduled", "Paid")
 FINAL_PAYMENT_STATUSES = {"Paid"}
 
@@ -88,6 +101,27 @@ class TechnicianPaymentService:
                 result.append(item)
             return result
 
+    def build_fifo_allocations(self, technician_id: int, amount_cents: int):
+        """Propose deterministic oldest-service-first allocations without writing.
+
+        The order is the order returned by :meth:`list_outstanding_earnings`:
+        service date (falling back to earning creation time), then earning ID.
+        """
+        self._id(technician_id, "technician_id")
+        if isinstance(amount_cents, bool) or not isinstance(amount_cents, int) or amount_cents < 0:
+            raise ValueError("amount_cents must be a nonnegative integer")
+        remaining = amount_cents
+        proposed = []
+        for earning in self.list_outstanding_earnings(technician_id):
+            if remaining <= 0:
+                break
+            cents = min(remaining, int(earning["balance_due_cents"]))
+            if cents:
+                proposed.append({"earning_id": earning["technician_earning_id"],
+                                 "amount_cents": cents})
+                remaining -= cents
+        return proposed
+
     def find_payment_duplicates(self, *, technician_id: int, payment_date: str,
                                 amount_cents: int, reference: str | None = None):
         """Return blocking reference matches and review-only likely matches."""
@@ -135,7 +169,7 @@ class TechnicianPaymentService:
                 raise ValueError("Allocation amounts must be positive whole cents")
             normalized.append((eid,cents))
         direct=[]
-        allowed={"Reimbursement","Bonus","Adjustment","Other direct payment"}
+        allowed=set(DIRECT_PAYMENT_CATEGORIES) | set(LEGACY_DIRECT_PAYMENT_CATEGORIES)
         for item in non_job_items:
             category=item.get("type")
             cents=item.get("amount_cents")
@@ -143,7 +177,9 @@ class TechnicianPaymentService:
             if isinstance(cents,bool) or not isinstance(cents,int) or cents<=0:
                 raise ValueError("Non-job amounts must be positive whole cents")
             if not str(item.get("description") or "").strip(): raise ValueError("Non-job item description is required")
-            direct.append((category,cents,str(item["description"]).strip(),str(item.get("notes") or "").strip() or None))
+            storage_type = _PAYMENT_ITEM_STORAGE_TYPES.get(category, category)
+            direct.append((storage_type,cents,str(item["description"]).strip(),
+                           str(item.get("notes") or "").strip() or None))
         allocated=sum(x[1] for x in normalized)+sum(x[1] for x in direct)
         if allocated>amount_cents: raise ValueError("Allocations exceed the payment total")
         if status in {"Approved","Scheduled","Paid"} and allocated != amount_cents:
@@ -236,7 +272,7 @@ class TechnicianPaymentService:
         remains the sole allocation source of truth.
         """
         self._write(session); self._id(technician_id, "technician_id")
-        if category not in DIRECT_PAYMENT_CATEGORIES:
+        if category not in DIRECT_PAYMENT_CATEGORIES + LEGACY_DIRECT_PAYMENT_CATEGORIES:
             raise ValueError("Unsupported direct payment category")
         if status not in DIRECT_PAYMENT_STATUSES:
             raise ValueError("Unsupported direct payment status")

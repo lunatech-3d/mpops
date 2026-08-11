@@ -160,6 +160,46 @@ class TechnicianFinanceServiceTests(CompensationServiceTests):
                                "scheduled_start_at='2099-01-01' WHERE job_id=?", (self.job,))
         job = self.finance.list_jobs(self.tech)[0]
         self.assertIsNone(job["earned_cents"])
+
+    def test_account_activity_mixes_job_expense_bonus_and_historical_payment(self):
+        earning_id = self.service.generate_technician_earnings(
+            self.session, self.batch)["earning_ids"][0]
+        self.service.approve_technician_earning(self.session, earning_id)
+        payments=TechnicianPaymentService(self.auth)
+        parking=payments.create_direct_payment(self.session,technician_id=self.tech,
+            payment_date="2026-08-08",category="Parking",amount_cents=2800,
+            description="Downtown garage",status="Approved",job_id=self.job)
+        payments.create_direct_payment(self.session,technician_id=self.tech,
+            payment_date="2026-08-08",category="Bonus",amount_cents=7200,
+            description="Great work",status="Approved")
+        payments.create_manual_payment(self.session,technician_id=self.tech,
+            payment_date="2026-08-09",amount_cents=4000,payment_method="Zelle",status="Paid",
+            reference="ZELLE-ACCOUNT",allocations=[{"earning_id":earning_id,"amount_cents":71}],
+            non_job_items=[{"type":"Advance","amount_cents":3929,"description":"Advance"}],
+            historical=True,technician_confirmed=True)
+        activity=self.finance.list_account_activity(self.tech)
+        self.assertEqual(activity[-1]["activity_type"],"Zelle Payment")
+        self.assertEqual(activity[-1]["payment_reference"],"ZELLE-ACCOUNT")
+        self.assertEqual(activity[-1]["running_balance_cents"],6071)
+        parking_row=next(x for x in activity if x["activity_type"]=="Parking")
+        self.assertEqual(parking_row["external_job_id"],"JOB-1")
+        self.assertTrue(any(x["activity_type"]=="Bonus" and x["job_id"] is None for x in activity))
+        self.assertEqual(self.finance.get_summary(self.tech)["balance_due_cents"],6071)
+        payments.reverse_payment(self.session,activity[-1]["source_record_id"],"Bank reversal")
+        self.assertEqual(self.finance.get_summary(self.tech)["balance_due_cents"],10071)
+        self.assertFalse(any(x["payment_reference"]=="ZELLE-ACCOUNT"
+                             for x in self.finance.list_account_activity(self.tech)))
+
+    def test_same_day_account_order_is_deterministic(self):
+        payments=TechnicianPaymentService(self.auth)
+        for category in ("Parking","Tolls"):
+            payments.create_direct_payment(self.session,technician_id=self.tech,
+                payment_date="2026-08-08",category=category,amount_cents=100,
+                description=category,status="Approved")
+        first=self.finance.list_account_activity(self.tech)
+        second=self.finance.list_account_activity(self.tech)
+        self.assertEqual([(x["source_record_type"],x["source_record_id"]) for x in first],
+                         [(x["source_record_type"],x["source_record_id"]) for x in second])
         with self.auth.connection() as connection:
             connection.execute("UPDATE Jobs SET job_status='Cancelled',cancelled_at='2026-08-07' "
                                "WHERE job_id=?", (self.job,))

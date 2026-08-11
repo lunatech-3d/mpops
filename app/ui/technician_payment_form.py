@@ -6,7 +6,8 @@ import tkinter as tk
 from datetime import date, datetime
 from tkinter import messagebox, simpledialog, ttk
 
-from app.services.technician_payment_service import PAYMENT_METHODS, TechnicianPaymentService
+from app.services.technician_payment_service import (DIRECT_PAYMENT_CATEGORIES, PAYMENT_METHODS,
+                                                     TechnicianPaymentService)
 from app.services.technician_service import TechnicianService
 from app.ui.payment_helpers import format_cents as format_currency, parse_currency
 from app.ui.styles import PADDING
@@ -16,7 +17,7 @@ class TechnicianPaymentForm(ttk.Frame):
     """One entry surface for new payments and already-paid bank transactions."""
 
     STATUSES=("Draft","Approved","Scheduled","Paid")
-    NON_JOB_TYPES=("Reimbursement","Bonus","Adjustment","Other direct payment")
+    NON_JOB_TYPES=DIRECT_PAYMENT_CATEGORIES
 
     def __init__(self,parent,auth,session):
         super().__init__(parent,padding=PADDING)
@@ -94,9 +95,12 @@ class TechnicianPaymentForm(ttk.Frame):
     def allocate_oldest(self):
         try:remaining=parse_currency(self.vars["amount"].get())-sum(x["amount_cents"] for x in self.non_job)
         except ValueError:return
-        self.allocations.clear()
+        technician_id=self.technicians.get(self.vars["technician"].get())
+        if not technician_id:return
+        self.allocations={item["earning_id"]:item["amount_cents"] for item in
+                          self.service.build_fifo_allocations(technician_id,max(0,remaining))}
         for iid in self.tree.get_children():
-            due=parse_currency(self.tree.set(iid,"due"));cents=max(0,min(due,remaining));self.allocations[int(iid)]=cents;self.tree.set(iid,"allocate",format_currency(cents));remaining-=cents
+            self.tree.set(iid,"allocate",format_currency(self.allocations.get(int(iid),0)))
         self._totals()
 
     def clear_selected(self):

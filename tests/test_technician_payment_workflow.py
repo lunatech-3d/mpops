@@ -88,5 +88,27 @@ class TechnicianPaymentWorkflowTests(CompensationServiceTests):
         output=self.payments.export_payment_detail_csv(pid)
         self.assertIn("External Job ID",output);self.assertNotIn("SSN",output);self.assertNotIn("bank",output.lower())
 
+    def test_fifo_uses_remaining_balances_and_partially_allocates_last(self):
+        ids=[]
+        for cents in (10000,15000,20000):
+            eid=self.service.create_manual_earning_adjustment(self.session,self.tech,cents,"FIFO")
+            self.service.approve_technician_earning(self.session,eid);ids.append(eid)
+        self.payments.create_manual_payment(self.session,technician_id=self.tech,
+            payment_date="2026-08-01",amount_cents=2500,payment_method="ACH",status="Paid",
+            reference="FIFO-PARTIAL",allocations=[{"earning_id":ids[0],"amount_cents":2500}])
+        proposed=self.payments.build_fifo_allocations(self.tech,30000)
+        self.assertEqual(proposed,[{"earning_id":ids[0],"amount_cents":7500},
+            {"earning_id":ids[1],"amount_cents":15000},
+            {"earning_id":ids[2],"amount_cents":7500}])
+        self.assertEqual(sum(x["amount_cents"] for x in proposed),30000)
+        self.assertEqual(self.payments.list_outstanding_earnings(self.tech)[0]["balance_due_cents"],7500)
+
+    def test_fifo_is_read_only_and_rejects_invalid_amount(self):
+        eid=self.approved();before=self.payments.list_outstanding_earnings(self.tech)
+        self.assertEqual(self.payments.build_fifo_allocations(self.tech,9999),
+                         [{"earning_id":eid,"amount_cents":71}])
+        self.assertEqual(self.payments.list_outstanding_earnings(self.tech),before)
+        with self.assertRaises(ValueError):self.payments.build_fifo_allocations(self.tech,-1)
+
 
 if __name__ == "__main__": unittest.main()

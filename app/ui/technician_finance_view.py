@@ -82,6 +82,7 @@ class TechnicianFinanceController:
     def summary(self): return self.service.get_summary(self.technician_id)
     def jobs(self, view="All"): return self.service.list_jobs(self.technician_id, view)
     def payments(self): return self.service.list_payments(self.technician_id)
+    def activity(self): return self.service.list_account_activity(self.technician_id)
 
 
 class TechnicianFinanceView(ttk.Frame):
@@ -92,23 +93,35 @@ class TechnicianFinanceView(ttk.Frame):
         super().__init__(parent, padding=PADDING)
         self.auth, self.job_opener = auth, job_opener or open_job_details
         self.controller = TechnicianFinanceController(TechnicianFinanceService(auth), technician_id)
-        self.job_rows = {}; self.payment_rows = {}
+        self.job_rows = {}; self.payment_rows = {}; self.activity_rows = {}
         self.job_sort_column = None; self.job_sort_descending = False
         summary = ttk.Frame(self)
         if mode != "jobs": summary.pack(fill="x", pady=(0, 8))
         self.summary_vars = {}
         for column, (key, label) in enumerate((("upcoming_expected_cents", "Upcoming Expected"),
-                ("completed_earnings_cents", "Completed Earnings"), ("balance_due_cents", "Approved Balance Due"),
+                ("completed_earnings_cents", "Completed Earnings"), ("balance_due_cents", "Current Balance Due"),
                 ("total_paid_cents", "Total Paid"), ("pending_approval_cents", "Pending Approval"),
-                ("pending_direct_cents", "Pending Direct Items"))):
+                ("pending_direct_cents", "Pending Direct / Expense Items"))):
             box = ttk.LabelFrame(summary, text=label, padding=7); box.grid(row=0, column=column, sticky="nsew", padx=3)
             variable = tk.StringVar(value="—"); self.summary_vars[key] = variable
             ttk.Label(box, textvariable=variable, style="Header.TLabel").pack()
             summary.columnconfigure(column, weight=1)
         notebook = ttk.Notebook(self); notebook.pack(fill="both", expand=True)
+        ledger_tab = ttk.Frame(notebook, padding=5)
         jobs_tab = ttk.Frame(notebook, padding=5); payments_tab = ttk.Frame(notebook, padding=5)
+        if mode in {"all", "finances"}: notebook.add(ledger_tab, text="Account Ledger")
         if mode in {"all", "jobs"}: notebook.add(jobs_tab, text="Assigned Jobs")
         if mode in {"all", "finances"}: notebook.add(payments_tab, text="Complete Payment History")
+        self.ledger_tree = ttk.Treeview(ledger_tab,
+            columns=("date","type","description","job","owed","payment","balance","reference"),
+            show="headings")
+        for column, heading, width in zip(self.ledger_tree["columns"],
+                ("Date","Type","Description","Job","Owed","Payment","Balance","Reference"),
+                (105,180,300,110,105,105,105,150)):
+            self.ledger_tree.heading(column,text=heading)
+            self.ledger_tree.column(column,width=width,anchor="e" if column in {"owed","payment","balance"} else "w")
+        self.ledger_tree.pack(fill="both",expand=True)
+        self.ledger_tree.bind("<Double-1>",self._open_ledger_job)
         filters = ttk.Frame(jobs_tab); filters.pack(fill="x")
         ttk.Label(filters, text="Search:").pack(side="left")
         self.job_search = tk.StringVar()
@@ -180,6 +193,13 @@ class TechnicianFinanceView(ttk.Frame):
             return
         self.refresh()
 
+    def _open_ledger_job(self, event):
+        iid=self.ledger_tree.identify_row(event.y);item=self.activity_rows.get(iid)
+        if not item or not item.get("job_id"):return
+        try:self.job_opener(self,self.auth,int(item["job_id"]),wait=True)
+        except Exception as exc:messagebox.showerror("Job Details",str(exc),parent=self)
+        self.refresh()
+
     def sort_jobs_by(self, column):
         """Select a job column or toggle the active column's direction."""
         if self.job_sort_column == column:
@@ -210,12 +230,23 @@ class TechnicianFinanceView(ttk.Frame):
     def refresh(self):
         try:
             summary = self.controller.summary(); jobs = self.controller.jobs(self.job_view.get())
-            payments = self.controller.payments()
+            payments = self.controller.payments(); activity = self.controller.activity()
         except Exception as exc:
             messagebox.showerror("Technician Finances", str(exc), parent=self); return
         for key, variable in self.summary_vars.items():
             value = summary.get(key, 0)
             variable.set(format_cents(value) if key.endswith("_cents") else str(value))
+        self.ledger_tree.delete(*self.ledger_tree.get_children());self.activity_rows.clear()
+        for item in activity:
+            iid=f"activity-{item['source_record_type']}-{item['source_record_id']}"
+            self.activity_rows[iid]=item
+            reference=item.get("payment_reference") or item.get("status") or ""
+            self.ledger_tree.insert("","end",iid=iid,values=(
+                format_display_date(item.get("activity_date")),item.get("activity_type") or "",
+                item.get("description") or "",item.get("external_job_id") or "",
+                format_cents(item["amount_owed_cents"]) if item["amount_owed_cents"] else "",
+                format_cents(item["payment_cents"]) if item["payment_cents"] else "",
+                format_cents(item["running_balance_cents"]),reference))
         jobs = search_technician_jobs(jobs, self.job_search.get())
         selected = self.jobs_tree.selection()
         self.jobs_tree.delete(*self.jobs_tree.get_children()); self.job_rows.clear()
