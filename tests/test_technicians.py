@@ -212,6 +212,31 @@ class TechnicianServiceTests(unittest.TestCase):
             self.service.update_address(self.admin, tech_id, first, {"address_id": 3})
         self.assertIn("technician_address_updated", self.actions())
 
+    def test_current_address_prefers_primary_then_latest_active_without_writes(self):
+        tech_id = self.create_tech()
+        older = self.service.add_address(
+            self.admin, tech_id, self.address(address_1="Older", is_primary=False,
+                                              effective_date="2025-01-01"))
+        latest = self.service.add_address(
+            self.admin, tech_id, self.address(address_1="Latest", is_primary=False,
+                                              effective_date="2026-01-01"))
+        primary = self.service.add_address(
+            self.admin, tech_id, self.address(address_1="Primary", is_primary=True,
+                                              effective_date="2024-01-01"))
+        before = self.service.list_addresses(tech_id)
+        self.assertEqual(self.service.get_current_address(tech_id)["address_id"], primary)
+        self.service.update_address(self.admin, tech_id, primary, {"is_primary": False})
+        self.assertEqual(self.service.get_current_address(tech_id)["address_id"], latest)
+        self.assertEqual(self.service.get_current_address(tech_id)["address_1"], "Latest")
+        self.assertEqual(len(self.service.list_addresses(tech_id)), len(before))
+        self.assertIn(older, [row["address_id"] for row in self.service.list_addresses(tech_id)])
+
+    def test_current_address_empty_state_and_identifier_validation(self):
+        tech_id = self.create_tech()
+        self.assertIsNone(self.service.get_current_address(tech_id))
+        with self.assertRaises(LookupError):
+            self.service.get_current_address(999)
+
     def test_address_ownership_is_enforced(self):
         first_tech = self.create_tech()
         second_tech = self.create_tech("T002", "Grace", "Hopper")

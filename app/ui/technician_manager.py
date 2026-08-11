@@ -223,7 +223,12 @@ def show_deactivation_dialog(parent, name, technician):
 
 
 class TechnicianDetails:
-    COLUMNS = ("is_primary", "address_1", "address_2", "city", "state", "zip_code", "effective_date", "end_date")
+    TAB_ORDER = ("Jobs", "Compensation", "Finances", "Profile")
+    ADDRESS_DISPLAY_FIELDS = (
+        ("Address Line 1", "address_1"), ("Address Line 2", "address_2"),
+        ("City", "city"), ("State", "state"), ("ZIP Code", "zip_code"),
+        ("Effective Date", "effective_date"), ("End Date", "end_date"),
+    )
     def __init__(self, parent, controller, tech_id):
         self.parent, self.controller, self.tech_id, self.rows = parent, controller, tech_id, {}
         try: technician = controller.service.get_technician(tech_id)
@@ -241,12 +246,14 @@ class TechnicianDetails:
         ttk.Label(body, text=name, style="Header.TLabel").pack(anchor="w")
         ttk.Label(body, text=f"{technician['tech_code']}  •  {technician['status']}  •  {technician.get('email') or 'No email'}").pack(anchor="w", pady=(0, 10))
         notebook = ttk.Notebook(body); notebook.pack(fill="both", expand=True)
-        profile_tab = ttk.Frame(notebook, padding=6); addresses_tab = ttk.Frame(notebook, padding=6)
+        self.notebook = notebook
+        profile_tab = ttk.Frame(notebook, padding=6)
         compensation_tab = ttk.Frame(notebook); jobs_tab = ttk.Frame(notebook); finance_tab = ttk.Frame(notebook)
-        notebook.add(profile_tab, text="Profile")
-        notebook.add(addresses_tab, text="Addresses"); notebook.add(compensation_tab, text="Compensation")
         notebook.add(jobs_tab, text="Jobs")
+        notebook.add(compensation_tab, text="Compensation")
         notebook.add(finance_tab, text="Finances")
+        notebook.add(profile_tab, text="Profile")
+        notebook.select(jobs_tab)
         profile = ttk.Frame(profile_tab); profile.pack(fill="x", pady=(0, 10))
         sections = [
             ("Identity", (("Preferred Name", "preferred_name"),)),
@@ -278,74 +285,47 @@ class TechnicianDetails:
                 ttk.Label(section, text=f"{label}: {value}",
                           wraplength=285).pack(anchor="w")
         for column in range(3): profile.columnconfigure(column, weight=1)
-        ttk.Label(addresses_tab, text="Addresses", style="Header.TLabel").pack(anchor="w")
-        self.tree = ttk.Treeview(addresses_tab, columns=self.COLUMNS, show="headings", selectmode="browse")
-        headings = ("Primary", "Address 1", "Address 2", "City", "State", "ZIP", "Effective Date", "End Date")
-        for field, heading in zip(self.COLUMNS, headings): self.tree.heading(field, text=heading); self.tree.column(field, width=105)
-        self.tree.pack(fill="both", expand=True); self.tree.bind("<<TreeviewSelect>>", lambda _e: self.update_buttons())
-        bar = ttk.Frame(addresses_tab); bar.pack(fill="x", pady=(8, 0)); self.buttons = []
-        for label, command in (("Add Address", self.add), ("Edit Address", self.edit),
-                               ("Set as Primary", self.set_primary), ("Delete Address", self.delete)):
-            button=ttk.Button(bar,text=label,command=command); button.pack(side="left",padx=(0,6)); self.buttons.append(button)
-        ttk.Button(bar,text="Close",command=lambda: close_modal(self.window)).pack(side="right")
-        self.status=tk.StringVar(); ttk.Label(addresses_tab,textvariable=self.status,style="Status.TLabel").pack(anchor="w",pady=(6,0))
+        address_section = ttk.LabelFrame(profile_tab, text="Current Address", padding=8)
+        address_section.pack(fill="x", pady=(4, 10))
+        self.address_text = tk.StringVar()
+        ttk.Label(address_section, textvariable=self.address_text, justify="left").pack(
+            side="left", anchor="nw")
+        self.address_button = ttk.Button(address_section, command=self.edit_address)
+        self.address_button.pack(side="right", anchor="ne", padx=(12, 0))
+        if not controller.can_modify:
+            self.address_button.configure(state="disabled")
+        ttk.Button(profile_tab,text="Close",command=lambda: close_modal(self.window)).pack(side="right")
         TechnicianCompensationView(compensation_tab,
             TechnicianCompensationController(RevenueRuleService(controller.service.auth), controller.session),
             tech_id).pack(fill="both", expand=True)
         TechnicianFinanceView(jobs_tab, controller.service.auth, tech_id, mode="jobs").pack(fill="both", expand=True)
         TechnicianFinanceView(finance_tab, controller.service.auth, tech_id, mode="finances").pack(fill="both", expand=True)
-        self.refresh(); self.window.protocol("WM_DELETE_WINDOW",lambda:close_modal(self.window)); prepare_modal_dialog(self.window,parent); self.window.wait_window()
-    def refresh(self, select_id=None):
-        try: rows=self.controller.service.list_addresses(self.tech_id)
+        self.refresh_address(); self.window.protocol("WM_DELETE_WINDOW",lambda:close_modal(self.window)); prepare_modal_dialog(self.window,parent); self.window.wait_window()
+    def refresh_address(self):
+        try: self.current_address=self.controller.service.get_current_address(self.tech_id)
         except EXPECTED_ERRORS as exc: messagebox.showerror("Addresses",str(exc),parent=self.window); return
-        self.tree.delete(*self.tree.get_children()); self.rows.clear()
-        for row in rows:
-            iid=f"address-{row['address_id']}"; self.rows[iid]=row
-            values=[("Yes" if row.get(c) else "") if c == "is_primary"
-                    else format_display_date(row.get(c)) if c in {"effective_date", "end_date"}
-                    else row.get(c) or ""
-                    for c in self.COLUMNS]
-            self.tree.insert("","end",iid=iid,values=values)
-        self.status.set(f"{len(rows)} address(es)." if rows else "No addresses found.")
-        iid=f"address-{select_id}" if select_id else None
-        if iid and self.tree.exists(iid): self.tree.selection_set(iid)
-        self.update_buttons()
-    def selected(self,warn=True):
-        selected=self.tree.selection()
-        if not selected:
-            if warn: messagebox.showwarning("Addresses","Select an address first.",parent=self.window)
-            return None
-        return self.rows.get(selected[0])
-    def update_buttons(self):
-        row=self.selected(False); allowed=self.controller.can_modify
-        self.buttons[0].configure(state="normal" if allowed else "disabled")
-        self.buttons[1].configure(state="normal" if allowed and row else "disabled")
-        self.buttons[2].configure(state="normal" if allowed and row and not row.get("is_primary") else "disabled")
-        self.buttons[3].configure(state="normal" if allowed and row else "disabled")
-    def add(self):
-        data=show_address_form(self.window)
+        self.address_text.set(self.format_current_address(self.current_address))
+        self.address_button.configure(text="Edit Address" if self.current_address else "Add Address")
+    @classmethod
+    def format_current_address(cls, address):
+        if not address:
+            return "No address on file"
+        lines = []
+        for label, field in cls.ADDRESS_DISPLAY_FIELDS:
+            value = address.get(field)
+            if value:
+                if field in {"effective_date", "end_date"}: value = format_display_date(value)
+                lines.append(f"{label}: {value}")
+        return "\n".join(lines) or "No address on file"
+    def edit_address(self):
+        if not self.controller.can_modify:return
+        original=self.current_address
+        data=show_address_form(self.window,original)
         if data is None:return
-        try: address_id=self.controller.add_address(self.tech_id,data)
+        try:
+            if original:
+                self.controller.update_address(self.tech_id,int(original["address_id"]),original,data)
+            else:
+                self.controller.add_address(self.tech_id,data)
         except EXPECTED_ERRORS as exc: messagebox.showerror("Addresses",str(exc),parent=self.window);return
-        self.refresh(address_id)
-    def edit(self):
-        row=self.selected()
-        if not row:return
-        data=show_address_form(self.window,row)
-        if data is None:return
-        try:self.controller.update_address(self.tech_id,int(row["address_id"]),row,data)
-        except EXPECTED_ERRORS as exc:messagebox.showerror("Addresses",str(exc),parent=self.window);return
-        self.refresh(int(row["address_id"]))
-    def set_primary(self):
-        row=self.selected()
-        if not row:return
-        try:self.controller.service.set_primary_address(self.controller.session,self.tech_id,int(row["address_id"]))
-        except EXPECTED_ERRORS as exc:messagebox.showerror("Addresses",str(exc),parent=self.window);return
-        self.refresh(int(row["address_id"]))
-    def delete(self):
-        row=self.selected()
-        if not row:return
-        if not messagebox.askyesno("Delete address","Delete this address?\n\nThis action removes the address record from the technician.",parent=self.window):return
-        try:self.controller.delete_address(self.tech_id,int(row["address_id"]))
-        except EXPECTED_ERRORS as exc:messagebox.showerror("Addresses",str(exc),parent=self.window);return
-        self.refresh()
+        self.refresh_address()

@@ -270,6 +270,27 @@ class TechnicianService:
                                       "ORDER BY is_primary DESC,address_id", (tech_id,))
             return [dict(row) for row in rows]
 
+    def get_current_address(self, tech_id: int) -> dict[str, Any] | None:
+        """Return the primary address, or the most recently active address.
+
+        Legacy data does not always designate a primary address.  In that case an
+        address without an end date is preferred, followed by the latest effective
+        date and modification/creation timestamp.  The identifier is used only as
+        the final deterministic tie breaker, never as the current-address rule.
+        """
+        self._positive_id(tech_id, "tech_id")
+        with self.auth.connection() as connection:
+            self._require_technician(connection, tech_id)
+            row = connection.execute(
+                "SELECT * FROM TechAddresses WHERE tech_id=? "
+                "ORDER BY is_primary DESC, "
+                "CASE WHEN end_date IS NULL OR end_date='' THEN 0 ELSE 1 END, "
+                "coalesce(effective_date,'') DESC, "
+                "coalesce(updated_at,created_at,'') DESC, address_id DESC LIMIT 1",
+                (tech_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def add_address(self, session: Session, tech_id: int, address_data: dict[str, Any]) -> int:
         """Add and audit an address, maintaining at most one primary address."""
         self._require_admin(session)

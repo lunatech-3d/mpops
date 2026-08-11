@@ -6,7 +6,8 @@ from unittest.mock import MagicMock
 from app.security.auth import Session
 from app.ui.address_form import address_form_data
 from app.ui.technician_form import TECHNICIAN_FIELDS, changed_fields, technician_form_data
-from app.ui.technician_manager import TechnicianController, TechnicianManager, display_name
+from app.ui.technician_manager import (TechnicianController, TechnicianDetails,
+                                       TechnicianManager, display_name)
 
 
 class TechnicianUiHelpersTests(unittest.TestCase):
@@ -62,6 +63,23 @@ class TechnicianUiHelpersTests(unittest.TestCase):
     def test_roles_control_mutation_permission(self):
         for role, expected in (("admin", True), ("operator", False), ("viewer", False)):
             self.assertEqual(TechnicianController(MagicMock(), Session(1, "u", role)).can_modify, expected)
+
+    def test_details_tabs_put_jobs_first_profile_last_and_omit_addresses(self):
+        self.assertEqual(TechnicianDetails.TAB_ORDER[0], "Jobs")
+        self.assertEqual(TechnicianDetails.TAB_ORDER[-1], "Profile")
+        self.assertNotIn("Addresses", TechnicianDetails.TAB_ORDER)
+
+    def test_profile_formats_current_address_and_empty_state(self):
+        self.assertEqual(TechnicianDetails.format_current_address(None),
+                         "No address on file")
+        text = TechnicianDetails.format_current_address({
+            "address_1": "12 Main", "address_2": "Suite 3", "city": "Austin",
+            "state": "TX", "zip_code": "78701", "effective_date": "2026-08-01",
+        })
+        self.assertIn("Address Line 1: 12 Main", text)
+        self.assertIn("Address Line 2: Suite 3", text)
+        self.assertIn("City: Austin", text)
+        self.assertIn("Effective Date: 08/01/2026", text)
 
     def test_empty_load_and_service_routing(self):
         service = MagicMock(); service.list_technicians.return_value = []
