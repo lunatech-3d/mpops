@@ -1,9 +1,11 @@
 """Basic Job editor for the Matterport Ops walking skeleton."""
 
+from datetime import datetime
+
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from app.date_utils import display_datetime_to_iso, format_display_datetime
+from app.date_utils import display_date_to_iso
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog
 from app.ui.scrollable_frame import ScrollableFrame
 from app.ui.styles import PADDING
@@ -21,6 +23,7 @@ STATUS_VALUES = (
     "Requested", "Scheduling", "Scheduled", "Assigned", "In Progress",
     "Completed", "Cancelled", "Archived", "On Hold",
 )
+MERIDIEM_VALUES = ("AM", "PM")
 
 JOB_FORM_MIN_WIDTH = 720
 JOB_FORM_MAX_WIDTH = 900
@@ -63,6 +66,37 @@ def job_form_data(values: dict) -> dict:
     return result
 
 
+def scheduled_start_parts(value) -> tuple[str, str, str, str]:
+    """Return date, hour, minute, and meridiem values for the schedule controls."""
+    if value in (None, ""):
+        return "", "12", "00", "AM"
+    normalized = str(value).strip().replace("Z", "+00:00")
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        # Preserve an unexpected legacy value where the user can correct it.
+        return str(value), "12", "00", "AM"
+    hour = parsed.strftime("%I").lstrip("0") or "12"
+    return parsed.strftime("%m/%d/%Y"), hour, parsed.strftime("%M"), parsed.strftime("%p")
+
+
+def scheduled_start_to_iso(date_value, hour_value, minute_value, meridiem_value) -> str | None:
+    """Combine the user-friendly schedule controls into a stored ISO timestamp."""
+    if not str(date_value or "").strip():
+        return None
+    iso_date = display_date_to_iso(date_value)
+    try:
+        hour = int(hour_value)
+        minute = int(minute_value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Scheduled start hour and minute must be selected.") from exc
+    meridiem = str(meridiem_value or "").upper()
+    if hour not in range(1, 13) or minute not in range(60) or meridiem not in MERIDIEM_VALUES:
+        raise ValueError("Scheduled start time is invalid.")
+    hour_24 = hour % 12 + (12 if meridiem == "PM" else 0)
+    return f"{iso_date}T{hour_24:02d}:{minute:02d}"
+
+
 def changed_fields(original: dict, submitted: dict) -> dict:
     """Return only editable values that differ from the loaded Job."""
     changes = {}
@@ -98,11 +132,18 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *
     content.columnconfigure(0, weight=1)
 
     variables = {
-        name: tk.StringVar(value=(format_display_datetime((job or {}).get(name))
-                                  if name == "scheduled_start_at"
-                                  else "" if (job or {}).get(name) is None else str((job or {}).get(name))))
-        for name in JOB_FORM_FIELDS if name not in {"internal_notes", "market_id"}
+        name: tk.StringVar(value=("" if (job or {}).get(name) is None
+                                  else str((job or {}).get(name))))
+        for name in JOB_FORM_FIELDS
+        if name not in {"internal_notes", "market_id", "scheduled_start_at"}
     }
+    schedule_date, schedule_hour, schedule_minute, schedule_meridiem = scheduled_start_parts(
+        (job or {}).get("scheduled_start_at")
+    )
+    schedule_date_var = tk.StringVar(value=schedule_date)
+    schedule_hour_var = tk.StringVar(value=schedule_hour)
+    schedule_minute_var = tk.StringVar(value=schedule_minute)
+    schedule_meridiem_var = tk.StringVar(value=schedule_meridiem)
     market_id_to_display = {
         market["market_id"]: f"{market['state']} - {market['market_name']}"
         for market in markets
@@ -166,8 +207,22 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *
     schedule = section("Schedule and Assignment", 1)
     schedule.columnconfigure(1, weight=1)
     schedule.columnconfigure(3, weight=1)
-    labeled_entry(
-        schedule, 0, "Scheduled Start", variables["scheduled_start_at"],
+    ttk.Label(schedule, text="Scheduled Start").grid(
+        row=0, column=0, sticky="w", padx=(0, 6), pady=3
+    )
+    schedule_controls = ttk.Frame(schedule)
+    schedule_controls.grid(row=0, column=1, sticky="w", padx=(0, 12), pady=3)
+    ttk.Entry(schedule_controls, textvariable=schedule_date_var, width=12).pack(side="left")
+    ttk.Label(schedule_controls, text="  at  ").pack(side="left")
+    ttk.Spinbox(schedule_controls, textvariable=schedule_hour_var, from_=1, to=12,
+                wrap=True, width=3).pack(side="left")
+    ttk.Label(schedule_controls, text=":").pack(side="left")
+    ttk.Spinbox(schedule_controls, textvariable=schedule_minute_var, from_=0, to=59,
+                wrap=True, width=3, format="%02.0f").pack(side="left")
+    ttk.Combobox(schedule_controls, textvariable=schedule_meridiem_var,
+                 values=MERIDIEM_VALUES, state="readonly", width=4).pack(side="left", padx=(4, 0))
+    ttk.Label(schedule, text="Date: MM/DD/YYYY or MM-DD-YYYY").grid(
+        row=1, column=1, sticky="w", padx=(0, 12), pady=(0, 3)
     )
     ttk.Label(schedule, text="Technician").grid(
         row=0, column=2, sticky="w", padx=(0, 6), pady=3
@@ -256,7 +311,10 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *
         )
         values["internal_notes"] = notes.get("1.0", "end-1c")
         try:
-            values["scheduled_start_at"] = display_datetime_to_iso(values["scheduled_start_at"]) or ""
+            values["scheduled_start_at"] = scheduled_start_to_iso(
+                schedule_date_var.get(), schedule_hour_var.get(),
+                schedule_minute_var.get(), schedule_meridiem_var.get(),
+            ) or ""
             result = job_form_data(values)
         except ValueError as exc:
             messagebox.showerror("Invalid Job", str(exc), parent=dialog)

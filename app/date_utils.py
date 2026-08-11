@@ -45,12 +45,12 @@ def display_date_to_iso(value: Any) -> str | None:
     text = str(value or "").strip()
     if not text:
         return None
-    for pattern in ("%m/%d/%Y", "%Y-%m-%d"):
+    for pattern in ("%m/%d/%Y", "%m-%d-%Y", "%Y-%m-%d"):
         try:
             return datetime.strptime(text, pattern).date().isoformat()
         except ValueError:
             pass
-    raise ValueError("Date must use MM/DD/YYYY format.")
+    raise ValueError("Date must use MM/DD/YYYY or MM-DD-YYYY format.")
 
 
 def display_datetime_to_iso(value: Any) -> str | None:
