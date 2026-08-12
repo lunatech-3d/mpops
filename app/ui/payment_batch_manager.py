@@ -143,7 +143,7 @@ class PaymentBatchDetail(tk.Toplevel):
         super().__init__(parent); self.service, self.session = service, session
         self.batch_id, self.on_changed = batch_id, on_changed
         self.can_modify = session.role in {"admin", "operator"}; self.batch: dict[str, Any] = {}
-        self.title("Matterport Payment Batch"); self.geometry("1120x780"); self.minsize(860, 650)
+        self.title("Matterport Payment Batch"); self.geometry("1180x760"); self.minsize(1000, 650)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.vars = {field: tk.StringVar() for field in FIELDS if field != "notes"}
         self.status_var = tk.StringVar(value="Draft"); self.total_vars: dict[str, tk.StringVar] = {}
@@ -151,7 +151,7 @@ class PaymentBatchDetail(tk.Toplevel):
         self.compensation_preview: dict[str, Any] | None = None
         self.technician_breakdowns: dict[str, dict[str, Any]] = {}
         self.history_rows: list[dict[str, Any]] = []
-        self.item_sort_column, self.item_sort_descending = "technician", False
+        self.item_sort_column, self.item_sort_descending = "document_date", False
         # Keep workflow actions outside the scrolling form so they remain
         # reachable as the window shrinks or more detail sections are added.
         outer = ttk.Frame(self)
@@ -163,41 +163,60 @@ class PaymentBatchDetail(tk.Toplevel):
         content = scrollable.content
         content.configure(padding=PADDING)
         self.scrollable_content = scrollable
-        ttk.Label(content, text="Matterport Payment Batch", style="Header.TLabel").pack(anchor="w", pady=(0, 8))
-        header = ttk.LabelFrame(content, text="Batch", padding=8); header.pack(fill="x")
+        ttk.Label(content, text="Matterport Payment Batch", style="Header.TLabel").pack(anchor="w", pady=(0, 4))
+        header = ttk.LabelFrame(content, text="Payment Summary", padding=6); header.pack(fill="x")
         labels = (("Payment Date", "payment_date"), ("Payment Amount", "payment_amount_cents"),
                   ("Payment Method", "payment_method"), ("Payer", "payer_name"),
-                  ("Source System", "source_system"), ("Status", "status"),
-                  ("Source Email Subject", "source_email_subject"),
-                  ("Source Email Received", "source_email_received_at"))
+                  ("Status", "status"))
         self.entries = {}
         for pos, (label, field) in enumerate(labels):
-            row, pair = divmod(pos, 4); col = pair * 2
-            ttk.Label(header, text=label + ":").grid(row=row, column=col, sticky="w", padx=(0, 5), pady=4)
+            row, pair = divmod(pos, 5); col = pair * 2
+            ttk.Label(header, text=label + ":").grid(row=row, column=col, sticky="w", padx=(0, 4), pady=2)
             if field == "status": widget = ttk.Label(header, textvariable=self.status_var, style="Section.TLabel")
             else:
                 widget = ttk.Entry(header, textvariable=self.vars[field], width=27); self.entries[field] = widget
-            widget.grid(row=row, column=col + 1, sticky="ew", padx=(0, 10), pady=4)
-        ttk.Label(header, text="Notes:").grid(row=2, column=0, sticky="nw", pady=4)
-        self.notes = tk.Text(header, height=3, wrap="word"); self.notes.grid(row=2, column=1, columnspan=7, sticky="ew", pady=4)
-        for col in (1, 3, 5, 7): header.columnconfigure(col, weight=1)
+            widget.grid(row=row, column=col + 1, sticky="ew", padx=(0, 8), pady=2)
+        for col in (1, 3, 5, 7, 9): header.columnconfigure(col, weight=1)
+        self.source_details_button = ttk.Button(content, text="Payment Source Details ▸",
+                                                command=self.toggle_source_details)
+        self.source_details_button.pack(anchor="w", pady=(4, 0))
+        self.source_details = ttk.LabelFrame(content, text="Payment Source Details", padding=6)
+        source_fields = (("Source System", "source_system"),
+                         ("Email Subject", "source_email_subject"),
+                         ("Email Received", "source_email_received_at"))
+        for index, (label, field) in enumerate(source_fields):
+            ttk.Label(self.source_details, text=label + ":").grid(row=0, column=index * 2,
+                sticky="w", padx=(0, 4), pady=2)
+            entry = ttk.Entry(self.source_details, textvariable=self.vars[field], width=28)
+            entry.grid(row=0, column=index * 2 + 1, sticky="ew", padx=(0, 8), pady=2)
+            self.entries[field] = entry
+            self.source_details.columnconfigure(index * 2 + 1, weight=1)
+        ttk.Label(self.source_details, text="Notes:").grid(row=1, column=0, sticky="nw", pady=2)
+        self.notes = tk.Text(self.source_details, height=2, wrap="word")
+        self.notes.grid(row=1, column=1, columnspan=5, sticky="ew", pady=2)
         items_frame = ttk.LabelFrame(content, text="Payment Items", padding=6); items_frame.pack(fill="both", expand=True, pady=8)
-        columns = ("document_number", "document_date", "document_type", "account_name",
+        columns = ("document_number", "document_date", "account_name",
                    "customer", "amount_received_cents", "signed_effect_cents", "allocation_status")
-        headings = ("Document Number", "Document Date", "Document Type", "Account",
+        headings = ("Document Number", "Document Date", "Account",
                     "Job / Invoice", "Gross Amount", "Net Effect", "Allocation Status")
         self.items = ttk.Treeview(items_frame, columns=columns, show="headings", selectmode="browse")
         self.item_headings = dict(zip(columns, headings))
         for key, heading in zip(columns, headings):
             self.items.heading(key, text=heading, command=lambda column=key: self.sort_items(column))
-            self.items.column(key, width=145 if key in {"document_number", "customer"} else 120,
+            widths = {"document_number": 135, "document_date": 95, "account_name": 125,
+                      "customer": 310, "amount_received_cents": 100,
+                      "signed_effect_cents": 95, "allocation_status": 115}
+            self.items.column(key, width=widths[key], minwidth=75,
                               anchor="e" if key in {"amount_received_cents", "signed_effect_cents"} else "w")
+        self.items.tag_configure("adjustment", foreground="#8a4b08")
         ybar = ttk.Scrollbar(items_frame, orient="vertical", command=self.items.yview); xbar = ttk.Scrollbar(items_frame, orient="horizontal", command=self.items.xview)
         self.items.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.items.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
         items_frame.rowconfigure(0, weight=1); items_frame.columnconfigure(0, weight=1)
-        distribution = ttk.LabelFrame(content, text="Payment Distribution Summary", padding=8)
-        distribution.pack(fill="x", pady=(0, 8))
+        summaries = ttk.Frame(content); summaries.pack(fill="x", pady=(0, 6))
+        distribution = ttk.LabelFrame(summaries, text="Distribution", padding=6)
+        distribution.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
+        summaries.columnconfigure((0, 1), weight=1)
         self.distribution_unavailable_var = tk.StringVar()
         ttk.Label(distribution, textvariable=self.distribution_unavailable_var,
                   style="Section.TLabel").grid(row=0, column=0, columnspan=6, sticky="w")
@@ -211,15 +230,15 @@ class PaymentBatchDetail(tk.Toplevel):
             ("Unallocated / Exceptions", "unallocated", None),
         )
         for index, (label, key, style) in enumerate(distribution_specs):
-            row, pair = divmod(index, 3); column = pair * 2
+            row, pair = divmod(index, 2); column = pair * 2
             ttk.Label(distribution, text=label + ":").grid(
                 row=row + 1, column=column, sticky="e", padx=(0, 5), pady=2)
             ttk.Label(distribution, textvariable=self.distribution_vars[key],
                       style=style or "TLabel").grid(
                 row=row + 1, column=column + 1, sticky="w", padx=(0, 18), pady=2)
         self.distribution_status_var = tk.StringVar()
-        ttk.Label(distribution, textvariable=self.distribution_status_var).grid(
-            row=3, column=0, columnspan=6, sticky="w", pady=(4, 0))
+        ttk.Label(distribution, textvariable=self.distribution_status_var, wraplength=500).grid(
+            row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
 
         compensation = ttk.LabelFrame(content, text="Technician Transfers", padding=6)
         compensation.pack(fill="x", pady=(0, 8))
@@ -243,13 +262,17 @@ class PaymentBatchDetail(tk.Toplevel):
         transfer_ybar.grid(row=0, column=1, sticky="ns")
         transfer_table.columnconfigure(0, weight=1)
         self.technician_summary.bind("<Double-1>", lambda _event: self.view_technician_breakdown())
+        self.technician_summary.bind("<<TreeviewSelect>>", lambda _event: self._update_calculation_action())
         transfer_actions = ttk.Frame(compensation); transfer_actions.pack(fill="x", pady=(5, 0))
         self.allocation_totals_var = tk.StringVar(value="Total Technician Transfers: —")
         ttk.Label(compensation, textvariable=self.allocation_totals_var,
                   style="Section.TLabel").pack(in_=transfer_actions, side="left")
-        ttk.Button(transfer_actions, text="View Technician Breakdown",
-                   command=self.view_technician_breakdown).pack(side="right")
-        totals = ttk.LabelFrame(content, text="Reconciliation", padding=6); totals.pack(fill="x")
+        self.calculation_button = ttk.Button(transfer_actions,
+            text="View Selected Technician Calculation", command=self.view_technician_breakdown,
+            state="disabled")
+        self.calculation_button.pack(side="right")
+        totals = ttk.LabelFrame(summaries, text="Reconciliation", padding=6)
+        totals.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
         specs = (("Gross Invoices", "gross_invoice_total_cents"),
                  ("Positive Adjustments", "positive_adjustments_cents"),
                  ("Vendor Credits", "vendor_credits_cents"),
@@ -259,13 +282,13 @@ class PaymentBatchDetail(tk.Toplevel):
                  ("Difference", "difference_cents"), ("Matched", "matched_count"),
                  ("Exceptions", "exception_count"))
         for index, (label, key) in enumerate(specs):
-            row, col = divmod(index, 3); col *= 2; var = tk.StringVar(value="$0.00" if "cents" in key else "0"); self.total_vars[key] = var
+            row, col = divmod(index, 2); col *= 2; var = tk.StringVar(value="$0.00" if "cents" in key else "0"); self.total_vars[key] = var
             ttk.Label(totals, text=label + ":").grid(row=row, column=col, sticky="e", padx=(5, 2), pady=2)
             style = "Section.TLabel" if key == "difference_cents" else "TLabel"
             ttk.Label(totals, textvariable=var, style=style).grid(row=row, column=col + 1, sticky="w", padx=(0, 8))
         self.history_var = tk.StringVar()
-        history = ttk.LabelFrame(content, text="Financial History", padding=6)
-        history.pack(fill="x", pady=(0, 4))
+        history = ttk.Frame(content)
+        history.pack(fill="x", pady=(0, 2))
         ttk.Label(history, textvariable=self.history_var).pack(side="left", anchor="w")
         ttk.Button(history, text="View Financial History",
                    command=self.show_financial_history).pack(side="right")
@@ -283,12 +306,12 @@ class PaymentBatchDetail(tk.Toplevel):
                                          command=self.run_primary_action, style="Accent.TButton")
         self.more_button = ttk.Menubutton(action_buttons, text="More Actions")
         self.more_menu = tk.Menu(self.more_button, tearoff=False)
+        self.more_menu.add_command(label="Save Changes", command=self.save)
         self.more_menu.add_command(label="Import Tipalti Metadata", command=self.open_metadata_importer)
         self.more_menu.add_command(label="Refresh", command=self.refresh)
         self.more_menu.add_separator()
         self.more_menu.add_command(label="Delete Draft", command=self.delete)
         self.more_button.configure(menu=self.more_menu)
-        self.save_button.pack(in_=action_buttons, side="left", padx=(0, 6))
         self.more_button.pack(side="left", padx=(0, 6))
         ttk.Button(action_buttons, text="Close", command=self.close).pack(side="left", padx=(0, 6))
         self.primary_button.pack(side="left")
@@ -300,12 +323,22 @@ class PaymentBatchDetail(tk.Toplevel):
         if batch_id is None: self._load_new()
         else: self.refresh()
 
+    def toggle_source_details(self) -> None:
+        """Reveal infrequently used import metadata without consuming routine space."""
+        if self.source_details.winfo_manager():
+            self.source_details.pack_forget()
+            self.source_details_button.configure(text="Payment Source Details ▸")
+        else:
+            self.source_details.pack(fill="x", pady=(2, 0), after=self.source_details_button)
+            self.source_details_button.configure(text="Payment Source Details ▾")
+
     def _mark_dirty(self) -> None:
         if hasattr(self, "save_button"):
             permissions = status_permissions(self.status_var.get(), self.can_modify)
             editable = self.batch_id is None or permissions["can_save"]
-            self.save_button.configure(state="normal" if editable and
-                                       self._form_values() != self.snapshot else "disabled")
+            state = "normal" if editable and self._form_values() != self.snapshot else "disabled"
+            self.save_button.configure(state=state)
+            self.more_menu.entryconfigure("Save Changes", state=state)
 
     def _load_new(self) -> None:
         defaults = {"payment_date": format_display_date(date.today()), "payment_amount_cents": "0.00",
@@ -326,6 +359,7 @@ class PaymentBatchDetail(tk.Toplevel):
         changed = self._form_values() != self.snapshot
         self.save_button.configure(state="normal" if self.can_modify and
                                    (self.batch_id is None or (permissions["can_save"] and changed)) else "disabled")
+        self.more_menu.entryconfigure("Save Changes", state=str(self.save_button.cget("state")))
         self.more_menu.entryconfigure("Import Tipalti Metadata", state="normal" if
             self.batch_id and self.status_var.get() == "Draft" and self.can_modify else "disabled")
         self.more_menu.entryconfigure("Delete Draft", state="normal" if
@@ -447,10 +481,14 @@ class PaymentBatchDetail(tk.Toplevel):
                      if item.get("document_type") == "Invoice" else "—")
             effect = format_adjustment_cents(signed) if signed < 0 else format_cents(signed)
             target = item.get("customer") or (f"Job #{item['job_id']}" if item.get("job_id") else "Unassigned")
+            document_type = item.get("document_type") or "Invoice"
+            if document_type != "Invoice":
+                target = f"{document_type} — {target}"
             self.items.insert("", "end", iid=iid, values=(item.get("document_number") or "",
-                format_display_date(item.get("document_date")), item.get("document_type") or "Invoice",
-                item.get("account_name") or "Account allocation required",
-                target, gross, effect, item.get("allocation_status") or "Not Required"))
+                format_display_date(item.get("document_date")),
+                item.get("account_name") or "Account allocation required", target, gross, effect,
+                item.get("allocation_status") or "Not Required"),
+                tags=("adjustment",) if document_type != "Invoice" else ())
         if selected_id and self.items.exists(selected_id):
             self.items.selection_set(selected_id); self.items.see(selected_id)
 
@@ -517,41 +555,62 @@ class PaymentBatchDetail(tk.Toplevel):
                                                 "entries": earning["entries"] if earning else []}
         self.technician_summary.configure(
             height=max(1, min(6, len(self.technician_summary.get_children()))))
+        self._update_calculation_action()
+
+    def _update_calculation_action(self) -> None:
+        selected = self.technician_summary.selection()
+        detail = self.technician_breakdowns.get(selected[0], {}) if selected else {}
+        state = "normal" if detail.get("entries") else "disabled"
+        self.calculation_button.configure(state=state)
 
     def view_technician_breakdown(self) -> None:
-        """Show job-level allocation detail without widening the transfer table."""
+        """Show the selected technician's non-posting calculation preview."""
         selected = self.technician_summary.selection()
         if not selected:
-            messagebox.showinfo("Technician Breakdown",
-                                "Select a technician transfer first.", parent=self)
+            messagebox.showinfo("Technician Calculation",
+                                "Select a technician first.", parent=self)
             return
         detail = self.technician_breakdowns.get(selected[0], {})
         entries = detail.get("entries", [])
         if not entries:
-            messagebox.showinfo("Technician Breakdown",
-                                "Revenue distribution is not available for this technician.", parent=self)
+            preview = self.compensation_preview or {}
+            unmatched = sum(1 for exception in preview.get("exceptions", [])
+                            if exception.get("reason_code") in {"ITEM_NOT_MATCHED", "MISSING_JOB"})
+            reason = (f"Technician calculations are not available because {unmatched} job(s) "
+                      "still require matching." if unmatched else
+                      "No calculation breakdown is available for the selected technician.")
+            messagebox.showinfo("Technician Calculation", reason, parent=self)
             return
         name = detail["subtotal"]["technician"]
-        dialog = tk.Toplevel(self); dialog.title(f"Technician Breakdown — {name}")
-        dialog.geometry("1080x360"); dialog.minsize(850, 280)
+        dialog = tk.Toplevel(self); dialog.title(f"Technician Calculation — {name}")
+        dialog.geometry("1160x420"); dialog.minsize(900, 300)
         dialog.transient(self); dialog.grab_set()
         frame = ttk.Frame(dialog, padding=12); frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text=name, style="Header.TLabel").pack(anchor="w", pady=(0, 8))
-        columns = ("job", "gross", "rate", "technician", "east", "lunatech", "rule", "override")
+        ttk.Label(frame, text=name, style="Header.TLabel").pack(anchor="w")
+        ttk.Label(frame, text=f"Payment batch #{self.batch_id} · Non-posting calculation preview").pack(
+            anchor="w", pady=(1, 8))
+        columns = ("job", "date", "gross", "rule", "capture", "travel", "adjustments", "total", "exceptions")
         tree = ttk.Treeview(frame, columns=columns, show="headings", height=min(8, len(entries)))
-        for key, heading, width in (("job", "Job", 95), ("gross", "Gross", 90),
-                                    ("rate", "Rate", 75), ("technician", "Technician", 95),
-                                    ("east", "LunaTech-East", 105), ("lunatech", "LunaTech 3D", 100),
-                                    ("rule", "Rule Source", 210), ("override", "Override", 75)):
+        for key, heading, width in (("job", "Job / Invoice", 130), ("date", "Job Date", 95),
+                                    ("gross", "Gross Revenue", 105), ("rule", "Rule / Rate", 200),
+                                    ("capture", "Capture", 90), ("travel", "Travel", 85),
+                                    ("adjustments", "Adjustments", 90), ("total", "Proposed Total", 105),
+                                    ("exceptions", "Calculation Exceptions", 210)):
             tree.heading(key, text=heading); tree.column(key, width=width, anchor="w")
         for entry in entries:
-            source = entry.get("rule_source") or ""
-            tree.insert("", "end", values=(entry.get("external_job_id") or entry.get("job_id") or "",
-                format_cents(entry["gross_revenue_cents"]), entry.get("effective_rate_display") or "",
-                format_cents(entry["calculated_amount_cents"]),
-                format_cents(entry["lunatech_east_amount_cents"]),
-                format_cents(entry["lunatech_amount_cents"]), source,
-                "Yes" if "Override" in source else "No"))
+            amounts = {"capture": 0, "travel": 0, "adjustments": 0}
+            for component in entry.get("components", []):
+                name_key = component.get("component", "").casefold()
+                destination = "capture" if name_key in {"base", "overall"} else (
+                    "travel" if name_key == "travel" else "adjustments")
+                amounts[destination] += int(component.get("calculated_amount_cents", 0) or 0)
+            warnings = entry.get("component_reconciliation_warning") or "None"
+            rule = f"{entry.get('effective_rate_display') or '—'} · {entry.get('rule_source') or 'Rule'}"
+            tree.insert("", "end", values=(entry.get("external_job_id") or
+                entry.get("document_number") or entry.get("job_id") or "",
+                format_display_date(entry.get("job_date")), format_cents(entry["gross_revenue_cents"]),
+                rule, format_cents(amounts["capture"]), format_cents(amounts["travel"]),
+                format_cents(amounts["adjustments"]), format_cents(entry["calculated_amount_cents"]), warnings))
         xbar = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
         tree.configure(xscrollcommand=xbar.set); tree.pack(fill="both", expand=True); xbar.pack(fill="x")
         ttk.Button(frame, text="Close", command=dialog.destroy).pack(anchor="e", pady=(8, 0))

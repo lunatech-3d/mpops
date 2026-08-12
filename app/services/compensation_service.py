@@ -392,6 +392,8 @@ class CompensationService:
                     exceptions.append(self._exception(base, "EXISTING_CALCULATION_DIFFERS",
                         "Current company allocation differs from the resolved calculation.")); continue
                 entries.append({**base, "external_job_id": item["external_job_id"],
+                    "job_date": (item["completed_at"] or item["actual_start_at"] or
+                                 item["scheduled_start_at"]),
                     "technician_id": tech["tech_id"], "technician_name": " ".join(filter(None,
                     (tech["preferred_name"] or tech["first_name"], tech["last_name"]))),
                     "market_id": item["market_id"], "market_name": item["market_name"],
