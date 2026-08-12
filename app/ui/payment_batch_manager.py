@@ -23,6 +23,7 @@ from app.ui.styles import PADDING
 from app.ui.scrollable_frame import ScrollableFrame
 from app.ui.matterport_email_import_dialog import MatterportEmailImportDialog
 from app.ui.tipalti_import_dialog import TipaltiImportDialog
+from app.ui.text_context_menu import TextContextMenu
 from app.services.jobs_service import JobsService
 from app.services.market_service import MarketService
 from app.services.technician_service import TechnicianService
@@ -156,6 +157,9 @@ class PaymentBatchDetail(tk.Toplevel):
         self.technician_breakdowns: dict[str, dict[str, Any]] = {}
         self.history_rows: list[dict[str, Any]] = []
         self.item_sort_column, self.item_sort_descending = "document_date", False
+        self.text_context_menu = TextContextMenu(self)
+        self.context_payment_item_iid: str | None = None
+        self.context_document_number: str | None = None
         # Keep workflow actions outside the scrolling form so they remain
         # reachable as the window shrinks or more detail sections are added.
         outer = ttk.Frame(self)
@@ -204,6 +208,11 @@ class PaymentBatchDetail(tk.Toplevel):
         headings = ("Document Number", "Document Date", "Account",
                     "Job / Invoice", "Gross Amount", "Net Effect", "Allocation Status")
         self.items = ttk.Treeview(items_frame, columns=columns, show="headings", selectmode="browse")
+        self.payment_item_menu = tk.Menu(self, tearoff=False)
+        self.payment_item_menu.add_command(
+            label="Copy Document Number",
+            command=self.copy_selected_document_number,
+        )
         self.item_headings = dict(zip(columns, headings))
         for key, heading in zip(columns, headings):
             self.items.heading(key, text=heading, command=lambda column=key: self.sort_items(column))
@@ -216,6 +225,10 @@ class PaymentBatchDetail(tk.Toplevel):
         ybar = ttk.Scrollbar(items_frame, orient="vertical", command=self.items.yview); xbar = ttk.Scrollbar(items_frame, orient="horizontal", command=self.items.xview)
         self.items.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.items.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
+        self.items.bind("<Button-3>", self.show_payment_item_menu, add="+")
+        if self.tk.call("tk", "windowingsystem") == "aqua":
+            self.items.bind("<Button-2>", self.show_payment_item_menu, add="+")
+            self.items.bind("<Control-Button-1>", self.show_payment_item_menu, add="+")
         items_frame.rowconfigure(0, weight=1); items_frame.columnconfigure(0, weight=1)
         summaries = ttk.Frame(content); summaries.pack(fill="x", pady=(0, 6))
         distribution = ttk.LabelFrame(summaries, text="Distribution", padding=6)
@@ -350,6 +363,10 @@ class PaymentBatchDetail(tk.Toplevel):
         for var in self.vars.values():
             var.trace_add("write", lambda *_args: self._mark_dirty())
         self.notes.bind("<KeyRelease>", lambda _event: self._mark_dirty())
+        self.text_context_menu.bind(
+            *self.entries.values(),
+            self.notes,
+        )
         if batch_id is None: self._load_new()
         else: self.refresh()
 
@@ -501,6 +518,50 @@ class PaymentBatchDetail(tk.Toplevel):
                                      if column == self.item_sort_column else False)
         self.item_sort_column = column
         self._render_items()
+
+    def show_payment_item_menu(self, event: tk.Event) -> str:
+        """Open the item menu for the row beneath the secondary-click pointer."""
+        iid = self.items.identify_row(event.y)
+        column = self.items.identify_column(event.x)
+        region = self.items.identify_region(event.x, event.y)
+        self.context_payment_item_iid = None
+        self.context_document_number = None
+        self.payment_item_menu.entryconfigure("Copy Document Number", state="disabled")
+
+        if region != "cell" or not iid or not column or not self.items.exists(iid):
+            return "break"
+
+        item = next(
+            (row for row in self.item_rows
+             if f"item-{row['payment_item_id']}" == iid),
+            None,
+        )
+        if item is None:
+            return "break"
+        document_number = str(item.get("document_number") or "").strip()
+        if not document_number:
+            return "break"
+
+        self.items.selection_set(iid)
+        self.items.focus(iid)
+        self.context_payment_item_iid = iid
+        self.context_document_number = document_number
+        self.payment_item_menu.entryconfigure("Copy Document Number", state="normal")
+        try:
+            self.payment_item_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self.payment_item_menu.grab_release()
+        return "break"
+
+    def copy_selected_document_number(self) -> None:
+        """Copy the underlying document number captured by the item popup."""
+        document_number = self.context_document_number
+        if not document_number:
+            return
+        self.clipboard_clear()
+        self.clipboard_append(document_number)
+        self.update_idletasks()
+        self.next_step_var.set(f"Copied Document Number: {document_number}")
 
     def _render_items(self) -> None:
         selected = self.items.selection()
