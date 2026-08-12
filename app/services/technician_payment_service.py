@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import re
 from datetime import date
 from typing import Any
 
@@ -33,6 +35,7 @@ _PAYMENT_ITEM_STORAGE_TYPES = {
 }
 DIRECT_PAYMENT_STATUSES = ("Draft", "Approved", "Scheduled", "Paid")
 FINAL_PAYMENT_STATUSES = {"Paid"}
+_BASIC_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
 
 class TechnicianPaymentService:
@@ -156,6 +159,9 @@ class TechnicianPaymentService:
         if payment_method not in PAYMENT_METHODS: raise ValueError("Unsupported payment method")
         if status not in DIRECT_PAYMENT_STATUSES: raise ValueError("Unsupported payment status")
         reference=str(reference or "").strip() or None
+        if status == "Paid":
+            if not reference:
+                raise ValueError("PINACLE confirmation/reference is required when recording a paid payment")
         if historical:
             if status != "Paid": raise ValueError("Historical payments must be recorded as Paid")
             if not technician_confirmed: raise ValueError("Confirm the technician before recording a historical payment")
@@ -199,6 +205,9 @@ class TechnicianPaymentService:
                   WHERE pe.technician_earning_id=? AND p.payment_status='Paid'""",(eid,)).fetchone()[0]
                 if cents>earning["net_earning_cents"]-paid: raise ValueError(f"Allocation exceeds earning {eid} balance")
                 checked.append((earning,cents))
+            # TechnicianPaymentRuns is a legacy non-null parent retained for schema
+            # compatibility.  The payment plus its allocations is authoritative;
+            # users never create or manage this internal wrapper in the active flow.
             run_status={"Draft":"Draft","Approved":"Approved","Scheduled":"Submitted","Paid":"Paid"}[status]
             run_id=int(c.execute("""INSERT INTO TechnicianPaymentRuns
               (payment_run_date,payment_status,total_amount_cents,notes,created_at,created_by,run_type)
@@ -230,7 +239,9 @@ class TechnicianPaymentService:
               FROM TechnicianPayments p JOIN Techs t ON t.tech_id=p.tech_id WHERE p.technician_payment_id=?""",(payment_id,)).fetchone()
             if not row: raise LookupError("Technician payment not found")
             result=dict(row)
-            result["allocations"]=[dict(x) for x in c.execute("""SELECT pe.*,e.entry_type,e.reason,j.external_job_id,j.project_name_source
+            result["allocations"]=[dict(x) for x in c.execute("""SELECT pe.*,e.entry_type,e.reason,e.adjustment_amount_cents,
+              e.calculation_details_json,j.external_job_id,j.project_name_source,
+              substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10) service_date
               FROM TechnicianPaymentEarnings pe JOIN TechnicianJobEarnings e ON e.technician_earning_id=pe.technician_earning_id
               LEFT JOIN Jobs j ON j.job_id=e.job_id WHERE pe.technician_payment_id=? ORDER BY pe.technician_payment_earning_id""",(payment_id,))]
             result["non_job_items"]=[dict(x) for x in c.execute("SELECT * FROM TechnicianPaymentItems WHERE technician_payment_id=? ORDER BY technician_payment_item_id",(payment_id,))]
@@ -257,8 +268,101 @@ class TechnicianPaymentService:
                 earning=c.execute("SELECT net_earning_cents FROM TechnicianJobEarnings WHERE technician_earning_id=?",(link[0],)).fetchone()
                 if earning and remaining<earning[0]:c.execute("UPDATE TechnicianJobEarnings SET earning_status='Approved',paid_at=NULL WHERE technician_earning_id=?",(link[0],))
             c.execute("UPDATE TechnicianPaymentRuns SET payment_status='Cancelled',cancelled_at=?,cancelled_by=?,version=version+1 WHERE technician_payment_run_id=?",(now,session.user_id,payment["technician_payment_run_id"]))
+            c.execute("UPDATE TechnicianPaymentEmailDrafts SET draft_status='Outdated' WHERE technician_payment_id=? AND draft_status='Draft Generated'",(payment_id,))
             record_event(c,"technician_payment_reversed",actor_user_id=session.user_id,details={"payment_id":payment_id,"reason":reason,"timestamp":now})
             return self.get_payment_detail(payment_id,connection=c)
+
+    @staticmethod
+    def _email_components(allocation):
+        try:
+            details = json.loads(allocation.get("calculation_details_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            details = {}
+        amounts = {"Capture": 0, "Travel": 0, "Adjustment": 0, "Other": 0}
+        target = int(allocation["amount_applied_cents"])
+        earning_total = int((details.get("final_amounts_cents") or {}).get("technician") or target)
+        scale = target / earning_total if earning_total else 1
+        for component in details.get("technician_components", []):
+            name = str(component.get("component") or component.get("component_type") or "").casefold()
+            cents = round(int(component.get("calculated_amount_cents") or component.get("amount_cents") or 0) * scale)
+            if "capture" in name or "base" in name: amounts["Capture"] += cents
+            elif "travel" in name or "mile" in name: amounts["Travel"] += cents
+            else: amounts["Other"] += cents
+        amounts["Adjustment"] += round(int(allocation.get("adjustment_amount_cents") or 0) * scale)
+        known = sum(amounts.values())
+        amounts["Other"] += target - known
+        return amounts
+
+    def build_payment_email(self, payment_id: int):
+        """Build a deterministic plain-text draft from the authoritative allocations."""
+        self._id(payment_id, "technician_payment_id")
+        with self.auth.connection() as c:
+            payment = dict(c.execute("""SELECT p.*,t.first_name,t.last_name,t.preferred_name,t.email
+              FROM TechnicianPayments p JOIN Techs t ON t.tech_id=p.tech_id
+              WHERE p.technician_payment_id=?""", (payment_id,)).fetchone() or {})
+            if not payment: raise LookupError("Technician payment not found")
+            if payment["payment_status"] != "Paid" or payment.get("reversed_at"):
+                raise ValueError("A current email draft can only be generated for a paid, unreversed payment")
+            email = str(payment.get("email") or "").strip()
+            if not email:
+                raise ValueError("No email address is recorded for this technician.")
+            if not _BASIC_EMAIL.fullmatch(email):
+                raise ValueError("The technician email address is invalid. Open the Technician form to correct it.")
+        detail = self.get_payment_detail(payment_id)
+        lines=[]
+        for allocation in detail["allocations"]:
+            components=self._email_components(allocation)
+            lines.append({"job":allocation.get("external_job_id") or f"Earning #{allocation['technician_earning_id']}",
+                "date":allocation.get("service_date") or "—",
+                "project":allocation.get("project_name_source") or allocation.get("reason") or "—",
+                **components,"Total":int(allocation["amount_applied_cents"])})
+        for item in detail["non_job_items"]:
+            lines.append({"job":item["item_type"],"date":"—","project":item.get("description") or "—",
+                "Capture":0,"Travel":0,"Adjustment":0,"Other":int(item["amount_cents"]),
+                "Total":int(item["amount_cents"])})
+        if sum(line["Total"] for line in lines) != int(payment["payment_amount_cents"]):
+            raise ValueError("Payment allocations do not equal the recorded payment total")
+        active=[name for name in ("Capture","Travel","Adjustment","Other") if any(line[name] for line in lines)]
+        headers=["Job","Service Date","Project / Customer",*active,"Total"]
+        rows=[]
+        for line in lines:
+            row=[line["job"],line["date"],line["project"],
+                 *[f"${line[name]/100:,.2f}" for name in active],f"${line['Total']/100:,.2f}"]
+            rows.append(row)
+        widths=[max(len(headers[i]),*(len(row[i]) for row in rows)) for i in range(len(headers))]
+        table="  ".join(headers[i].ljust(widths[i]) for i in range(len(headers)))+"\n"
+        table+="  ".join("-"*width for width in widths)+"\n"
+        table+="\n".join("  ".join(value.ljust(widths[i]) for i,value in enumerate(row)) for row in rows)
+        paid=date.fromisoformat(str(payment["payment_date"])[:10])
+        total=f"${int(payment['payment_amount_cents'])/100:,.2f}"
+        first=payment.get("preferred_name") or payment["first_name"]
+        subject=f"LunaTech 3D payment details — {paid.strftime('%m/%d/%Y')}"
+        body=(f"Hi {first},\n\nA payment of {total} was issued to you on {paid.strftime('%m/%d/%Y')} "
+              f"by {payment.get('payment_method') or 'external payment'}.\n\nThis payment covers:\n\n{table}\n\n"
+              f"Payment total: {total}\nPayment reference: {payment.get('payment_reference') or '—'}\n\n"
+              "Please contact Hayley if you have any questions about this payment.\n\nThank you,\nLunaTech 3D")
+        return {"payment_id":payment_id,"recipient":email,"subject":subject,"body":body,"lines":lines}
+
+    def generate_payment_email_draft(self, session: Session, payment_id: int):
+        """Audit draft generation without sending or changing the payment."""
+        self._write(session)
+        draft=self.build_payment_email(payment_id); now=utc_now_iso()
+        with self.auth.connection() as c:
+            number=c.execute("SELECT COUNT(*)+1 FROM TechnicianPaymentEmailDrafts WHERE technician_payment_id=?",(payment_id,)).fetchone()[0]
+            c.execute("UPDATE TechnicianPaymentEmailDrafts SET draft_status='Outdated' WHERE technician_payment_id=? AND draft_status='Draft Generated'",(payment_id,))
+            draft_id=int(c.execute("""INSERT INTO TechnicianPaymentEmailDrafts
+              (technician_payment_id,recipient_email,generated_at,generated_by,generation_number,draft_status)
+              VALUES(?,?,?,?,?,'Draft Generated')""",(payment_id,draft["recipient"],now,session.user_id,number)).lastrowid)
+            record_event(c,"technician_payment_email_draft_generated",actor_user_id=session.user_id,
+                         details={"payment_id":payment_id,"draft_id":draft_id,"recipient":draft["recipient"],"generation_number":number})
+        return {**draft,"draft_id":draft_id,"generation_number":number,"generated_at":now}
+
+    def get_payment_email_status(self, payment_id: int):
+        self._id(payment_id,"technician_payment_id")
+        with self.auth.connection() as c:
+            row=c.execute("""SELECT * FROM TechnicianPaymentEmailDrafts WHERE technician_payment_id=?
+              ORDER BY technician_payment_email_draft_id DESC LIMIT 1""",(payment_id,)).fetchone()
+            return dict(row) if row else None
 
     def create_direct_payment(self, session: Session, *, technician_id: int,
                               payment_date: str, category: str, amount_cents: int,

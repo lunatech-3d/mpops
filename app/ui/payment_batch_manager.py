@@ -466,8 +466,8 @@ class PaymentBatchDetail(tk.Toplevel):
         reconciliation_errors = list(getattr(self, "reconciliation", {}).get("errors", []))
         if posted:
             action, label = "review", "Review Earnings"
-            guidance = ("The payment has been finalized and Pending technician earnings were created.\n"
-                        "Review the earnings before approval or payment.")
+            guidance = ("The payment has been finalized and Ready to Pay technician earnings were created.\n"
+                        "Review the authorized earnings before recording an external payment.")
         elif not items:
             action, label = "import", "Import Payment"
             guidance = "Import the Matterport payment details to begin."

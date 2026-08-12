@@ -5,7 +5,6 @@ from datetime import date, datetime
 from tkinter import messagebox, ttk
 
 from app.services.compensation_service import CompensationService
-from app.services.technician_payment_service import TechnicianPaymentService
 from app.ui.payment_helpers import format_cents
 from app.ui.styles import PADDING
 
@@ -22,16 +21,8 @@ class TechnicianEarningsController:
     def load(self, **filters):
         return self.service.list_earnings_for_review(**{**self.prefilter, **filters})
 
-    def approve(self, ids):
-        return self.service.approve_technician_earnings(self.session, ids)
-
     def void(self, earning_id, reason):
         return self.service.void_technician_earning(self.session, earning_id, reason)
-
-    def create_payment_run(self, ids):
-        batch_id = self.prefilter.get("payment_batch_id")
-        return TechnicianPaymentService(self.service.auth).create_payment_run(
-            self.session, ids, source_payment_batch_id=batch_id)
 
     def grouped_totals(self, rows):
         result = {}
@@ -50,8 +41,7 @@ class TechnicianEarningsManager(ttk.Frame):
         "technician_name", "external_job_id", "job_address", "job_date",
         "market_name", "document_number", "revenue_basis_cents",
         "calculated_amount_cents", "adjustment_amount_cents", "net_earning_cents",
-        "lunatech_east_amount_cents", "lunatech_amount_cents", "earning_status",
-        "technician_payment_id",
+        "earning_status", "technician_payment_id",
     )
     HEADINGS = {
         "technician_name": "Technician", "external_job_id": "Job",
@@ -59,8 +49,7 @@ class TechnicianEarningsManager(ttk.Frame):
         "document_number": "Document Number", "revenue_basis_cents": "Revenue Basis",
         "calculated_amount_cents": "Calculated", "adjustment_amount_cents": "Adjustment",
         "net_earning_cents": "Net Earning",
-        "lunatech_east_amount_cents": "LunaTech-East",
-        "lunatech_amount_cents": "LunaTech", "earning_status": "Status",
+        "earning_status": "Status",
         "technician_payment_id": "Payment",
     }
     COLUMN_WIDTHS = {
@@ -68,12 +57,11 @@ class TechnicianEarningsManager(ttk.Frame):
         "job_date": 90, "market_name": 90, "document_number": 155,
         "revenue_basis_cents": 105, "calculated_amount_cents": 95,
         "adjustment_amount_cents": 95, "net_earning_cents": 105,
-        "lunatech_east_amount_cents": 105, "lunatech_amount_cents": 95,
         "earning_status": 85, "technician_payment_id": 90,
     }
     CURRENCY_COLUMNS = {
         "revenue_basis_cents", "calculated_amount_cents", "adjustment_amount_cents",
-        "net_earning_cents", "lunatech_east_amount_cents", "lunatech_amount_cents",
+        "net_earning_cents",
     }
 
     def __init__(self, parent, auth, session, payment_batch_id=None, technician_id=None):
@@ -95,10 +83,10 @@ class TechnicianEarningsManager(ttk.Frame):
                 text=f"Earnings generated from Matterport Payment Batch #{payment_batch_id}",
             ).pack(anchor="w")
 
-        self.status = tk.StringVar(value="Pending")
+        self.status = tk.StringVar(value="Ready to Pay")
         status_box = ttk.Combobox(
             top, textvariable=self.status,
-            values=("All", "Pending", "Approved", "Paid", "Voided"),
+            values=("All", "Ready to Pay", "Paid", "Voided"),
             state="readonly", width=14,
         )
         status_box.pack(side="left", padx=12)
@@ -133,15 +121,12 @@ class TechnicianEarningsManager(ttk.Frame):
 
         bar = ttk.Frame(self)
         bar.pack(fill="x")
-        self.approve_button = ttk.Button(bar, text="Approve Selected", command=self.approve)
-        self.approve_button.pack(side="left")
-        self.payment_run_button = ttk.Button(
-            bar, text="Create Payment Run from Selected", command=self.create_payment_run)
-        self.payment_run_button.pack(side="left", padx=6)
+        self.payment_button = ttk.Button(
+            bar, text="Record Technician Payment", command=self.record_payment)
+        self.payment_button.pack(side="left")
         ttk.Button(bar, text="View Details", command=self.details).pack(side="left", padx=6)
         if not self.controller.can_modify:
-            self.approve_button.configure(state="disabled")
-            self.payment_run_button.configure(state="disabled")
+            self.payment_button.configure(state="disabled")
         self.refresh()
 
     @staticmethod
@@ -186,7 +171,8 @@ class TechnicianEarningsManager(ttk.Frame):
             available.add(earning_id)
             values = [
                 format_cents(row.get(column)) if column in self.CURRENCY_COLUMNS
-                else row.get(column) or ""
+                else ("Ready to Pay" if column == "earning_status" and row.get(column) == "Approved"
+                      else row.get(column) or "")
                 for column in self.COLUMNS
             ]
             self.tree.insert(
@@ -215,35 +201,30 @@ class TechnicianEarningsManager(ttk.Frame):
     def refresh(self, _event=None):
         selected_ids = self.tree.selection()
         self.rows = list(self.controller.load(
-            status=self.status.get(), unpaid_only=self.unpaid.get()))
+            status=("Approved" if self.status.get() == "Ready to Pay" else self.status.get()),
+            unpaid_only=self.unpaid.get()))
         self._sort_rows()
         self._render_rows(selected_ids)
 
-    def approve(self):
-        try:
-            self.controller.approve([int(earning_id) for earning_id in self.tree.selection()])
-            self.refresh()
-        except Exception as exc:
-            messagebox.showerror("Approval blocked", str(exc), parent=self)
-
-    def create_payment_run(self):
+    def record_payment(self):
         ids = [int(earning_id) for earning_id in self.tree.selection()]
         if not ids:
             messagebox.showinfo(
-                "Technician Payment Run", "Select approved earnings first.", parent=self)
+                "Record Technician Payment", "Select Ready to Pay earnings first.", parent=self)
             return
-        try:
-            run = self.controller.create_payment_run(ids)
-        except Exception as exc:
-            messagebox.showerror("Payment run blocked", str(exc), parent=self)
+        selected=[row for row in self.rows if row["technician_earning_id"] in ids]
+        if len({row["tech_id"] for row in selected}) != 1:
+            messagebox.showerror("Record Technician Payment","Select earnings for one technician only.",parent=self)
             return
-        self.refresh()
-        messagebox.showinfo(
-            "Technician Payment Run",
-            f"Draft payment run #{run['technician_payment_run_id']} was created from "
-            f"{len(ids)} earning(s).",
-            parent=self,
-        )
+        if any(row["earning_status"] != "Approved" or row.get("paid_at") for row in selected):
+            messagebox.showerror("Record Technician Payment","Only unpaid Ready to Pay earnings may be recorded.",parent=self)
+            return
+        from app.ui.technician_payment_form import TechnicianPaymentForm
+        dialog=tk.Toplevel(self);dialog.title("Record Technician Payment");dialog.geometry("1100x720")
+        form=TechnicianPaymentForm(dialog,self.controller.service.auth,self.controller.session,
+                                   technician_id=selected[0]["tech_id"],earning_ids=ids,
+                                   on_saved=lambda _payment:(self.refresh(),dialog.destroy()))
+        form.pack(fill="both",expand=True)
 
     def details(self):
         if not self.tree.selection():

@@ -456,7 +456,7 @@ class CompensationService:
 
     def generate_technician_earnings(self, session: Session, payment_batch_id: int,
                                      *, connection: sqlite3.Connection | None = None) -> dict[str, Any]:
-        """Post Pending earnings, optionally within a caller-owned transaction."""
+        """Post finalized earnings as internally Approved (shown as Ready to Pay)."""
         self._write(session); self._id(payment_batch_id, "payment_batch_id")
         context = nullcontext(connection) if connection is not None else self.auth.connection()
         with context as connection:
@@ -512,7 +512,7 @@ class CompensationService:
                       (tech_id,job_id,payment_batch_id,payment_item_id,entry_type,revenue_basis_cents,
                        compensation_rule_type,compensation_rule_value,calculated_amount_cents,
                        adjustment_amount_cents,net_earning_cents,earning_status,calculation_details_json,
-                       created_at,created_by) VALUES (?,?,?,?, 'Calculated',?,?,?,?,0,?,'Pending',?,?,?)""",
+                       created_at,created_by) VALUES (?,?,?,?, 'Calculated',?,?,?,?,0,?,'Approved',?,?,?)""",
                       (entry["technician_id"],entry["job_id"],payment_batch_id,entry["payment_item_id"],
                        entry["revenue_basis_cents"],entry["rule_type"],entry["rule_value"],
                        entry["calculated_amount_cents"],entry["calculated_amount_cents"],
@@ -525,7 +525,7 @@ class CompensationService:
                    lunatech_east_share_basis_points,lunatech_east_amount_cents,
                    lunatech_share_basis_points,lunatech_amount_cents,market_revenue_share_rule_id,
                    allocation_status,calculation_details_json,created_at,created_by)
-                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'Calculated',?,?,?)""",
+                  VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'Approved',?,?,?)""",
                   (entry["payment_item_id"],entry["job_id"],entry["market_id"],entry["revenue_basis_cents"],
                    earning_id,entry["technician_share_basis_points"],entry["calculated_amount_cents"],
                    entry["lunatech_east_share_basis_points"],entry["lunatech_east_amount_cents"],

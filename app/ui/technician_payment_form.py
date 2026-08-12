@@ -19,20 +19,21 @@ class TechnicianPaymentForm(ttk.Frame):
     STATUSES=("Draft","Approved","Scheduled","Paid")
     NON_JOB_TYPES=DIRECT_PAYMENT_CATEGORIES
 
-    def __init__(self,parent,auth,session):
+    def __init__(self,parent,auth,session,technician_id=None,earning_ids=None,on_saved=None):
         super().__init__(parent,padding=PADDING)
         self.service=TechnicianPaymentService(auth);self.session=session
         technicians=TechnicianService(auth).list_technicians(False)
         self.technicians={f"{t.get('preferred_name') or t['first_name']} {t['last_name']} ({t['tech_code']})":t['tech_id'] for t in technicians}
         self.vars={key:tk.StringVar() for key in ("technician","date","amount","method","status","reference","description","notes","allocated","unallocated","balance")}
-        self.historical=tk.BooleanVar(value=False);self.confirmed=tk.BooleanVar(value=False)
-        self.vars["date"].set(date.today().strftime("%m/%d/%Y"));self.vars["method"].set(PAYMENT_METHODS[0]);self.vars["status"].set("Draft")
+        self.historical=tk.BooleanVar(value=False);self.confirmed=tk.BooleanVar(value=True)
+        self.initial_earning_ids=set(earning_ids or ());self.on_saved=on_saved
+        self.vars["date"].set(date.today().strftime("%m/%d/%Y"));self.vars["method"].set(PAYMENT_METHODS[0]);self.vars["status"].set("Paid")
         self.allocations={};self.non_job=[];self._technician_name=""
         title=ttk.Frame(self);title.pack(fill="x")
-        ttk.Label(title,text="Issue Technician Payment",style="Header.TLabel").pack(side="left")
-        ttk.Checkbutton(title,text="Record Historical Payment (Already Paid)",variable=self.historical,command=self._mode_changed).pack(side="right")
+        ttk.Label(title,text="Record Technician Payment",style="Header.TLabel").pack(side="left")
+        ttk.Label(self,text="This records a payment issued outside Matterport Ops.\nIt does not send or schedule money through PNC PINACLE.",style="Status.TLabel").pack(anchor="w",pady=(4,2))
         fields=ttk.Frame(self);fields.pack(fill="x",pady=8);fields.columnconfigure(1,weight=1);fields.columnconfigure(3,weight=1)
-        specs=(("technician","Technician",tuple(self.technicians)),("date","Payment date (MM/DD/YYYY)",None),("amount","Payment total",None),("method","Payment method",PAYMENT_METHODS),("status","Status",self.STATUSES),("reference","External reference",None),("description","Description / memo",None),("notes","Internal notes",None))
+        specs=(("technician","Technician",tuple(self.technicians)),("date","Payment date (MM/DD/YYYY)",None),("amount","Amount issued through PNC PINACLE",None),("method","Payment method",PAYMENT_METHODS),("reference","PINACLE confirmation/reference",None),("description","Description / memo",None),("notes","Internal notes",None))
         for index,(key,label,values) in enumerate(specs):
             row,col=divmod(index,2);col*=2
             ttk.Label(fields,text=label).grid(row=row,column=col,sticky="w",padx=(0,8),pady=3)
@@ -40,7 +41,6 @@ class TechnicianPaymentForm(ttk.Frame):
             widget.grid(row=row,column=col+1,sticky="ew",padx=(0,14),pady=3)
             if key=="technician":widget.bind("<<ComboboxSelected>>",self._change_technician)
             if key=="amount":widget.bind("<KeyRelease>",lambda _e:self._totals())
-        ttk.Checkbutton(fields,text="I explicitly confirmed the selected technician",variable=self.confirmed).grid(row=4,column=0,columnspan=4,sticky="w")
         ttk.Label(self,textvariable=self.vars["balance"],style="Status.TLabel").pack(anchor="w",pady=(4,2))
         tree_frame=ttk.Frame(self);tree_frame.pack(fill="both",expand=True)
         columns=("job","project","date","component","approved","paid","due","allocate")
@@ -58,9 +58,12 @@ class TechnicianPaymentForm(ttk.Frame):
         for label,key in (("Payment total","amount"),("Allocated to jobs/items","allocated"),("Unallocated amount","unallocated")):
             ttk.Label(totals,text=label).pack(side="left",padx=(0,4));ttk.Label(totals,textvariable=self.vars[key]).pack(side="left",padx=(0,18))
         buttons=ttk.Frame(self);buttons.pack(fill="x",pady=(8,0))
-        self.save=ttk.Button(buttons,text="Save Payment",command=self.submit);self.save.pack(side="right")
+        self.save=ttk.Button(buttons,text="Record as Paid",command=self.submit);self.save.pack(side="right")
         ttk.Button(buttons,text="Cancel",command=self.reset).pack(side="right",padx=6)
         if session.role not in {"admin","operator"}:self.save.configure(state="disabled")
+        if technician_id is not None:
+            selected=next((name for name,value in self.technicians.items() if value==technician_id),None)
+            if selected:self.vars["technician"].set(selected);self._technician_name=selected;self.refresh_earnings()
         self._totals()
 
     def _mode_changed(self):
@@ -81,6 +84,11 @@ class TechnicianPaymentForm(ttk.Frame):
             try:service=datetime.strptime(service,"%Y-%m-%d").strftime("%m/%d/%Y")
             except ValueError:service="—"
             self.tree.insert("","end",iid=str(row["technician_earning_id"]),values=(row.get("external_job_id") or "—",row.get("project_name_source") or "—",service,row.get("entry_type") or "—",format_currency(row["net_earning_cents"]),format_currency(row["previously_paid_cents"]),format_currency(row["balance_due_cents"]),format_currency(self.allocations.get(row["technician_earning_id"],0))))
+            if row["technician_earning_id"] in self.initial_earning_ids:
+                self.allocations[row["technician_earning_id"]]=row["balance_due_cents"]
+                self.tree.set(str(row["technician_earning_id"]),"allocate",format_currency(row["balance_due_cents"]))
+        if self.initial_earning_ids:
+            self.vars["amount"].set(f"{sum(self.allocations.values())/100:.2f}")
         due=sum(r["balance_due_cents"] for r in rows);self.vars["balance"].set(f"Current approved balance due: {format_currency(due)}" if rows else "No approved outstanding job earnings. A classified non-job item may still be entered.");self._totals()
 
     def allocate_selected(self):
@@ -125,8 +133,13 @@ class TechnicianPaymentForm(ttk.Frame):
         try:
             payment=self.service.create_manual_payment(self.session,technician_id=self.technicians.get(self.vars["technician"].get()),payment_date=datetime.strptime(self.vars["date"].get(),"%m/%d/%Y").date().isoformat(),amount_cents=parse_currency(self.vars["amount"].get()),payment_method=self.vars["method"].get(),status=self.vars["status"].get(),reference=self.vars["reference"].get(),description=self.vars["description"].get(),notes=self.vars["notes"].get(),allocations=[{"earning_id":key,"amount_cents":value} for key,value in self.allocations.items() if value],non_job_items=self.non_job,historical=self.historical.get(),technician_confirmed=self.confirmed.get())
         except Exception as exc:messagebox.showerror("Technician Payment",str(exc),parent=self);return
-        messagebox.showinfo("Technician Payment",f"Saved payment #{payment['technician_payment_id']}.",parent=self);self.reset()
+        messagebox.showinfo("Technician Payment",f"Recorded paid payment #{payment['technician_payment_id']}.",parent=self)
+        if messagebox.askyesno("Payment Email","Generate a reviewable payment email draft now?",parent=self):
+            from app.ui.payment_email_dialog import generate_and_open_payment_email
+            generate_and_open_payment_email(self,self.service,self.session,payment["technician_payment_id"])
+        if self.on_saved:self.on_saved(payment)
+        else:self.reset()
 
     def reset(self):
         for key in ("technician","amount","reference","description","notes"):self.vars[key].set("")
-        self.historical.set(False);self.confirmed.set(False);self.vars["status"].set("Draft");self.allocations.clear();self.non_job.clear();self.refresh_earnings();self._mode_changed()
+        self.historical.set(False);self.confirmed.set(True);self.vars["status"].set("Paid");self.allocations.clear();self.non_job.clear();self.initial_earning_ids.clear();self.refresh_earnings()

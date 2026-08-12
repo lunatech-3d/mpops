@@ -114,3 +114,18 @@ CREATE TABLE IF NOT EXISTS JobFieldOverrides (
 );
 CREATE INDEX IF NOT EXISTS idx_JobFieldOverrides_job_source
     ON JobFieldOverrides(job_id, source_system);
+-- Reviewable technician remittance drafts; these records never imply delivery.
+CREATE TABLE IF NOT EXISTS TechnicianPaymentEmailDrafts (
+    technician_payment_email_draft_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    technician_payment_id INTEGER NOT NULL,
+    recipient_email TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    generated_by INTEGER NOT NULL,
+    generation_number INTEGER NOT NULL DEFAULT 1,
+    draft_status TEXT NOT NULL DEFAULT 'Draft Generated'
+        CHECK (draft_status IN ('Draft Generated', 'Outdated')),
+    FOREIGN KEY (technician_payment_id) REFERENCES TechnicianPayments(technician_payment_id),
+    FOREIGN KEY (generated_by) REFERENCES Users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_payment_email_drafts_payment
+    ON TechnicianPaymentEmailDrafts(technician_payment_id, generated_at);

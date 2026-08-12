@@ -298,8 +298,8 @@ class TechnicianDetails:
         TechnicianCompensationView(compensation_tab,
             TechnicianCompensationController(RevenueRuleService(controller.service.auth), controller.session),
             tech_id).pack(fill="both", expand=True)
-        TechnicianFinanceView(jobs_tab, controller.service.auth, tech_id, mode="jobs").pack(fill="both", expand=True)
-        TechnicianFinanceView(finance_tab, controller.service.auth, tech_id, mode="finances").pack(fill="both", expand=True)
+        TechnicianFinanceView(jobs_tab, controller.service.auth, tech_id, mode="jobs",session=controller.session).pack(fill="both", expand=True)
+        TechnicianFinanceView(finance_tab, controller.service.auth, tech_id, mode="finances",session=controller.session).pack(fill="both", expand=True)
         self.refresh_address(); self.window.protocol("WM_DELETE_WINDOW",lambda:close_modal(self.window)); prepare_modal_dialog(self.window,parent); self.window.wait_window()
     def refresh_address(self):
         try: self.current_address=self.controller.service.get_current_address(self.tech_id)

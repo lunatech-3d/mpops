@@ -254,7 +254,10 @@ class TechnicianFinanceService:
         with self.auth.connection() as connection:
             self._require_technician(connection, technician_id)
             payments = [dict(row) for row in connection.execute("""SELECT p.*,
-              COUNT(pe.technician_earning_id) earning_count
+              COUNT(pe.technician_earning_id) earning_count,
+              (SELECT d.draft_status FROM TechnicianPaymentEmailDrafts d
+               WHERE d.technician_payment_id=p.technician_payment_id
+               ORDER BY d.technician_payment_email_draft_id DESC LIMIT 1) email_draft_status
               FROM TechnicianPayments p LEFT JOIN TechnicianPaymentEarnings pe
                 ON pe.technician_payment_id=p.technician_payment_id
               WHERE p.tech_id=? GROUP BY p.technician_payment_id

@@ -381,7 +381,7 @@ class PaymentService:
             return dict(self._require_batch(connection, payment_batch_id))
 
     def finalize_payment(self, session: Session, payment_batch_id: int) -> dict[str, Any]:
-        """Atomically reconcile a ready batch and create its Pending earnings."""
+        """Reconcile a ready batch and authorize permanent Ready-to-Pay earnings."""
         self._require_operator(session)
         self._positive_id(payment_batch_id, "payment_batch_id")
         from app.services.compensation_service import CompensationService

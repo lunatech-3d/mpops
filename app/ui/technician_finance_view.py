@@ -5,6 +5,7 @@ from tkinter import messagebox, ttk
 
 from app.date_utils import format_display_date
 from app.services.technician_finance_service import TechnicianFinanceService
+from app.services.technician_payment_service import TechnicianPaymentService
 from app.ui.jobs_manager import open_job_details
 from app.ui.payment_helpers import format_cents
 from app.ui.styles import PADDING
@@ -89,9 +90,9 @@ class TechnicianFinanceView(ttk.Frame):
     JOB_COLUMNS = JOB_COLUMNS
     JOB_HEADINGS = JOB_HEADINGS
 
-    def __init__(self, parent, auth, technician_id, mode="all", job_opener=None):
+    def __init__(self, parent, auth, technician_id, mode="all", job_opener=None, session=None):
         super().__init__(parent, padding=PADDING)
-        self.auth, self.job_opener = auth, job_opener or open_job_details
+        self.auth, self.session, self.job_opener = auth, session, job_opener or open_job_details
         self.controller = TechnicianFinanceController(TechnicianFinanceService(auth), technician_id)
         self.job_rows = {}; self.payment_rows = {}; self.activity_rows = {}
         self.job_sort_column = None; self.job_sort_descending = False
@@ -156,7 +157,11 @@ class TechnicianFinanceView(ttk.Frame):
         ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
         table.rowconfigure(0, weight=1); table.columnconfigure(0, weight=1)
         self.jobs_tree.bind("<Double-1>", self._open_double_clicked_job)
-        ttk.Label(payments_tab, text="Expand a payment to see every job and pay component it covered.").pack(anchor="w")
+        payment_actions=ttk.Frame(payments_tab);payment_actions.pack(fill="x")
+        ttk.Label(payment_actions, text="Expand a payment to see every job and pay component it covered.").pack(side="left")
+        self.email_button=ttk.Button(payment_actions,text="Generate Payment Email",command=self.payment_email)
+        self.email_button.pack(side="right")
+        if not session or session.role not in {"admin","operator"}:self.email_button.configure(state="disabled")
         self.payments_tree = ttk.Treeview(payments_tab,
             columns=("date","method","reference","status","amount","base","travel","other"), show="tree headings")
         self.payments_tree.heading("#0", text="Payment / Job")
@@ -164,9 +169,28 @@ class TechnicianFinanceView(ttk.Frame):
                 ("Date","Method","Reference","Status","Amount Applied","Base Pay","Travel Pay","Other")):
             self.payments_tree.heading(column, text=heading); self.payments_tree.column(column, width=110)
         self.payments_tree.pack(fill="both", expand=True, pady=(7, 0))
+        self.payments_tree.bind("<<TreeviewSelect>>",self._payment_selected)
         self.status = tk.StringVar(); ttk.Label(self, textvariable=self.status, style="Status.TLabel").pack(anchor="w", pady=(6, 0))
         self.mode = mode
         self.refresh()
+
+    def _selected_payment(self):
+        selection=self.payments_tree.selection()
+        if not selection:return None
+        root=selection[0].split("-item-")[0]
+        return self.payment_rows.get(root)
+
+    def _payment_selected(self,_event=None):
+        payment=self._selected_payment()
+        if payment and payment.get("payment_status")=="Paid":
+            self.email_button.configure(text="Regenerate Draft" if payment.get("email_draft_status")=="Draft Generated" else "Generate Payment Email")
+
+    def payment_email(self):
+        payment=self._selected_payment()
+        if not payment:
+            messagebox.showinfo("Payment Email","Select a paid payment.",parent=self);return
+        from app.ui.payment_email_dialog import generate_and_open_payment_email
+        if generate_and_open_payment_email(self,TechnicianPaymentService(self.auth),self.session,payment["technician_payment_id"]):self.refresh()
 
     @staticmethod
     def _money(value):
