@@ -380,6 +380,46 @@ class PaymentService:
                          actor_user_id=session.user_id, details=audit)
             return dict(self._require_batch(connection, payment_batch_id))
 
+    def finalize_payment(self, session: Session, payment_batch_id: int) -> dict[str, Any]:
+        """Atomically reconcile a ready batch and create its Pending earnings."""
+        self._require_operator(session)
+        self._positive_id(payment_batch_id, "payment_batch_id")
+        from app.services.compensation_service import CompensationService
+
+        with self.auth.connection() as connection:
+            batch = self._require_batch(connection, payment_batch_id)
+            if batch["batch_status"] not in {"Reconciled", "Approved", "Closed"}:
+                result = self._reconciliation_result(connection, batch)
+                if not result["ready"]:
+                    raise ValueError("Cannot finalize: " + " ".join(result["errors"]))
+                summary, timestamp = result["summary"], utc_now_iso()
+                cursor = connection.execute(
+                    "UPDATE MatterportPaymentBatches SET batch_status='Reconciled', "
+                    "reconciled_at=?, reconciled_by=?, reconciled_imported_total_cents=?, "
+                    "reconciled_effective_total_cents=?, reconciled_payment_amount_cents=?, "
+                    "reconciled_matched_count=?, reconciled_excluded_count=?, "
+                    "reconciled_difference_cents=?, updated_at=?, updated_by=? "
+                    "WHERE payment_batch_id=? AND reconciled_at IS NULL",
+                    (timestamp, session.user_id, summary["imported_total_cents"],
+                     summary["effective_total_cents"], summary["payment_amount_cents"],
+                     summary["matched_count"], summary["excluded_count"],
+                     summary["difference_cents"], timestamp, session.user_id,
+                     payment_batch_id))
+                if cursor.rowcount != 1:
+                    raise ValueError("Payment batch was finalized by another operation")
+                record_event(connection, "payment_batch_reconciled",
+                             actor_user_id=session.user_id,
+                             details={"batch_id": payment_batch_id, "actor": session.user_id,
+                                      "timestamp": timestamp, **summary})
+            generation = CompensationService(self.auth).generate_technician_earnings(
+                session, payment_batch_id, connection=connection)
+            record_event(connection, "payment_batch_finalized",
+                         actor_user_id=session.user_id,
+                         details={"payment_batch_id": payment_batch_id,
+                                  "earning_ids": generation["earning_ids"],
+                                  "idempotent": generation["idempotent"]})
+            return generation
+
     def get_batch_history(self, payment_batch_id: int) -> list[dict[str, Any]]:
         """Read this batch's existing audit stream without duplicating storage."""
         self._positive_id(payment_batch_id, "payment_batch_id")

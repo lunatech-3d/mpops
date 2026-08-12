@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import nullcontext
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
@@ -15,7 +16,9 @@ from app.security.user_manager import AuthorizationError
 from app.services.revenue_rule_service import (RevenueRuleService, RuleConfigurationError,
                                                RuleDataIntegrityError)
 
-ELIGIBLE_BATCH_STATUSES = frozenset({"Reconciled", "Approved", "Closed"})
+PREVIEW_BATCH_STATUSES = frozenset({"Draft", "Imported", "Needs Review",
+                                    "Reconciled", "Approved", "Closed"})
+POSTING_BATCH_STATUSES = frozenset({"Reconciled", "Approved", "Closed"})
 FINANCIAL_FIELDS = frozenset({"revenue_basis_cents", "compensation_rule_type",
                               "compensation_rule_value", "calculated_amount_cents",
                               "adjustment_amount_cents", "net_earning_cents"})
@@ -280,9 +283,9 @@ class CompensationService:
           LEFT JOIN Markets m ON m.market_id=j.market_id
           WHERE i.payment_batch_id=? AND i.match_status<>'Excluded' ORDER BY i.payment_item_id
         """, (batch_id,)).fetchall()
-        if batch["batch_status"] not in ELIGIBLE_BATCH_STATUSES:
+        if batch["batch_status"] not in PREVIEW_BATCH_STATUSES:
             exceptions.append({"payment_item_id": None, "job_id": None, "document_number": None,
-              "reason_code": "BATCH_NOT_ELIGIBLE", "message": "Batch must be Reconciled, Approved, or Closed."})
+              "reason_code": "BATCH_NOT_ELIGIBLE", "message": "This batch status cannot be calculated."})
         else:
             for item in items:
                 base = {"payment_item_id": item["payment_item_id"], "job_id": item["job_id"],
@@ -435,9 +438,19 @@ class CompensationService:
         with self.auth.connection() as connection:
             return self._preview(connection, payment_batch_id)
 
-    def generate_technician_earnings(self, session: Session, payment_batch_id: int) -> dict[str, Any]:
+    def generate_technician_earnings(self, session: Session, payment_batch_id: int,
+                                     *, connection: sqlite3.Connection | None = None) -> dict[str, Any]:
+        """Post Pending earnings, optionally within a caller-owned transaction."""
         self._write(session); self._id(payment_batch_id, "payment_batch_id")
-        with self.auth.connection() as connection:
+        context = nullcontext(connection) if connection is not None else self.auth.connection()
+        with context as connection:
+            status = connection.execute(
+                "SELECT batch_status FROM MatterportPaymentBatches WHERE payment_batch_id=?",
+                (payment_batch_id,)).fetchone()
+            if not status:
+                raise LookupError("Payment batch not found")
+            if status[0] not in POSTING_BATCH_STATUSES:
+                raise ValueError("Technician earnings may only be posted by finalizing a reconciled batch")
             preview = self._preview(connection, payment_batch_id)
             if preview["exceptions"]:
                 raise ValueError("Earnings generation blocked by preview exceptions")

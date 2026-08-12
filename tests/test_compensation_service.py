@@ -202,7 +202,10 @@ class CompensationServiceTests(unittest.TestCase):
     def test_exceptions_status_and_void_guards(self):
         with self.auth.connection() as c:
             c.execute("UPDATE MatterportPaymentBatches SET batch_status='Draft' WHERE payment_batch_id=?",(self.batch,))
-        self.assertEqual(self.service.preview_technician_earnings(self.batch)["exceptions"][0]["reason_code"],"BATCH_NOT_ELIGIBLE")
+        preview = self.service.preview_technician_earnings(self.batch)
+        self.assertTrue(preview["ready"])
+        with self.assertRaisesRegex(ValueError, "only be posted"):
+            self.service.generate_technician_earnings(self.session, self.batch)
         with self.auth.connection() as c:
             c.execute("UPDATE MatterportPaymentBatches SET batch_status='Reconciled' WHERE payment_batch_id=?",(self.batch,))
         eid=self.service.create_manual_earning_adjustment(self.session,self.tech,5,"bonus")

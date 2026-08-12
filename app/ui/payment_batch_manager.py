@@ -14,7 +14,7 @@ from app.date_utils import (display_date_to_iso, display_datetime_to_iso,
 from app.security.user_manager import AuthorizationError
 from app.services.payment_service import BATCH_STATUSES, PaymentService
 from app.services.compensation_service import CompensationService
-from app.ui.payment_helpers import (format_adjustment_cents, format_cents, next_batch_status, parse_currency,
+from app.ui.payment_helpers import (format_adjustment_cents, format_cents, parse_currency,
                                     payment_item_sort_key, status_permissions,
                                     technician_revenue_subtotals, totals_to_display,
                                     workflow_summary)
@@ -143,7 +143,7 @@ class PaymentBatchDetail(tk.Toplevel):
         super().__init__(parent); self.service, self.session = service, session
         self.batch_id, self.on_changed = batch_id, on_changed
         self.can_modify = session.role in {"admin", "operator"}; self.batch: dict[str, Any] = {}
-        self.title("Matterport Payment Batch"); self.geometry("1180x780"); self.minsize(1100, 650)
+        self.title("Matterport Payment Batch"); self.geometry("1120x780"); self.minsize(860, 650)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.vars = {field: tk.StringVar() for field in FIELDS if field != "notes"}
         self.status_var = tk.StringVar(value="Draft"); self.total_vars: dict[str, tk.StringVar] = {}
@@ -223,16 +223,19 @@ class PaymentBatchDetail(tk.Toplevel):
 
         compensation = ttk.LabelFrame(content, text="Technician Transfers", padding=6)
         compensation.pack(fill="x", pady=(0, 8))
-        summary_columns = ("technician", "jobs", "revenue", "rate", "payout", "status")
+        summary_columns = ("technician", "jobs", "revenue", "rate", "capture", "travel",
+                           "adjustments", "payout", "status")
         transfer_table = ttk.Frame(compensation); transfer_table.pack(fill="x")
         self.technician_summary = ttk.Treeview(transfer_table, columns=summary_columns,
                                                show="headings", height=4)
         for key, heading, width in (("technician", "Technician", 180), ("jobs", "Jobs", 55),
-                                    ("revenue", "Gross Revenue", 115), ("rate", "Rate", 105),
-                                    ("payout", "Transfer Amount", 135), ("status", "Status", 100)):
+                                    ("revenue", "Gross Revenue", 110), ("rate", "Rate / Rule", 105),
+                                    ("capture", "Capture", 90), ("travel", "Travel", 85),
+                                    ("adjustments", "Adjustments", 90),
+                                    ("payout", "Proposed Total", 110), ("status", "Status", 85)):
             self.technician_summary.heading(key, text=heading)
             self.technician_summary.column(key, width=width,
-                anchor="e" if key in {"jobs", "revenue", "payout"} else "w")
+                anchor="e" if key in {"jobs", "revenue", "capture", "travel", "adjustments", "payout"} else "w")
         transfer_ybar = ttk.Scrollbar(transfer_table, orient="vertical",
                                       command=self.technician_summary.yview)
         self.technician_summary.configure(yscrollcommand=transfer_ybar.set)
@@ -260,11 +263,6 @@ class PaymentBatchDetail(tk.Toplevel):
             ttk.Label(totals, text=label + ":").grid(row=row, column=col, sticky="e", padx=(5, 2), pady=2)
             style = "Section.TLabel" if key == "difference_cents" else "TLabel"
             ttk.Label(totals, textvariable=var, style=style).grid(row=row, column=col + 1, sticky="w", padx=(0, 8))
-        self.workflow_var = tk.StringVar()
-        workflow = ttk.LabelFrame(content, text="Workflow Status", padding=6); workflow.pack(fill="x", pady=(4, 4))
-        ttk.Label(workflow, textvariable=self.workflow_var, justify="left").pack(side="left", anchor="w")
-        ttk.Button(workflow, text="Show Workflow Details",
-                   command=self.show_workflow_details).pack(side="right", anchor="n")
         self.history_var = tk.StringVar()
         history = ttk.LabelFrame(content, text="Financial History", padding=6)
         history.pack(fill="x", pady=(0, 4))
@@ -273,29 +271,41 @@ class PaymentBatchDetail(tk.Toplevel):
                    command=self.show_financial_history).pack(side="right")
         actions = ttk.Frame(outer, padding=(PADDING, 8, PADDING, PADDING))
         actions.grid(row=1, column=0, sticky="ew")
+        guidance = ttk.Frame(actions)
+        guidance.pack(side="left", fill="x", expand=True)
+        ttk.Label(guidance, text="Next Step", style="Section.TLabel").pack(anchor="w")
+        self.next_step_var = tk.StringVar()
+        ttk.Label(guidance, textvariable=self.next_step_var, justify="left",
+                  wraplength=520).pack(anchor="w", pady=(2, 7))
+        action_buttons = ttk.Frame(actions); action_buttons.pack(side="right", anchor="s")
         self.save_button = ttk.Button(actions, text="Save", command=self.save)
-        self.import_button = ttk.Button(actions, text="Import Payment Email", command=self.open_importer)
-        self.metadata_button = ttk.Button(actions, text="Import Tipalti Metadata",
-                                          command=self.open_metadata_importer)
-        self.match_button = ttk.Button(actions, text="Match Jobs", command=self.match_jobs)
-        self.resolve_button = ttk.Button(actions, text="Review Exceptions", command=self.resolve_exceptions)
-        self.reconcile_button = ttk.Button(actions, text="Reconcile Batch", command=self.open_reconciliation)
-        self.generate_earnings_button = ttk.Button(
-            actions, text="Generate Technician Earnings", command=self.generate_earnings)
-        self.review_earnings_button = ttk.Button(
-            actions, text="Review Earnings", command=self.review_earnings)
-        self.advance_button = ttk.Button(actions, text="Advance Status", command=self.advance)
-        self.delete_button = ttk.Button(actions, text="Delete Draft", command=self.delete)
-        for button in (self.save_button, self.import_button, self.metadata_button, self.match_button,
-                       self.resolve_button, self.reconcile_button, self.generate_earnings_button,
-                       self.review_earnings_button, self.advance_button,
-                       self.delete_button):
-            button.pack(side="left", padx=(0, 6))
-        ttk.Button(actions, text="Refresh", command=self.refresh).pack(side="left")
-        ttk.Button(actions, text="Close", command=self.close).pack(side="right")
+        self.primary_button = ttk.Button(action_buttons, text="Import Payment",
+                                         command=self.run_primary_action, style="Accent.TButton")
+        self.more_button = ttk.Menubutton(action_buttons, text="More Actions")
+        self.more_menu = tk.Menu(self.more_button, tearoff=False)
+        self.more_menu.add_command(label="Import Tipalti Metadata", command=self.open_metadata_importer)
+        self.more_menu.add_command(label="Refresh", command=self.refresh)
+        self.more_menu.add_separator()
+        self.more_menu.add_command(label="Delete Draft", command=self.delete)
+        self.more_button.configure(menu=self.more_menu)
+        self.save_button.pack(in_=action_buttons, side="left", padx=(0, 6))
+        self.more_button.pack(side="left", padx=(0, 6))
+        ttk.Button(action_buttons, text="Close", command=self.close).pack(side="left", padx=(0, 6))
+        self.primary_button.pack(side="left")
+        self.primary_action = "import"
         self.snapshot: dict[str, Any] = {}
+        for var in self.vars.values():
+            var.trace_add("write", lambda *_args: self._mark_dirty())
+        self.notes.bind("<KeyRelease>", lambda _event: self._mark_dirty())
         if batch_id is None: self._load_new()
         else: self.refresh()
+
+    def _mark_dirty(self) -> None:
+        if hasattr(self, "save_button"):
+            permissions = status_permissions(self.status_var.get(), self.can_modify)
+            editable = self.batch_id is None or permissions["can_save"]
+            self.save_button.configure(state="normal" if editable and
+                                       self._form_values() != self.snapshot else "disabled")
 
     def _load_new(self) -> None:
         defaults = {"payment_date": format_display_date(date.today()), "payment_amount_cents": "0.00",
@@ -313,26 +323,16 @@ class PaymentBatchDetail(tk.Toplevel):
         editable = permissions["editable_fields"]
         for field, entry in self.entries.items(): entry.configure(state="normal" if field in editable else "disabled")
         self.notes.configure(state="normal" if "notes" in editable else "disabled")
-        self.save_button.configure(state="normal" if (self.batch_id is None and self.can_modify) or permissions["can_save"] else "disabled")
-        self.import_button.configure(state="normal" if self.status_var.get() == "Draft" and self.can_modify else "disabled")
-        self.metadata_button.configure(state="normal" if self.status_var.get() == "Draft" and self.can_modify else "disabled")
-        self.match_button.configure(state="normal" if self.batch_id and permissions["can_match"] else "disabled")
-        self.delete_button.configure(state="normal" if self.batch_id and permissions["can_delete"] else "disabled")
-        self.advance_button.configure(state="normal" if self.batch_id and permissions["can_advance"] else "disabled")
+        changed = self._form_values() != self.snapshot
+        self.save_button.configure(state="normal" if self.can_modify and
+                                   (self.batch_id is None or (permissions["can_save"] and changed)) else "disabled")
+        self.more_menu.entryconfigure("Import Tipalti Metadata", state="normal" if
+            self.batch_id and self.status_var.get() == "Draft" and self.can_modify else "disabled")
+        self.more_menu.entryconfigure("Delete Draft", state="normal" if
+            self.batch_id and permissions["can_delete"] else "disabled")
         exception_count = int(self.total_vars.get("exception_count", tk.StringVar(value="0")).get() or 0)
         excluded_count = int(self.total_vars.get("excluded_count", tk.StringVar(value="0")).get() or 0)
-        self.resolve_button.configure(state="normal" if self.batch_id and
-                                      (exception_count > 0 or excluded_count > 0) else "disabled")
-        ready = bool(getattr(self, "reconciliation", {}).get("ready"))
-        self.reconcile_button.configure(state="normal" if self.batch_id and self.can_modify and ready else "disabled")
-        eligible = self.status_var.get() in {"Reconciled", "Approved", "Closed"}
-        self.generate_earnings_button.configure(
-            state="normal" if self.batch_id and self.can_modify and eligible else "disabled")
-        self.review_earnings_button.configure(
-            state="normal" if self.batch_id and getattr(self, "posted_earnings", []) else "disabled")
-        next_status = next_batch_status(self.status_var.get())
-        self.advance_button.configure(text={"Imported":"Send to Review", "Reconciled":"Approve", "Approved":"Close Batch"}.get(self.status_var.get(), "Mark Imported") if next_status else "Advance Status")
-        if self.status_var.get() == "Needs Review": self.advance_button.configure(state="disabled")
+        self._update_primary_action(exception_count, excluded_count)
 
     def refresh(self) -> None:
         if self.batch_id is None: return
@@ -357,16 +357,6 @@ class PaymentBatchDetail(tk.Toplevel):
         display = totals_to_display(totals)
         self.workflow_details = workflow_summary(batch["batch_status"], totals,
                                                  self.reconciliation, batch)
-        locked = batch["batch_status"] in ("Reconciled", "Approved", "Closed")
-        matched = int(totals.get("matched_count", 0)); item_count = int(totals.get("item_count", 0))
-        allocation = "Complete" if self.compensation_preview and not self.compensation_preview.get("exceptions") else "Not available"
-        posted_count = sum(1 for row in getattr(self, "posted_earnings", [])
-                           if row["earning_status"] != "Voided")
-        earnings_status = "Generated" if posted_count else "Not yet generated"
-        self.workflow_var.set(
-            f"Batch Status: {batch['batch_status']}\n"
-            f"Matching: {matched} of {item_count} jobs matched   Allocation: {allocation}\n"
-            f"Earnings: {earnings_status}" + ("   Financial data locked" if locked else ""))
         self.history_rows = history
         if history:
             latest = history[-1]
@@ -383,6 +373,53 @@ class PaymentBatchDetail(tk.Toplevel):
             self.total_vars["fees_and_deductions_cents"].set(
                 format_adjustment_cents(totals.get("fees_and_deductions_cents")))
         self.snapshot = self._form_values(); self.apply_status_permissions(); self.title(f"Matterport Payment Batch #{self.batch_id}")
+
+    def _update_primary_action(self, exception_count: int, excluded_count: int) -> None:
+        """Expose only the next meaningful workflow operation and explain blockers."""
+        items = len(self.item_rows)
+        posted = [row for row in getattr(self, "posted_earnings", [])
+                  if row["earning_status"] != "Voided"]
+        preview = self.compensation_preview or {}
+        calculation_errors = [entry.get("message", "Calculation exception")
+                              for entry in preview.get("exceptions", [])]
+        reconciliation_errors = list(getattr(self, "reconciliation", {}).get("errors", []))
+        if posted:
+            action, label = "review", "Review Earnings"
+            guidance = ("The payment has been finalized and Pending technician earnings were created.\n"
+                        "Review the earnings before approval or payment.")
+        elif not items:
+            action, label = "import", "Import Payment"
+            guidance = "Import the Matterport payment details to begin."
+        elif exception_count or excluded_count:
+            action, label = "exceptions", "Review Exceptions"
+            guidance = (f"{exception_count + excluded_count} payment item(s) require attention.\n"
+                        "Resolve the listed matching or amount exceptions, then match again.")
+        elif preview.get("ready") and getattr(self, "reconciliation", {}).get("ready"):
+            action, label = "finalize", "Finalize Payment & Generate Earnings"
+            guidance = (f"All {preview['summary']['eligible_item_count']} jobs are matched.\n"
+                        "Technician earnings have been calculated. Review the summary and finalize when ready.")
+        elif calculation_errors:
+            action, label = "calculation_exceptions", "Review Exceptions"
+            guidance = "Technician calculation is blocked:\n" + "\n".join(
+                f"• {reason}" for reason in calculation_errors[:4])
+        else:
+            action, label = "match", "Match Jobs"
+            guidance = (f"The payment contains {items} invoice item(s).\n"
+                        "Match them to jobs before calculating technician earnings.")
+            if reconciliation_errors and all("status" not in reason.lower()
+                                             for reason in reconciliation_errors):
+                guidance += "\n\nBlocked: " + " ".join(reconciliation_errors)
+        self.primary_action = action
+        self.primary_button.configure(text=label, state="normal" if
+            (action == "review" or self.can_modify) else "disabled")
+        self.next_step_var.set(guidance)
+
+    def run_primary_action(self) -> None:
+        actions = {"import": self.open_importer, "match": self.match_jobs,
+                   "exceptions": self.resolve_exceptions, "finalize": self.finalize_payment,
+                   "calculation_exceptions": self.show_workflow_details,
+                   "review": self.review_earnings}
+        actions[self.primary_action]()
 
     def sort_items(self, column: str) -> None:
         """Toggle typed sorting while retaining the selected payment item."""
@@ -423,13 +460,12 @@ class PaymentBatchDetail(tk.Toplevel):
         self.compensation_preview = None
         self.posted_earnings = []
         self.allocation_totals_var.set("Total Technician Transfers: —")
-        self.distribution_unavailable_var.set(
-            "Revenue distribution not available until the batch is reconciled.")
+        self.distribution_unavailable_var.set("Match invoice items to calculate a non-posting preview.")
         self.distribution_status_var.set("")
         for var in self.distribution_vars.values(): var.set("—")
         earnings = {}
         paid_status = {}
-        if self.batch_id and self.batch.get("batch_status") in ("Reconciled", "Approved", "Closed"):
+        if self.batch_id and self.item_rows:
             compensation = CompensationService(self.service.auth)
             preview = compensation.preview_technician_earnings(self.batch_id)
             self.compensation_preview = preview
@@ -453,8 +489,15 @@ class PaymentBatchDetail(tk.Toplevel):
                 paid_status.setdefault(posted["tech_id"], []).append(posted["earning_status"])
             for entry in preview["proposed_entries"]:
                 bucket = earnings.setdefault(entry["technician_id"],
-                    {"amount": 0, "rates": set(), "entries": []})
+                    {"amount": 0, "capture": 0, "travel": 0, "adjustments": 0,
+                     "rates": set(), "entries": []})
                 bucket["amount"] += entry["calculated_amount_cents"]
+                for component in entry.get("components", []):
+                    name = component.get("component", "").casefold()
+                    value = int(component.get("calculated_amount_cents", component.get("amount_cents", 0)) or 0)
+                    if name in {"base", "overall"}: bucket["capture"] += value
+                    elif name == "travel": bucket["travel"] += value
+                    else: bucket["adjustments"] += value
                 bucket["rates"].add(entry.get("effective_rate_display") or
                     (f"{entry['rule_value'] / 100:.2f}%" if entry["rule_type"] == "Percentage" else "Flat"))
                 bucket["entries"].append(entry)
@@ -465,8 +508,11 @@ class PaymentBatchDetail(tk.Toplevel):
                 "Pending" if statuses else "No")
             iid = f"tech-{subtotal['tech_id']}" if subtotal["tech_id"] else f"name-{len(self.technician_breakdowns)}"
             self.technician_summary.insert("", "end", iid=iid, values=(subtotal["technician"], subtotal["job_count"],
-                format_cents(subtotal["revenue_cents"]), ", ".join(sorted(earning["rates"])) if earning else "Not calculated",
-                format_cents(earning["amount"]) if earning else "—", paid if earning else "Unavailable"))
+                format_cents(subtotal["revenue_cents"]), ", ".join(sorted(earning["rates"])) if earning else "—",
+                format_cents(earning["capture"]) if earning else "—",
+                format_cents(earning["travel"]) if earning else "—",
+                format_cents(earning["adjustments"]) if earning else "—",
+                format_cents(earning["amount"]) if earning else "—", paid if earning else "Blocked"))
             self.technician_breakdowns[iid] = {"subtotal": subtotal,
                                                 "entries": earning["entries"] if earning else []}
         self.technician_summary.configure(
@@ -571,7 +617,12 @@ class PaymentBatchDetail(tk.Toplevel):
 
     def open_importer(self) -> None:
         if self.batch_id is None:
-            messagebox.showwarning("Payment Email Import", "Save the payment batch before importing a payment email.", parent=self); return
+            try:
+                submitted = self._submitted(); submitted["batch_status"] = "Draft"
+                self.batch_id = self.service.create_payment_batch(self.session, submitted)
+                self.on_changed(self.batch_id); self.refresh()
+            except Exception as exc:
+                _show_error(self, exc); return
         if self.status_var.get() != "Draft": return
         try:
             totals = self.service.calculate_batch_totals(self.batch_id)
@@ -601,37 +652,57 @@ class PaymentBatchDetail(tk.Toplevel):
     def match_jobs(self) -> None:
         try: result = self.service.match_payment_items(self.session, self.batch_id)
         except Exception as exc: _show_error(self, exc); return
+        remaining = int(result["missing_job_count"]) + int(result["ambiguous_count"])
+        totals = self.service.calculate_batch_totals(self.batch_id)
+        remaining += int(totals.get("amount_review_count", 0))
+        if not remaining and self.status_var.get() == "Draft":
+            self.service.update_payment_batch(self.session, self.batch_id,
+                                              {"batch_status": "Imported"})
         self.refresh(); self.on_changed(self.batch_id)
-        messagebox.showinfo("Job Matching", f"Matched: {result['matched_count']}\nMissing Jobs: {result['missing_job_count']}\nAmbiguous: {result['ambiguous_count']}", parent=self)
+        if remaining:
+            message = (f"Matched: {result['matched_count']}\nMissing Jobs: {result['missing_job_count']}\n"
+                       f"Ambiguous: {result['ambiguous_count']}\nAmount Review: {totals.get('amount_review_count', 0)}")
+        else:
+            message = (f"All {result['matched_count']} jobs were matched.\n\n"
+                       "Technician earnings have been calculated for review.\n"
+                       "The payment is ready to finalize.")
+        messagebox.showinfo("Job Matching", message, parent=self)
 
     def resolve_exceptions(self) -> None:
         if self.batch_id:
             PaymentExceptionCenter(self, self.service, self.session, self.batch_id,
                                    lambda: (self.refresh(), self.on_changed(self.batch_id)))
 
-    def open_reconciliation(self) -> None:
-        if self.batch_id:
-            PaymentBatchReconciliationDialog(
-                self, self.service, self.session, self.batch_id,
-                lambda: (self.refresh(), self.on_changed(self.batch_id)))
-
-    def generate_earnings(self) -> None:
-        """Post the reviewed batch calculation to the Pending earnings ledger."""
+    def finalize_payment(self) -> None:
+        """Revalidate, reconcile, and post Pending earnings through one user action."""
         if not self.batch_id:
             return
+        validation = self.service.validate_batch_reconciliation(self.batch_id)
+        preview = CompensationService(self.service.auth).preview_technician_earnings(self.batch_id)
+        if not validation["ready"] or not preview["ready"]:
+            reasons = validation["errors"] + [entry["message"] for entry in preview["exceptions"]]
+            messagebox.showerror("Finalize Payment", "Finalization is blocked:\n\n" + "\n".join(reasons), parent=self)
+            self.refresh(); return
+        summary, calculation = validation["summary"], preview["summary"]
+        prompt = ("Finalize this Matterport payment?\n\n"
+                  f"Jobs matched: {summary['matched_count']}\n"
+                  f"Gross invoices: {self.total_vars['gross_invoice_total_cents'].get()}\n"
+                  f"Credits/deductions: {self.total_vars['vendor_credits_cents'].get()}\n"
+                  f"Net payment: {format_cents(summary['payment_amount_cents'])}\n"
+                  f"Technician earnings to create: {format_cents(calculation['proposed_earnings_total_cents'])}\n\n"
+                  "This will reconcile the payment and create Pending technician earnings.\n"
+                  "It will not approve or pay the earnings.")
+        if not messagebox.askyesno("Finalize Payment", prompt, parent=self):
+            return
         try:
-            result = CompensationService(self.service.auth).generate_technician_earnings(
-                self.session, self.batch_id)
+            result = self.service.finalize_payment(self.session, self.batch_id)
         except Exception as exc:
             _show_error(self, exc)
             return
         self.refresh(); self.on_changed(self.batch_id)
-        if result["idempotent"]:
-            message = "Technician earnings were already generated; no duplicate rows were created."
-        else:
-            message = (f"Generated {result['generated_count']} Pending technician earning(s).\n\n"
-                       "Open Review Earnings to inspect and approve them for payment.")
-        messagebox.showinfo("Technician Earnings", message, parent=self)
+        messagebox.showinfo("Payment Finalized",
+            f"Created {result['generated_count']} Pending technician earning(s).\n\n"
+            "Review Earnings to inspect them before approval or payment.", parent=self)
 
     def review_earnings(self) -> None:
         """Open the existing earnings review workflow filtered to this batch."""
@@ -643,14 +714,6 @@ class PaymentBatchDetail(tk.Toplevel):
         TechnicianEarningsManager(dialog, self.service.auth, self.session,
                                   payment_batch_id=self.batch_id).pack(fill="both", expand=True)
 
-    def advance(self) -> None:
-        current = self.status_var.get(); requested = next_batch_status(current)
-        if not requested: return
-        if not messagebox.askyesno("Advance Status", f"Advance this batch from {current} to {requested}?", parent=self): return
-        try: self.service.update_payment_batch(self.session, self.batch_id, {"batch_status": requested})
-        except Exception as exc: _show_error(self, exc); return
-        self.refresh(); self.on_changed(self.batch_id)
-
     def delete(self) -> None:
         if not messagebox.askyesno("Delete Draft", f"Delete Draft payment batch #{self.batch_id}?", parent=self): return
         try: self.service.delete_payment_batch(self.session, self.batch_id)
@@ -660,59 +723,3 @@ class PaymentBatchDetail(tk.Toplevel):
     def close(self) -> None:
         if self._form_values() != self.snapshot and not messagebox.askyesno("Unsaved Changes", "Close without saving your changes?", parent=self): return
         self.destroy()
-
-
-class PaymentBatchReconciliationDialog(tk.Toplevel):
-    """Require an explicit operator certification before reconciliation."""
-
-    def __init__(self, parent, service, session, batch_id, on_reconciled):
-        super().__init__(parent)
-        self.service, self.session, self.batch_id = service, session, batch_id
-        self.on_reconciled = on_reconciled
-        self.title("Payment Batch Reconciliation")
-        self.transient(parent); self.grab_set(); self.resizable(False, False)
-        frame = ttk.Frame(self, padding=16); frame.pack(fill="both", expand=True)
-        ttk.Label(frame, text="Payment Batch Reconciliation", style="Header.TLabel").pack(anchor="w")
-        result = service.validate_batch_reconciliation(batch_id)
-        summary = result["summary"]
-        batch = service.get_payment_batch(batch_id) or {}
-        operator = session.display_name or session.username
-        values = (("Batch ID", batch_id), ("Payment Date", format_display_date(summary["payment_date"])),
-                  ("Tipalti Payment Amount", format_cents(summary["payment_amount_cents"])),
-                  ("Imported Total", format_cents(summary["imported_total_cents"])),
-                  ("Effective Total", format_cents(summary["effective_total_cents"])),
-                  ("Difference", format_cents(summary["difference_cents"])),
-                  ("Matched Items", summary["matched_count"]),
-                  ("Excluded Items", summary["excluded_count"]),
-                  ("Imported Items", summary["item_count"]), ("Operator", operator))
-        details = ttk.Frame(frame); details.pack(fill="x", pady=10)
-        for row, (label, value) in enumerate(values):
-            ttk.Label(details, text=label + ":").grid(row=row, column=0, sticky="e", padx=5)
-            ttk.Label(details, text=str(value), style="Section.TLabel").grid(row=row, column=1, sticky="w")
-        if result["warnings"]:
-            ttk.Label(frame, text="⚠ Warning\n" + "\n".join(result["warnings"]),
-                      justify="left").pack(anchor="w", pady=5)
-        if result["errors"]:
-            ttk.Label(frame, text="❌ Cannot Reconcile\n" + "\n".join(result["errors"]),
-                      justify="left").pack(anchor="w", pady=5)
-        self.certified = tk.BooleanVar()
-        ttk.Checkbutton(frame, variable=self.certified, command=self._toggle,
-                        text="I have reviewed this payment batch and certify that it accurately\n"
-                             "represents the customer payment received.").pack(anchor="w", pady=10)
-        actions = ttk.Frame(frame); actions.pack(fill="x")
-        self.confirm = ttk.Button(actions, text="Confirm Reconciliation", command=self._confirm,
-                                  state="disabled")
-        self.confirm.pack(side="left")
-        ttk.Button(actions, text="Cancel", command=self.destroy).pack(side="right")
-        self.ready = result["ready"]
-
-    def _toggle(self):
-        self.confirm.configure(state="normal" if self.ready and self.certified.get() else "disabled")
-
-    def _confirm(self):
-        try:
-            self.service.reconcile_batch(self.session, self.batch_id)
-        except Exception as exc:
-            _show_error(self, exc); return
-        self.on_reconciled(); self.destroy()
-        messagebox.showinfo("Payment Batch Reconciliation", "Payment batch reconciled.", parent=self.master)
