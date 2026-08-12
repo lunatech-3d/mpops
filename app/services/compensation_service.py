@@ -277,7 +277,8 @@ class CompensationService:
         has_market = any(r[1] == "market_id" for r in connection.execute("PRAGMA table_info(Jobs)"))
         market_select = "j.market_id" if has_market else "NULL AS market_id"
         items = connection.execute(f"""
-          SELECT i.*,j.external_job_id,j.completed_at,j.actual_start_at,j.scheduled_start_at,
+          SELECT i.*,j.external_job_id,j.client_name_source,j.project_name_source,
+                 j.completed_at,j.actual_start_at,j.scheduled_start_at,
                  {market_select},m.market_name
           FROM MatterportPaymentItems i LEFT JOIN Jobs j ON j.job_id=i.job_id
           LEFT JOIN Markets m ON m.market_id=j.market_id
@@ -288,14 +289,18 @@ class CompensationService:
               "reason_code": "BATCH_NOT_ELIGIBLE", "message": "This batch status cannot be calculated."})
         else:
             for item in items:
+                gross_value = (item["resolved_amount_cents"] if item["resolved_amount_cents"] is not None
+                               else item["amount_received_cents"])
                 base = {"payment_item_id": item["payment_item_id"], "job_id": item["job_id"],
-                        "document_number": item["document_number"]}
+                        "external_job_id": item["external_job_id"],
+                        "document_number": item["document_number"],
+                        "customer": item["client_name_source"],
+                        "project": item["project_name_source"],
+                        "gross_revenue_cents": gross_value if isinstance(gross_value, int) else 0}
                 if item["match_status"] != "Matched":
                     exceptions.append(self._exception(base, "ITEM_NOT_MATCHED", "Payment item is not matched.")); continue
                 if item["job_id"] is None or item["external_job_id"] is None:
                     exceptions.append(self._exception(base, "MISSING_JOB", "Payment item has no valid matched job.")); continue
-                if item["market_id"] is None:
-                    exceptions.append(self._exception(base, "MISSING_MARKET", "Matched job has no market.")); continue
                 effective_date = self.rule_effective_date(item, batch["payment_date"])
                 if effective_date is None:
                     exceptions.append(self._exception(base, "NO_RULE_EFFECTIVE_DATE",
@@ -307,8 +312,6 @@ class CompensationService:
                                "Multiple eligible primary technician assignments found.")
                     exceptions.append({**base, "reason_code": code, "message": message}); continue
                 tech = techs[0]
-                gross_value = (item["resolved_amount_cents"] if item["resolved_amount_cents"] is not None
-                               else item["amount_received_cents"])
                 if isinstance(gross_value, bool) or not isinstance(gross_value, int) or gross_value < 0:
                     exceptions.append(self._exception(base, "INVALID_FINANCIAL_AMOUNT",
                         "Gross revenue must be a nonnegative integer number of cents.")); continue
@@ -345,6 +348,15 @@ class CompensationService:
                 reconciliation = {key: calculation[key] for key in (
                     "component_sum_cents", "component_reconciliation_status",
                     "component_reconciliation_warning", "components_reconciled")}
+                if item["market_id"] is None:
+                    sources = {part["rule_source"] for part in components}
+                    source = next(iter(sources)) if len(sources) == 1 else "Mixed Component Rules"
+                    exceptions.append(self._exception({**base,
+                        "technician_amount_cents": amount,
+                        "technician_rule_source": source}, "MISSING_MARKET",
+                        f"Technician earning calculated using {source}. Company distribution "
+                        "is blocked until the job's market is assigned."))
+                    continue
                 resolver = RevenueRuleService(self.auth)
                 try:
                     east_rule = resolver.resolve_market_revenue_rule(market_id=item["market_id"],
@@ -432,7 +444,9 @@ class CompensationService:
                 "technician_total_cents": sum(e["calculated_amount_cents"] for e in entries),
                 "lunatech_east_total_cents": sum(e["lunatech_east_amount_cents"] for e in entries),
                 "lunatech_total_cents": sum(e["lunatech_amount_cents"] for e in entries),
-                "unallocated_total_cents": sum((i["resolved_amount_cents"] if i["resolved_amount_cents"] is not None else i["amount_received_cents"] or 0) for i in items if any(x["payment_item_id"] == i["payment_item_id"] for x in exceptions))},
+                "unallocated_total_cents": sum(int(x.get("gross_revenue_cents") or 0)
+                                               for x in exceptions),
+                "financial_exception_count": len(exceptions)},
                 "proposed_entries": entries, "exceptions": exceptions}
 
     def preview_technician_earnings(self, payment_batch_id: int) -> dict[str, Any]:

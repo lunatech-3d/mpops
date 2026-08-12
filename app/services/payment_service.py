@@ -1246,15 +1246,13 @@ class PaymentService:
                 "item_count": int(totals["item_count"]),
                 "resolved_count": matched_count + excluded_count,
                 "exception_count": exception_count,
+                # Reconciliation components are part of the result contract even
+                # for the common invoice-only case.  The UI must never have to
+                # infer invoice revenue from the financially-calculable subset.
+                "gross_invoice_total_cents": int(totals["gross_invoice_total_cents"]),
+                "positive_adjustments_cents": int(totals["positive_adjustments_cents"]),
+                "vendor_credits_cents": int(totals["vendor_credits_cents"]),
+                "fees_and_deductions_cents": int(totals["fees_and_deductions_cents"]),
+                "expected_net_payment_cents": effective,
             }
-            if any(int(totals[key]) for key in ("positive_adjustments_cents",
-                                                "vendor_credits_cents",
-                                                "fees_and_deductions_cents")):
-                result.update({
-                    "gross_invoice_total_cents": int(totals["gross_invoice_total_cents"]),
-                    "positive_adjustments_cents": int(totals["positive_adjustments_cents"]),
-                    "vendor_credits_cents": int(totals["vendor_credits_cents"]),
-                    "fees_and_deductions_cents": int(totals["fees_and_deductions_cents"]),
-                    "expected_net_payment_cents": effective,
-                })
             return result

@@ -23,6 +23,10 @@ from app.ui.styles import PADDING
 from app.ui.scrollable_frame import ScrollableFrame
 from app.ui.matterport_email_import_dialog import MatterportEmailImportDialog
 from app.ui.tipalti_import_dialog import TipaltiImportDialog
+from app.services.jobs_service import JobsService
+from app.services.market_service import MarketService
+from app.services.technician_service import TechnicianService
+from app.ui.job_form import changed_fields, show_job_form
 
 LOGGER = logging.getLogger(__name__)
 EXPECTED_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
@@ -221,13 +225,17 @@ class PaymentBatchDetail(tk.Toplevel):
         ttk.Label(distribution, textvariable=self.distribution_unavailable_var,
                   style="Section.TLabel").grid(row=0, column=0, columnspan=6, sticky="w")
         self.distribution_vars = {key: tk.StringVar(value="—") for key in
-                                  ("gross", "technicians", "east", "lunatech", "unallocated")}
+            ("payment", "calculated", "awaiting", "technicians", "east", "lunatech",
+             "financial_exceptions")}
         distribution_specs = (
-            ("Matterport Gross Payment", "gross", None),
+            ("Total Matterport Payment", "payment", "Section.TLabel"),
+            ("Revenue Successfully Distributed", "calculated", None),
+            ("Revenue Awaiting Resolution", "awaiting", None),
             ("Technician Transfers", "technicians", None),
             ("Transfer to LunaTech-East", "east", "Section.TLabel"),
             ("Retained by LunaTech 3D", "lunatech", "Section.TLabel"),
-            ("Unallocated / Exceptions", "unallocated", None),
+            ("Calculated Revenue Total", "calculated", "Section.TLabel"),
+            ("Financial Calculation Exceptions", "financial_exceptions", None),
         )
         for index, (label, key, style) in enumerate(distribution_specs):
             row, pair = divmod(index, 2); column = pair * 2
@@ -238,7 +246,29 @@ class PaymentBatchDetail(tk.Toplevel):
                 row=row + 1, column=column + 1, sticky="w", padx=(0, 18), pady=2)
         self.distribution_status_var = tk.StringVar()
         ttk.Label(distribution, textvariable=self.distribution_status_var, wraplength=500).grid(
-            row=4, column=0, columnspan=4, sticky="w", pady=(2, 0))
+            row=5, column=0, columnspan=4, sticky="w", pady=(2, 0))
+
+        exceptions = ttk.LabelFrame(content, text="Financial Exceptions — Corrective Action Required", padding=6)
+        exceptions.pack(fill="x", pady=(0, 8))
+        exception_columns = ("job", "invoice", "customer", "amount", "category", "problem", "action")
+        self.financial_exceptions = ttk.Treeview(exceptions, columns=exception_columns,
+                                                 show="headings", height=2, selectmode="browse")
+        for key, heading, width in (("job", "Job", 95), ("invoice", "Invoice", 105),
+                ("customer", "Customer / Project", 150), ("amount", "Gross Amount", 90),
+                ("category", "Category", 135), ("problem", "Specific Problem", 310),
+                ("action", "Corrective Action", 150)):
+            self.financial_exceptions.heading(key, text=heading)
+            self.financial_exceptions.column(key, width=width, anchor="e" if key == "amount" else "w")
+        self.financial_exceptions.pack(fill="x")
+        self.financial_exceptions.bind("<Double-1>", lambda _event: self.open_selected_financial_exception())
+        exception_actions = ttk.Frame(exceptions); exception_actions.pack(fill="x", pady=(5, 0))
+        self.exception_summary_var = tk.StringVar(value="No financial calculation exceptions.")
+        ttk.Label(exception_actions, textvariable=self.exception_summary_var).pack(side="left")
+        self.exception_action_button = ttk.Button(exception_actions, text="Open Corrective Workflow",
+            command=self.open_selected_financial_exception, state="disabled")
+        self.exception_action_button.pack(side="right")
+        self.financial_exceptions.bind("<<TreeviewSelect>>", lambda _event:
+            self.exception_action_button.configure(state="normal" if self.financial_exceptions.selection() else "disabled"))
 
         compensation = ttk.LabelFrame(content, text="Technician Transfers", padding=6)
         compensation.pack(fill="x", pady=(0, 8))
@@ -280,7 +310,7 @@ class PaymentBatchDetail(tk.Toplevel):
                  ("Expected Net Payment", "expected_net_payment_cents"),
                  ("Actual ACH Received", "payment_amount_cents"),
                  ("Difference", "difference_cents"), ("Matched", "matched_count"),
-                 ("Exceptions", "exception_count"))
+                 ("Payment Matching Exceptions", "exception_count"))
         for index, (label, key) in enumerate(specs):
             row, col = divmod(index, 2); col *= 2; var = tk.StringVar(value="$0.00" if "cents" in key else "0"); self.total_vars[key] = var
             ttk.Label(totals, text=label + ":").grid(row=row, column=col, sticky="e", padx=(5, 2), pady=2)
@@ -433,8 +463,9 @@ class PaymentBatchDetail(tk.Toplevel):
             guidance = (f"All {preview['summary']['eligible_item_count']} jobs are matched.\n"
                         "Technician earnings have been calculated. Review the summary and finalize when ready.")
         elif calculation_errors:
-            action, label = "calculation_exceptions", "Review Exceptions"
-            guidance = "Technician calculation is blocked:\n" + "\n".join(
+            count = len(calculation_errors)
+            action, label = "calculation_exceptions", f"Resolve {count} Financial Exception{'s' if count != 1 else ''}"
+            guidance = "Financial distribution requires corrective action:\n" + "\n".join(
                 f"• {reason}" for reason in calculation_errors[:4])
         else:
             action, label = "match", "Match Jobs"
@@ -451,9 +482,18 @@ class PaymentBatchDetail(tk.Toplevel):
     def run_primary_action(self) -> None:
         actions = {"import": self.open_importer, "match": self.match_jobs,
                    "exceptions": self.resolve_exceptions, "finalize": self.finalize_payment,
-                   "calculation_exceptions": self.show_workflow_details,
+                   "calculation_exceptions": self.focus_financial_exceptions,
                    "review": self.review_earnings}
         actions[self.primary_action]()
+
+    def focus_financial_exceptions(self) -> None:
+        """Move directly to the actionable exception list, not passive details."""
+        rows = self.financial_exceptions.get_children()
+        if rows:
+            self.financial_exceptions.selection_set(rows[0])
+            self.financial_exceptions.see(rows[0])
+            self.financial_exceptions.focus(rows[0])
+            self.financial_exceptions.focus_set()
 
     def sort_items(self, column: str) -> None:
         """Toggle typed sorting while retaining the selected payment item."""
@@ -501,6 +541,8 @@ class PaymentBatchDetail(tk.Toplevel):
         self.distribution_unavailable_var.set("Match invoice items to calculate a non-posting preview.")
         self.distribution_status_var.set("")
         for var in self.distribution_vars.values(): var.set("—")
+        self.financial_exceptions.delete(*self.financial_exceptions.get_children())
+        self.exception_action_button.configure(state="disabled")
         earnings = {}
         paid_status = {}
         if self.batch_id and self.item_rows:
@@ -511,16 +553,33 @@ class PaymentBatchDetail(tk.Toplevel):
             posted_rows = compensation.list_technician_earnings(payment_batch_id=self.batch_id)
             self.posted_earnings = posted_rows
             self.distribution_unavailable_var.set("")
-            self.distribution_vars["gross"].set(format_cents(totals["gross_revenue_total_cents"]))
+            payment_total = int(self.batch.get("payment_amount_cents") or 0)
+            calculated = int(totals["gross_revenue_total_cents"])
+            self.distribution_vars["payment"].set(format_cents(payment_total))
+            self.distribution_vars["calculated"].set(format_cents(calculated))
             self.distribution_vars["technicians"].set(format_cents(totals["technician_total_cents"]))
             self.distribution_vars["east"].set(format_cents(totals["lunatech_east_total_cents"]))
             self.distribution_vars["lunatech"].set(format_cents(totals["lunatech_total_cents"]))
             unallocated = int(totals["unallocated_total_cents"])
-            self.distribution_vars["unallocated"].set(format_cents(unallocated))
+            self.distribution_vars["awaiting"].set(format_cents(unallocated))
+            self.distribution_vars["financial_exceptions"].set(str(len(preview["exceptions"])))
             self.distribution_status_var.set(
                 "✓ Distribution balances to the Matterport payment" if unallocated == 0 and not preview["exceptions"]
-                else f"⚠ {format_cents(unallocated)} remains unallocated; "
-                     f"{len(preview['exceptions'])} exception(s)")
+                else f"⚠ {len(preview['exceptions'])} job(s) totaling {format_cents(unallocated)} "
+                     "require financial setup.")
+            self.exception_summary_var.set(
+                "No financial calculation exceptions." if not preview["exceptions"] else
+                f"{len(preview['exceptions'])} job(s) totaling {format_cents(unallocated)} require financial setup.")
+            for exception in preview["exceptions"]:
+                code = exception.get("reason_code") or "CALCULATION_EXCEPTION"
+                category, action = self._exception_presentation(code)
+                customer = exception.get("customer") or exception.get("project") or "—"
+                iid = f"financial-{len(self.financial_exceptions.get_children())}"
+                self.financial_exceptions.insert("", "end", iid=iid, values=(
+                    exception.get("external_job_id") or exception.get("job_id") or "—",
+                    exception.get("document_number") or "—", customer,
+                    format_cents(exception.get("gross_revenue_cents")), category,
+                    exception.get("message") or "Calculation is blocked.", action))
             self.allocation_totals_var.set(
                 f"Total Technician Transfers: {format_cents(totals['technician_total_cents'])}")
             for posted in posted_rows:
@@ -556,6 +615,63 @@ class PaymentBatchDetail(tk.Toplevel):
         self.technician_summary.configure(
             height=max(1, min(6, len(self.technician_summary.get_children()))))
         self._update_calculation_action()
+
+    @staticmethod
+    def _exception_presentation(code: str) -> tuple[str, str]:
+        presentations = {
+            "MISSING_MARKET": ("Market distribution", "Open Job and Assign Market"),
+            "MISSING_PRIMARY_TECHNICIAN": ("Technician assignment", "Open Job and Assign Technician"),
+            "MULTIPLE_PRIMARY_TECHNICIANS": ("Technician assignment", "Open Job Assignments"),
+            "NO_TECHNICIAN_RULE": ("Compensation rule", "Open Technician Compensation"),
+            "AMBIGUOUS_TECHNICIAN_RULE": ("Compensation rule", "Open Technician Compensation"),
+            "NO_MARKET_REVENUE_RULE": ("Market distribution", "Open Market Revenue Rules"),
+            "AMBIGUOUS_MARKET_REVENUE_RULE": ("Market distribution", "Open Market Revenue Rules"),
+            "NO_RULE_EFFECTIVE_DATE": ("Job financial setup", "Open Job and Correct Date"),
+            "INVALID_FINANCIAL_AMOUNT": ("Job financial setup", "Open Job Financials"),
+            "FINANCIAL_COMPONENTS_DO_NOT_RECONCILE": ("Job financial setup", "Open Job Financials"),
+            "EXISTING_CALCULATION_DIFFERS": ("Existing calculation", "Open Calculation Details"),
+            "ITEM_NOT_MATCHED": ("Payment matching", "Open Payment Matching"),
+            "MISSING_JOB": ("Payment matching", "Open Payment Matching"),
+        }
+        return presentations.get(code, ("Financial calculation", "See Management Area"))
+
+    def open_selected_financial_exception(self) -> None:
+        """Open the existing repair workflow, then recalculate this preserved batch window."""
+        selection = self.financial_exceptions.selection()
+        if not selection or not self.compensation_preview:
+            return
+        index = self.financial_exceptions.index(selection[0])
+        exception = self.compensation_preview["exceptions"][index]
+        code, job_id = exception.get("reason_code"), exception.get("job_id")
+        if code in {"MISSING_MARKET", "MISSING_PRIMARY_TECHNICIAN",
+                    "MULTIPLE_PRIMARY_TECHNICIANS", "NO_RULE_EFFECTIVE_DATE",
+                    "INVALID_FINANCIAL_AMOUNT", "FINANCIAL_COMPONENTS_DO_NOT_RECONCILE"} and job_id:
+            if not self.can_modify:
+                messagebox.showwarning("Financial Exception", "Administrator or operator access is required to edit this Job.", parent=self)
+                return
+            try:
+                jobs = JobsService(self.service.auth)
+                original = jobs.get_job(int(job_id))
+                if not original:
+                    raise LookupError("Job not found")
+                markets = MarketService(self.service.auth).list_markets()
+                technicians = TechnicianService(self.service.auth).list_technicians()
+                submitted = show_job_form(self, original, markets, technicians)
+                if submitted is not None:
+                    changes = changed_fields(original, submitted)
+                    primary = submitted.get("primary_technician_id")
+                    if changes or primary != original.get("primary_technician_id"):
+                        jobs.update_job(self.session, int(job_id), changes, primary)
+                    self.refresh(); self.on_changed(self.batch_id)
+            except Exception as exc:
+                _show_error(self, exc)
+            return
+        if code in {"ITEM_NOT_MATCHED", "MISSING_JOB"}:
+            self.resolve_exceptions(); return
+        _category, action = self._exception_presentation(code or "")
+        messagebox.showinfo("Correct Financial Exception",
+            f"Use the existing {action.removeprefix('Open ')} management area.\n\n"
+            f"{exception.get('message') or 'The calculation is blocked.'}", parent=self)
 
     def _update_calculation_action(self) -> None:
         selected = self.technician_summary.selection()
