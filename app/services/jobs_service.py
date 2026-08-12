@@ -459,6 +459,8 @@ class JobsService:
             "j.postal_code", "j.county", "j.job_status", "m.market_name", "m.state",
             "p.project_code", "p.project_name", "p.client_name", "t.tech_code",
             "t.first_name", "t.last_name",
+            "(SELECT GROUP_CONCAT(jf.ap_invoice_number, ' ') FROM JobFinancials jf "
+            "WHERE jf.job_id = j.job_id)",
         )
         conditions = [
             "(" + " OR ".join(
