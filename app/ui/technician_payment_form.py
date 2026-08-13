@@ -26,6 +26,11 @@ class TechnicianPaymentForm(ttk.Frame):
         self.technicians={f"{t.get('preferred_name') or t['first_name']} {t['last_name']} ({t['tech_code']})":t['tech_id'] for t in technicians}
         self.vars={key:tk.StringVar() for key in ("technician","date","amount","method","status","reference","description","notes","allocated","unallocated","balance")}
         self.historical=tk.BooleanVar(value=False);self.confirmed=tk.BooleanVar(value=True)
+        # Keep email drafting as an explicit form choice instead of asking only
+        # after the payment has already been recorded.  reset() deliberately does
+        # not change this value, so the operator's choice survives successive
+        # payments entered through this form.
+        self.generate_email=tk.BooleanVar(value=True)
         self.initial_earning_ids=set(earning_ids or ());self.on_saved=on_saved
         self.vars["date"].set(date.today().strftime("%m/%d/%Y"));self.vars["method"].set(PAYMENT_METHODS[0]);self.vars["status"].set("Paid")
         self.allocations={};self.non_job=[];self._technician_name=""
@@ -58,6 +63,8 @@ class TechnicianPaymentForm(ttk.Frame):
         for label,key in (("Payment total","amount"),("Allocated to jobs/items","allocated"),("Unallocated amount","unallocated")):
             ttk.Label(totals,text=label).pack(side="left",padx=(0,4));ttk.Label(totals,textvariable=self.vars[key]).pack(side="left",padx=(0,18))
         buttons=ttk.Frame(self);buttons.pack(fill="x",pady=(8,0))
+        ttk.Checkbutton(buttons,text="Generate payment email after recording",
+                        variable=self.generate_email).pack(side="left")
         self.save=ttk.Button(buttons,text="Record as Paid",command=self.submit);self.save.pack(side="right")
         ttk.Button(buttons,text="Cancel",command=self.reset).pack(side="right",padx=6)
         if session.role not in {"admin","operator"}:self.save.configure(state="disabled")
@@ -134,7 +141,7 @@ class TechnicianPaymentForm(ttk.Frame):
             payment=self.service.create_manual_payment(self.session,technician_id=self.technicians.get(self.vars["technician"].get()),payment_date=datetime.strptime(self.vars["date"].get(),"%m/%d/%Y").date().isoformat(),amount_cents=parse_currency(self.vars["amount"].get()),payment_method=self.vars["method"].get(),status=self.vars["status"].get(),reference=self.vars["reference"].get(),description=self.vars["description"].get(),notes=self.vars["notes"].get(),allocations=[{"earning_id":key,"amount_cents":value} for key,value in self.allocations.items() if value],non_job_items=self.non_job,historical=self.historical.get(),technician_confirmed=self.confirmed.get())
         except Exception as exc:messagebox.showerror("Technician Payment",str(exc),parent=self);return
         messagebox.showinfo("Technician Payment",f"Recorded paid payment #{payment['technician_payment_id']}.",parent=self)
-        if messagebox.askyesno("Payment Email","Generate a reviewable payment email draft now?",parent=self):
+        if self.generate_email.get():
             from app.ui.payment_email_dialog import generate_and_open_payment_email
             generate_and_open_payment_email(self,self.service,self.session,payment["technician_payment_id"])
         if self.on_saved:self.on_saved(payment)
