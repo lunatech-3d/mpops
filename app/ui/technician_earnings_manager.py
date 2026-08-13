@@ -1,5 +1,4 @@
 """Central technician earning review screen and testable controller."""
-import json
 import tkinter as tk
 from datetime import date, datetime
 from tkinter import messagebox, ttk
@@ -124,7 +123,6 @@ class TechnicianEarningsManager(ttk.Frame):
         self.payment_button = ttk.Button(
             bar, text="Record Technician Payment", command=self.record_payment)
         self.payment_button.pack(side="left")
-        ttk.Button(bar, text="View Details", command=self.details).pack(side="left", padx=6)
         if not self.controller.can_modify:
             self.payment_button.configure(state="disabled")
         self.refresh()
@@ -225,20 +223,3 @@ class TechnicianEarningsManager(ttk.Frame):
                                    technician_id=selected[0]["tech_id"],earning_ids=ids,
                                    on_saved=lambda _payment:(self.refresh(),dialog.destroy()))
         form.pack(fill="both",expand=True)
-
-    def details(self):
-        if not self.tree.selection():
-            return
-        earning_id = int(self.tree.selection()[0])
-        data = self.controller.service.get_earning_calculation_details(earning_id)
-        dialog = tk.Toplevel(self)
-        dialog.title(f"Technician Earning #{earning_id} Details")
-        dialog.geometry("760x600")
-        dialog.transient(self.winfo_toplevel())
-        text = tk.Text(dialog, wrap="word", padx=PADDING, pady=PADDING)
-        scrollbar = ttk.Scrollbar(dialog, orient="vertical", command=text.yview)
-        text.configure(yscrollcommand=scrollbar.set)
-        text.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-        text.insert("1.0", json.dumps(data, indent=2, default=str))
-        text.configure(state="disabled")
