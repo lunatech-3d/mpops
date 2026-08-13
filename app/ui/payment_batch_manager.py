@@ -203,10 +203,10 @@ class PaymentBatchDetail(tk.Toplevel):
         self.notes = tk.Text(self.source_details, height=2, wrap="word")
         self.notes.grid(row=1, column=1, columnspan=5, sticky="ew", pady=2)
         items_frame = ttk.LabelFrame(content, text="Payment Items", padding=6); items_frame.pack(fill="both", expand=True, pady=8)
-        columns = ("document_number", "document_date", "account_name",
-                   "customer", "amount_received_cents", "signed_effect_cents", "allocation_status")
-        headings = ("Document Number", "Document Date", "Account",
-                    "Job / Invoice", "Gross Amount", "Net Effect", "Allocation Status")
+        columns = ("document_number", "document_date", "account_name", "customer",
+                   "technician", "amount_received_cents", "signed_effect_cents")
+        headings = ("Document Number", "Document Date", "Account", "Job / Invoice",
+                    "Technician", "Gross Amount", "Net Effect")
         self.items = ttk.Treeview(items_frame, columns=columns, show="headings", selectmode="browse")
         self.payment_item_menu = tk.Menu(self, tearoff=False)
         self.payment_item_menu.add_command(
@@ -216,9 +216,9 @@ class PaymentBatchDetail(tk.Toplevel):
         self.item_headings = dict(zip(columns, headings))
         for key, heading in zip(columns, headings):
             self.items.heading(key, text=heading, command=lambda column=key: self.sort_items(column))
-            widths = {"document_number": 135, "document_date": 95, "account_name": 125,
-                      "customer": 310, "amount_received_cents": 100,
-                      "signed_effect_cents": 95, "allocation_status": 115}
+            widths = {"document_number": 135, "document_date": 95, "account_name": 110,
+                      "customer": 300, "technician": 145, "amount_received_cents": 100,
+                      "signed_effect_cents": 95}
             self.items.column(key, width=widths[key], minwidth=75,
                               anchor="e" if key in {"amount_received_cents", "signed_effect_cents"} else "w")
         self.items.tag_configure("adjustment", foreground="#8a4b08")
@@ -585,10 +585,12 @@ class PaymentBatchDetail(tk.Toplevel):
             document_type = item.get("document_type") or "Invoice"
             if document_type != "Invoice":
                 target = f"{document_type} — {target}"
+            technician = (item.get("technician") or "Unassigned"
+                          if document_type == "Invoice" else "—")
             self.items.insert("", "end", iid=iid, values=(item.get("document_number") or "",
                 format_display_date(item.get("document_date")),
-                item.get("account_name") or "Account allocation required", target, gross, effect,
-                item.get("allocation_status") or "Not Required"),
+                item.get("account_name") or "Account allocation required", target, technician,
+                gross, effect),
                 tags=("adjustment",) if document_type != "Invoice" else ())
         if selected_id and self.items.exists(selected_id):
             self.items.selection_set(selected_id); self.items.see(selected_id)

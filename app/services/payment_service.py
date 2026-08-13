@@ -84,6 +84,12 @@ EXCEPTION_GROUPS = {
 # The single authoritative expression for money used by reconciliation.
 SIGNED_AMOUNT_SQL = "COALESCE(signed_effect_cents, amount_received_cents)"
 EFFECTIVE_AMOUNT_SQL = f"COALESCE(resolved_amount_cents, {SIGNED_AMOUNT_SQL})"
+ELIGIBLE_PRIMARY_ASSIGNMENT_SQL = """
+    a.assignment_role = 'Primary'
+    AND a.assignment_status = 'Assigned'
+    AND a.unassigned_at IS NULL
+    AND t.status = 'Active'
+"""
 
 
 class PaymentService:
@@ -767,22 +773,32 @@ class PaymentService:
         with self.auth.connection() as connection:
             self._require_batch(connection, payment_batch_id)
             return [dict(row) for row in connection.execute(
-                """SELECT i.*, b.payment_date, j.client_name_source AS customer,
+                f"""WITH eligible_primary AS (
+                     SELECT a.job_id, COUNT(*) AS candidate_count,
+                            CASE WHEN COUNT(*) = 1 THEN MIN(a.tech_id) END AS tech_id,
+                            CASE WHEN COUNT(*) = 1 THEN
+                              MIN(TRIM(COALESCE(NULLIF(TRIM(t.preferred_name), ''),
+                                                t.first_name, '') || ' ' ||
+                                       COALESCE(t.last_name, '')))
+                            END AS technician_name
+                     FROM JobAssignments a
+                     JOIN Techs t ON t.tech_id = a.tech_id
+                     WHERE {ELIGIBLE_PRIMARY_ASSIGNMENT_SQL}
+                     GROUP BY a.job_id
+                   )
+                   SELECT i.*, b.payment_date, j.client_name_source AS customer,
                           COALESCE(j.capture_address_raw,j.address_1,'') AS address,
                           COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at) AS job_date,
-                          a.tech_id, TRIM(COALESCE(t.preferred_name,t.first_name,'') || ' ' ||
-                               COALESCE(t.last_name,'')) AS technician
+                          ep.tech_id, COALESCE(ep.candidate_count, 0) AS technician_candidate_count,
+                          CASE COALESCE(ep.candidate_count, 0)
+                            WHEN 0 THEN 'Unassigned'
+                            WHEN 1 THEN ep.technician_name
+                            ELSE 'Multiple assigned'
+                          END AS technician
                    FROM MatterportPaymentItems i
                    JOIN MatterportPaymentBatches b ON b.payment_batch_id=i.payment_batch_id
                    LEFT JOIN Jobs j ON j.job_id=i.job_id
-                   LEFT JOIN JobAssignments a ON a.job_assignment_id=(
-                     SELECT a2.job_assignment_id FROM JobAssignments a2
-                     WHERE a2.job_id=i.job_id AND a2.assignment_role='Primary'
-                       AND (a2.assignment_status='Completed' OR
-                            (a2.assignment_status='Assigned' AND a2.unassigned_at IS NULL))
-                     ORDER BY CASE WHEN a2.assignment_status='Completed' THEN 0 ELSE 1 END,
-                              a2.job_assignment_id DESC LIMIT 1)
-                   LEFT JOIN Techs t ON t.tech_id=a.tech_id
+                   LEFT JOIN eligible_primary ep ON ep.job_id=i.job_id
                    WHERE i.payment_batch_id=? ORDER BY i.payment_item_id""", (payment_batch_id,)
             )]
 
@@ -1147,13 +1163,11 @@ class PaymentService:
         with self.auth.connection() as connection:
             self._require_job(connection, job_id)
             rows = connection.execute(
-                """
+                f"""
                 SELECT t.tech_id, t.first_name, t.last_name
                 FROM JobAssignments a
                 JOIN Techs t ON t.tech_id = a.tech_id
-                WHERE a.job_id = ? AND a.assignment_role = 'Primary'
-                  AND a.unassigned_at IS NULL AND a.assignment_status = 'Assigned'
-                  AND t.status = 'Active'
+                WHERE a.job_id = ? AND {ELIGIBLE_PRIMARY_ASSIGNMENT_SQL}
                 ORDER BY a.job_assignment_id
                 """, (job_id,)
             ).fetchall()
