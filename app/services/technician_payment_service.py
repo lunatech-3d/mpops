@@ -54,27 +54,28 @@ class TechnicianPaymentService:
 
     @staticmethod
     def _eligible(connection, earning_id):
-        row=connection.execute("""SELECT e.*,a.allocation_status,pe.technician_payment_id
+        row=connection.execute("""SELECT e.*,a.allocation_status,
+          COALESCE((SELECT SUM(pe.amount_applied_cents)
+            FROM TechnicianPaymentEarnings pe JOIN TechnicianPayments p
+              ON p.technician_payment_id=pe.technician_payment_id
+            WHERE pe.technician_earning_id=e.technician_earning_id
+              AND p.payment_status='Paid' AND p.reversed_at IS NULL),0) valid_paid_cents
           FROM TechnicianJobEarnings e
           LEFT JOIN CompanyRevenueAllocations a ON a.technician_earning_id=e.technician_earning_id
             AND a.allocation_status<>'Superseded'
-          LEFT JOIN TechnicianPaymentEarnings pe ON pe.technician_earning_id=e.technician_earning_id
           WHERE e.technician_earning_id=?""",(earning_id,)).fetchone()
         if not row: return None,"earning does not exist"
-        if row["earning_status"] != "Approved": return row,"earning is not Approved"
-        if row["included_in_payment_run_id"] is not None or row["technician_payment_id"] is not None:
-            return row,"earning is already linked to a payment"
-        if row["paid_at"] is not None: return row,"earning is already paid"
+        if row["earning_status"] not in {"Approved", "Paid"}: return row,"earning is not approved"
+        if row["valid_paid_cents"] >= row["net_earning_cents"]: return row,"earning is fully paid"
         if row["voided_at"] is not None: return row,"earning is voided"
         if row["entry_type"] != "Manual Adjustment" and row["allocation_status"] != "Approved":
             return row,"company allocation is not Approved"
         return row,None
 
     def list_approved_unpaid_earnings(self, **filters):
-        filters={**filters,"status":"Approved","unpaid_only":True}
+        filters={**filters,"status":"All","unpaid_only":True}
         return [row for row in CompensationService(self.auth).list_earnings_for_review(**filters)
-                if row["included_in_payment_run_id"] is None and row["paid_at"] is None and
-                row["voided_at"] is None and row["technician_payment_id"] is None and
+                if row["voided_at"] is None and row["balance_due_cents"] > 0 and
                 (row["entry_type"] == "Manual Adjustment" or row["allocation_status"] == "Approved")]
 
     def list_outstanding_earnings(self, technician_id: int):
@@ -87,7 +88,7 @@ class TechnicianPaymentService:
         with self.auth.connection() as c:
             rows = c.execute("""SELECT e.*,j.external_job_id,j.project_name_source,
               COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at) service_date,
-              COALESCE(SUM(CASE WHEN p.payment_status='Paid'
+              COALESCE(SUM(CASE WHEN p.payment_status='Paid' AND p.reversed_at IS NULL
                 THEN pe.amount_applied_cents ELSE 0 END),0) previously_paid_cents
               FROM TechnicianJobEarnings e
               LEFT JOIN Jobs j ON j.job_id=e.job_id
@@ -202,7 +203,8 @@ class TechnicianPaymentService:
                     raise ValueError(f"Earning {eid} is no longer approved and available")
                 paid=c.execute("""SELECT COALESCE(SUM(pe.amount_applied_cents),0)
                   FROM TechnicianPaymentEarnings pe JOIN TechnicianPayments p ON p.technician_payment_id=pe.technician_payment_id
-                  WHERE pe.technician_earning_id=? AND p.payment_status='Paid'""",(eid,)).fetchone()[0]
+                  WHERE pe.technician_earning_id=? AND p.payment_status='Paid'
+                    AND p.reversed_at IS NULL""",(eid,)).fetchone()[0]
                 if cents>earning["net_earning_cents"]-paid: raise ValueError(f"Allocation exceeds earning {eid} balance")
                 checked.append((earning,cents))
             # TechnicianPaymentRuns is a legacy non-null parent retained for schema

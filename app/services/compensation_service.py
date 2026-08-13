@@ -658,8 +658,8 @@ class CompensationService:
             job_date_from=None, job_date_to=None, payment_date_from=None, payment_date_to=None,
             market_id=None, search_text=None, unpaid_only=False):
         clauses, params = [], []
-        filters = (("e.earning_status",status),("e.tech_id",technician_id),
-                   ("e.payment_batch_id",payment_batch_id),("j.market_id",market_id))
+        filters = (("e.tech_id",technician_id), ("e.payment_batch_id",payment_batch_id),
+                   ("j.market_id",market_id))
         for column, value in filters:
             if value not in (None, "", "All"): clauses.append(column+"=?"); params.append(value)
         for column, op, value in (("substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10)",">=",job_date_from),
@@ -669,25 +669,87 @@ class CompensationService:
         if search_text:
             clauses.append("(j.external_job_id LIKE ? OR j.capture_address_raw LIKE ? OR j.address_1 LIKE ?)")
             token=f"%{str(search_text).strip()}%"; params.extend((token,token,token))
+        state_expression = """CASE
+          WHEN e.voided_at IS NOT NULL OR e.earning_status='Voided' THEN 'Voided'
+          WHEN COALESCE(pa.valid_paid_cents,0)<=0 THEN 'Ready to Pay'
+          WHEN COALESCE(pa.valid_paid_cents,0)<e.net_earning_cents THEN 'Partially Paid'
+          ELSE 'Paid' END"""
+        if status not in (None, "", "All"):
+            if status not in {"Ready to Pay", "Partially Paid", "Paid", "Voided"}:
+                raise ValueError("Unsupported technician earning payment state")
+            clauses.append(f"({state_expression})=?")
+            params.append(status)
+        # Kept for non-UI callers.  Legacy payment-run and cached paid fields are
+        # deliberately not payment authority.
         if unpaid_only:
-            clauses.extend(("e.included_in_payment_run_id IS NULL", "e.paid_at IS NULL",
-                            "e.voided_at IS NULL"))
+            clauses.append(f"({state_expression}) IN ('Ready to Pay','Partially Paid')")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         sql = """SELECT e.*,COALESCE(t.preferred_name,t.first_name)||' '||t.last_name technician_name,
           j.external_job_id,COALESCE(j.capture_address_raw,j.address_1,'') job_address,
           substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10) job_date,
           m.market_name,i.document_number,b.payment_date,b.payment_batch_id matterport_payment_batch_id,
           a.lunatech_east_amount_cents,a.lunatech_amount_cents,a.allocation_status,
-          pe.technician_payment_id,(pe.technician_payment_id IS NOT NULL) linked_to_payment
+          COALESCE(pa.valid_paid_cents,0) valid_paid_cents,
+          MAX(0,e.net_earning_cents-COALESCE(pa.valid_paid_cents,0)) balance_due_cents,
+          COALESCE(pa.valid_payment_count,0) valid_payment_count,
+          pa.latest_paid_payment_id,pa.latest_paid_date,
+          (COALESCE(pa.valid_payment_count,0)>0) linked_to_payment,
+          (""" + state_expression + """) payment_state
           FROM TechnicianJobEarnings e JOIN Techs t ON t.tech_id=e.tech_id
           LEFT JOIN Jobs j ON j.job_id=e.job_id LEFT JOIN Markets m ON m.market_id=j.market_id
           LEFT JOIN MatterportPaymentItems i ON i.payment_item_id=e.payment_item_id
           LEFT JOIN MatterportPaymentBatches b ON b.payment_batch_id=e.payment_batch_id
           LEFT JOIN CompanyRevenueAllocations a ON a.technician_earning_id=e.technician_earning_id
             AND a.allocation_status<>'Superseded'
-          LEFT JOIN TechnicianPaymentEarnings pe ON pe.technician_earning_id=e.technician_earning_id"""
+          LEFT JOIN (SELECT pe.technician_earning_id,
+              SUM(pe.amount_applied_cents) valid_paid_cents,
+              COUNT(DISTINCT p.technician_payment_id) valid_payment_count,
+              MAX(p.technician_payment_id) latest_paid_payment_id,
+              MAX(COALESCE(p.payment_date,p.settled_at,p.recorded_at)) latest_paid_date
+            FROM TechnicianPaymentEarnings pe JOIN TechnicianPayments p
+              ON p.technician_payment_id=pe.technician_payment_id
+            WHERE p.payment_status='Paid' AND p.reversed_at IS NULL
+            GROUP BY pe.technician_earning_id) pa
+            ON pa.technician_earning_id=e.technician_earning_id"""
         with self.auth.connection() as connection:
             return [dict(r) for r in connection.execute(sql+where+" ORDER BY e.technician_earning_id",params)]
+
+    def get_payment_batch_ledger_completeness(self, payment_batch_id: int) -> dict[str, Any]:
+        """Compare calculated preview entries with the immutable posted ledger.
+
+        This is intentionally read-only: opening a review must never finalize or
+        repair accounting records.
+        """
+        self._id(payment_batch_id, "payment_batch_id")
+        with self.auth.connection() as connection:
+            preview = self._preview(connection, payment_batch_id)
+            posted = connection.execute("""SELECT COUNT(*) FROM TechnicianJobEarnings
+              WHERE payment_batch_id=? AND entry_type='Calculated'""",
+              (payment_batch_id,)).fetchone()[0]
+            permanent_items = {row[0] for row in connection.execute("""SELECT payment_item_id
+              FROM TechnicianJobEarnings WHERE payment_batch_id=? AND entry_type='Calculated'
+                AND payment_item_id IS NOT NULL""", (payment_batch_id,))}
+            missing = []
+            for entry in preview["proposed_entries"]:
+                if entry["payment_item_id"] not in permanent_items:
+                    missing.append({
+                        "job_id": entry["job_id"],
+                        "external_job_id": entry.get("external_job_id"),
+                        "document_number": entry["document_number"],
+                        "technician_id": entry["technician_id"],
+                        "technician_name": entry["technician_name"],
+                        "gross_amount_cents": entry["gross_revenue_cents"],
+                        "reason": "Preview calculated successfully, but finalization did not post the earning.",
+                    })
+            return {
+                "matched_item_count": len(preview["proposed_entries"]) + len(preview["exceptions"]),
+                "preview_entry_count": len(preview["proposed_entries"]),
+                "permanent_earning_count": posted,
+                "missing_earning_count": len(missing),
+                "missing": missing,
+                "exceptions": preview["exceptions"],
+                "is_incomplete": bool(missing),
+            }
 
     def get_earning_calculation_details(self, earning_id: int) -> dict[str, Any]:
         self._id(earning_id,"earning_id")
