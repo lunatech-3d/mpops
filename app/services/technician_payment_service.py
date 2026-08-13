@@ -9,6 +9,7 @@ import re
 from datetime import date
 from typing import Any
 
+from app.address_utils import format_service_address
 from app.date_utils import utc_now_iso
 from app.security.audit import record_event
 from app.security.auth import AuthService, Session
@@ -242,7 +243,8 @@ class TechnicianPaymentService:
             if not row: raise LookupError("Technician payment not found")
             result=dict(row)
             result["allocations"]=[dict(x) for x in c.execute("""SELECT pe.*,e.entry_type,e.reason,e.adjustment_amount_cents,
-              e.calculation_details_json,j.external_job_id,j.project_name_source,
+              e.calculation_details_json,j.job_id,j.external_job_id,j.project_name_source,
+              j.capture_address_raw,j.address_1,j.address_2,j.city,j.state,j.postal_code,
               substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10) service_date
               FROM TechnicianPaymentEarnings pe JOIN TechnicianJobEarnings e ON e.technician_earning_id=pe.technician_earning_id
               LEFT JOIN Jobs j ON j.job_id=e.job_id WHERE pe.technician_payment_id=? ORDER BY pe.technician_payment_earning_id""",(payment_id,))]
@@ -314,33 +316,47 @@ class TechnicianPaymentService:
         lines=[]
         for allocation in detail["allocations"]:
             components=self._email_components(allocation)
-            lines.append({"job":allocation.get("external_job_id") or f"Earning #{allocation['technician_earning_id']}",
+            is_job = allocation.get("job_id") is not None
+            lines.append({"kind":"job" if is_job else "non_job",
+                "address":format_service_address(allocation) or "Address not recorded" if is_job else None,
+                "job":allocation.get("external_job_id") or (f"Earning #{allocation['technician_earning_id']}" if is_job else None),
                 "date":allocation.get("service_date") or "—",
-                "project":allocation.get("project_name_source") or allocation.get("reason") or "—",
+                "description":allocation.get("reason") or allocation.get("entry_type") or "Adjustment",
                 **components,"Total":int(allocation["amount_applied_cents"])})
         for item in detail["non_job_items"]:
-            lines.append({"job":item["item_type"],"date":"—","project":item.get("description") or "—",
+            lines.append({"kind":"non_job","address":None,"job":None,"date":"—",
+                "description":f"{item['item_type']} — {item.get('description') or 'Payment item'}",
                 "Capture":0,"Travel":0,"Adjustment":0,"Other":int(item["amount_cents"]),
                 "Total":int(item["amount_cents"])})
         if sum(line["Total"] for line in lines) != int(payment["payment_amount_cents"]):
             raise ValueError("Payment allocations do not equal the recorded payment total")
-        active=[name for name in ("Capture","Travel","Adjustment","Other") if any(line[name] for line in lines)]
-        headers=["Job","Service Date","Project / Customer",*active,"Total"]
-        rows=[]
-        for line in lines:
-            row=[line["job"],line["date"],line["project"],
-                 *[f"${line[name]/100:,.2f}" for name in active],f"${line['Total']/100:,.2f}"]
-            rows.append(row)
-        widths=[max(len(headers[i]),*(len(row[i]) for row in rows)) for i in range(len(headers))]
-        table="  ".join(headers[i].ljust(widths[i]) for i in range(len(headers)))+"\n"
-        table+="  ".join("-"*width for width in widths)+"\n"
-        table+="\n".join("  ".join(value.ljust(widths[i]) for i,value in enumerate(row)) for row in rows)
+        job_records=[]
+        for line in (line for line in lines if line["kind"] == "job"):
+            address=line["address"]
+            if address == "Address not recorded" and line["job"]:
+                address += f" — Job {line['job']}"
+            metadata=[f"Service Date: {line['date']}"]
+            if line["job"] and " — Job " not in address: metadata.append(f"Job: {line['job']}")
+            amounts=[f"Capture: ${line['Capture']/100:,.2f}",
+                     f"Travel: ${line['Travel']/100:,.2f}"]
+            amounts.extend(f"{name}: ${line[name]/100:,.2f}"
+                           for name in ("Adjustment", "Other") if line[name])
+            amounts.append(f"Total: ${line['Total']/100:,.2f}")
+            job_records.append(f"{address}\n{'    '.join(metadata)}\n{'    '.join(amounts)}")
+        sections=[]
+        if job_records:
+            sections.append("Jobs:\n\n" + "\n\n".join(job_records))
+        non_job_lines=[f"{line['description']}    ${line['Total']/100:,.2f}"
+                       for line in lines if line["kind"] == "non_job"]
+        if non_job_lines:
+            sections.append("Other payment items:\n\n" + "\n".join(non_job_lines))
+        payment_detail="\n\n".join(sections)
         paid=date.fromisoformat(str(payment["payment_date"])[:10])
         total=f"${int(payment['payment_amount_cents'])/100:,.2f}"
         first=payment.get("preferred_name") or payment["first_name"]
         subject=f"LunaTech 3D payment details — {paid.strftime('%m/%d/%Y')}"
         body=(f"Hi {first},\n\nA payment of {total} was issued to you on {paid.strftime('%m/%d/%Y')} "
-              f"by {payment.get('payment_method') or 'external payment'}.\n\nThis payment covers:\n\n{table}\n\n"
+              f"by {payment.get('payment_method') or 'external payment'}.\n\nThis payment covers:\n\n{payment_detail}\n\n"
               f"Payment total: {total}\nPayment reference: {payment.get('payment_reference') or '—'}\n\n"
               "Please contact Hayley if you have any questions about this payment.\n\nThank you,\nLunaTech 3D")
         return {"payment_id":payment_id,"recipient":email,"subject":subject,"body":body,"lines":lines}

@@ -24,7 +24,7 @@ class PaymentEmailDialog(tk.Toplevel):
         for row,(label,var) in enumerate((("To",self.recipient),("Subject",self.subject))):
             ttk.Label(fields,text=label).grid(row=row,column=0,sticky="w",padx=(0,8),pady=3)
             ttk.Entry(fields,textvariable=var).grid(row=row,column=1,sticky="ew",pady=3)
-        self.body=tk.Text(frame,wrap="none",font="TkFixedFont",undo=True)
+        self.body=tk.Text(frame,wrap="word",font="TkFixedFont",undo=True)
         self.body.insert("1.0",draft["body"]);self.body.pack(fill="both",expand=True,pady=8)
         buttons=ttk.Frame(frame);buttons.pack(fill="x")
         for label,command in (("Copy Subject",lambda:self._copy(self.subject.get())),
