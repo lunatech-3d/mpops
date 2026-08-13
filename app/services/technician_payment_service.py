@@ -38,6 +38,25 @@ DIRECT_PAYMENT_STATUSES = ("Draft", "Approved", "Scheduled", "Paid")
 FINAL_PAYMENT_STATUSES = {"Paid"}
 _BASIC_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
+# Stored compensation terminology is deliberately mapped here rather than
+# guessed from substrings.  Adding a new earning component consequently
+# requires an explicit decision about how it should appear in payment emails.
+EMAIL_COMPONENT_CATEGORIES = {
+    **{name.casefold(): "Capture" for name in (
+        "Overall", "Base", "Base Pay", "Capture", "Capture Pay", "Capture Fee",
+        "Standard Capture",
+    )},
+    **{name.casefold(): "Travel" for name in (
+        "Travel", "Travel Pay", "Mileage", "Mileage Pay", "Additional Travel",
+    )},
+    **{name.casefold(): "Adjustment" for name in (
+        "Adjustment", "Payment Adjustment", "Correction", "Payment Correction",
+    )},
+    **{name.casefold(): "Other" for name in (
+        "Off Hours", "Rush", "Cancellation", "Equipment", "Parking", "Tolls",
+    )},
+}
+
 
 class TechnicianPaymentService:
     def __init__(self, auth: AuthService): self.auth = auth
@@ -282,20 +301,80 @@ class TechnicianPaymentService:
             details = json.loads(allocation.get("calculation_details_json") or "{}")
         except (TypeError, json.JSONDecodeError):
             details = {}
-        amounts = {"Capture": 0, "Travel": 0, "Adjustment": 0, "Other": 0}
         target = int(allocation["amount_applied_cents"])
-        earning_total = int((details.get("final_amounts_cents") or {}).get("technician") or target)
-        scale = target / earning_total if earning_total else 1
-        for component in details.get("technician_components", []):
-            name = str(component.get("component") or component.get("component_type") or "").casefold()
-            cents = round(int(component.get("calculated_amount_cents") or component.get("amount_cents") or 0) * scale)
-            if "capture" in name or "base" in name: amounts["Capture"] += cents
-            elif "travel" in name or "mile" in name: amounts["Travel"] += cents
-            else: amounts["Other"] += cents
-        amounts["Adjustment"] += round(int(allocation.get("adjustment_amount_cents") or 0) * scale)
-        known = sum(amounts.values())
-        amounts["Other"] += target - known
+        raw_components = details.get("technician_components") or []
+        classified = []
+        stored_names = []
+        for component in raw_components:
+            display_name = re.sub(r"\s+", " ", str(
+                component.get("component") or component.get("component_type") or ""
+            )).strip()
+            stored_names.append(display_name or "<unnamed>")
+            category = EMAIL_COMPONENT_CATEGORIES.get(display_name.casefold())
+            if category is None:
+                raise ValueError(
+                    "Cannot generate technician payment email: unknown stored component "
+                    f"{display_name or '<unnamed>'!r} for earning "
+                    f"{allocation.get('technician_earning_id')} (job "
+                    f"{allocation.get('external_job_id') or allocation.get('job_id') or 'unknown'})."
+                )
+            cents = int(component.get("calculated_amount_cents")
+                        or component.get("amount_cents") or 0)
+            classified.append((category, cents, display_name.casefold()))
+
+        adjustment = int(allocation.get("adjustment_amount_cents") or 0)
+        if adjustment and not any(category == "Adjustment" for category, _, _ in classified):
+            classified.append(("Adjustment", adjustment, "adjustment"))
+            stored_names.append("Adjustment")
+
+        source_total = sum(cents for _, cents, _ in classified)
+        stored_final = (details.get("final_amounts_cents") or {}).get("technician")
+        earning_total = (int(stored_final) + adjustment
+                         if stored_final is not None else source_total)
+        single_overall = (len(raw_components) == 1 and
+                          stored_names[0].casefold() == "overall")
+        if source_total != earning_total and single_overall and earning_total >= source_total:
+            # Older Overall earnings can lack a complete component amount.  An
+            # Overall rule is, by definition here, ordinary capture earnings.
+            classified.append(("Capture", earning_total - source_total, "overall"))
+            source_total = earning_total
+        if source_total != earning_total or target > earning_total:
+            TechnicianPaymentService._component_reconciliation_error(
+                allocation, target, source_total, stored_names)
+        if source_total <= 0 and target == 0:
+            return {name: 0 for name in ("Capture", "Travel", "Adjustment", "Other")}
+        if source_total <= 0:
+            TechnicianPaymentService._component_reconciliation_error(
+                allocation, target, source_total, stored_names)
+
+        # Allocate a partial payment in integer cents.  Largest remainders win;
+        # ties prefer Capture and then stored order, so no cent is invented or lost.
+        scaled = []
+        for index, (category, cents, normalized_name) in enumerate(classified):
+            numerator = cents * target
+            scaled.append([category, numerator // source_total, numerator % source_total,
+                           normalized_name, index])
+        remainder = target - sum(item[1] for item in scaled)
+        preference = {"Capture": 0, "Travel": 1, "Adjustment": 2, "Other": 3}
+        for item in sorted(scaled, key=lambda x: (-x[2], preference[x[0]], x[4]))[:remainder]:
+            item[1] += 1
+        amounts = {"Capture": 0, "Travel": 0, "Adjustment": 0, "Other": 0}
+        for category, cents, _, _, _ in scaled:
+            amounts[category] += cents
+        if sum(amounts.values()) != target:
+            TechnicianPaymentService._component_reconciliation_error(
+                allocation, target, sum(amounts.values()), stored_names)
         return amounts
+
+    @staticmethod
+    def _component_reconciliation_error(allocation, applied, classified, names):
+        raise ValueError(
+            "Cannot generate technician payment email: component reconciliation failed; "
+            f"earning={allocation.get('technician_earning_id')}, "
+            f"job={allocation.get('external_job_id') or allocation.get('job_id') or 'unknown'}, "
+            f"applied={applied}, classified={classified}, difference={applied-classified}, "
+            f"stored_components={names}."
+        )
 
     def build_payment_email(self, payment_id: int):
         """Build a deterministic plain-text draft from the authoritative allocations."""
@@ -337,10 +416,8 @@ class TechnicianPaymentService:
                 address += f" — Job {line['job']}"
             metadata=[f"Service Date: {line['date']}"]
             if line["job"] and " — Job " not in address: metadata.append(f"Job: {line['job']}")
-            amounts=[f"Capture: ${line['Capture']/100:,.2f}",
-                     f"Travel: ${line['Travel']/100:,.2f}"]
-            amounts.extend(f"{name}: ${line[name]/100:,.2f}"
-                           for name in ("Adjustment", "Other") if line[name])
+            amounts=[f"{name}: ${line[name]/100:,.2f}"
+                     for name in ("Capture", "Travel", "Adjustment", "Other") if line[name]]
             amounts.append(f"Total: ${line['Total']/100:,.2f}")
             job_records.append(f"{address}\n{'    '.join(metadata)}\n{'    '.join(amounts)}")
         sections=[]

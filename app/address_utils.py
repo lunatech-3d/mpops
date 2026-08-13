@@ -8,6 +8,9 @@ from typing import Any
 
 
 _EMPTY_ADDRESS_VALUES = {"", "none", "null"}
+_OPERATIONAL_METADATA = re.compile(
+    r"^(?:capture|property|service)\s*type\s*:", re.IGNORECASE
+)
 
 
 def _address_component(value: Any) -> str:
@@ -19,7 +22,12 @@ def _address_component(value: Any) -> str:
 def _raw_address(value: Any) -> str:
     """Clean separators in a preserved combined address for display."""
     parts = [_address_component(part) for part in str(value or "").split(",")]
-    return ", ".join(part for part in parts if part)
+    return ", ".join(part for part in parts if part and not _is_operational_metadata(part))
+
+
+def _is_operational_metadata(value: str) -> bool:
+    """Identify labeled job metadata that was imported into an address field."""
+    return bool(_OPERATIONAL_METADATA.match(value))
 
 
 def format_service_address(job: Mapping[str, Any]) -> str:
@@ -31,6 +39,10 @@ def format_service_address(job: Mapping[str, Any]) -> str:
     """
     address_1 = _address_component(job.get("address_1"))
     address_2 = _address_component(job.get("address_2"))
+    if _is_operational_metadata(address_2):
+        # Preserve the contaminated stored value for later data cleanup, but do
+        # not present it as a suite/unit in customer-facing output.
+        address_2 = ""
     city = _address_component(job.get("city"))
     state = _address_component(job.get("state"))
     postal_code = _address_component(job.get("postal_code"))
