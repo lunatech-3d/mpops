@@ -96,7 +96,7 @@ class TechnicianFinanceView(ttk.Frame):
         self.controller = TechnicianFinanceController(TechnicianFinanceService(auth), technician_id)
         self.job_rows = {}; self.payment_rows = {}; self.activity_rows = {}
         self.job_sort_column = None; self.job_sort_descending = False
-        summary = ttk.Frame(self)
+        summary = ttk.LabelFrame(self, text="Financial Summary", padding=5)
         if mode != "jobs": summary.pack(fill="x", pady=(0, 8))
         self.summary_vars = {}
         for column, (key, label) in enumerate((("upcoming_expected_cents", "Upcoming Expected"),
@@ -112,7 +112,8 @@ class TechnicianFinanceView(ttk.Frame):
         jobs_tab = ttk.Frame(notebook, padding=5); payments_tab = ttk.Frame(notebook, padding=5)
         if mode in {"all", "finances"}: notebook.add(ledger_tab, text="Account Ledger")
         if mode in {"all", "jobs"}: notebook.add(jobs_tab, text="Assigned Jobs")
-        if mode in {"all", "finances"}: notebook.add(payments_tab, text="Complete Payment History")
+        if mode in {"all", "finances"}: notebook.add(payments_tab, text="Payment History")
+        if mode == "finances": notebook.select(payments_tab)
         self.ledger_tree = ttk.Treeview(ledger_tab,
             columns=("date","type","description","job","owed","payment","balance","reference"),
             show="headings")
@@ -158,10 +159,13 @@ class TechnicianFinanceView(ttk.Frame):
         table.rowconfigure(0, weight=1); table.columnconfigure(0, weight=1)
         self.jobs_tree.bind("<Double-1>", self._open_double_clicked_job)
         payment_actions=ttk.Frame(payments_tab);payment_actions.pack(fill="x")
-        ttk.Label(payment_actions, text="Expand a payment to see every job and pay component it covered.").pack(side="left")
+        ttk.Label(payment_actions, text="Payment History", style="Header.TLabel").pack(side="left")
         self.email_button=ttk.Button(payment_actions,text="Generate Payment Email",command=self.payment_email)
         self.email_button.pack(side="right")
-        if not session or session.role not in {"admin","operator"}:self.email_button.configure(state="disabled")
+        self.email_button.configure(state="disabled")
+        self.payment_guidance = tk.StringVar()
+        ttk.Label(payments_tab, textvariable=self.payment_guidance,
+                  style="Status.TLabel").pack(anchor="w", pady=(4, 0))
         self.payments_tree = ttk.Treeview(payments_tab,
             columns=("date","method","reference","status","amount","base","travel","other"), show="tree headings")
         self.payments_tree.heading("#0", text="Payment / Job")
@@ -181,13 +185,36 @@ class TechnicianFinanceView(ttk.Frame):
         return self.payment_rows.get(root)
 
     def _payment_selected(self,_event=None):
+        self._update_payment_email_action()
+
+    def _update_payment_email_action(self):
+        """Synchronize the email action with authorization and current selection."""
         payment=self._selected_payment()
-        if payment and payment.get("payment_status")=="Paid":
-            self.email_button.configure(text="Regenerate Draft" if payment.get("email_draft_status")=="Draft Generated" else "Generate Payment Email")
+        is_current_paid = bool(payment and payment.get("payment_status") == "Paid" and
+                               not payment.get("reversed_at"))
+        authorized = bool(self.session and self.session.role in {"admin", "operator"})
+        active_draft = bool(payment and
+                            payment.get("email_draft_status") == "Draft Generated")
+        label = "Regenerate Draft" if is_current_paid and active_draft else "Generate Payment Email"
+        self.email_button.configure(text=label,
+                                    state="normal" if authorized and is_current_paid else "disabled")
+        if not self.payment_rows:
+            guidance = "No technician payments have been recorded."
+        elif is_current_paid:
+            guidance = ("Generate a reviewable email describing the jobs and amounts "
+                        "included in this payment.")
+        elif not any(row.get("payment_status") == "Paid" and not row.get("reversed_at")
+                     for row in self.payment_rows.values()):
+            guidance = "Payment emails are available after a payment has been recorded as Paid."
+        else:
+            guidance = "Select a current Paid payment to generate a payment email."
+        self.payment_guidance.set(guidance)
 
     def payment_email(self):
         payment=self._selected_payment()
-        if not payment:
+        if (not self.session or self.session.role not in {"admin", "operator"} or
+                not payment or payment.get("payment_status") != "Paid" or
+                payment.get("reversed_at")):
             messagebox.showinfo("Payment Email","Select a paid payment.",parent=self);return
         from app.ui.payment_email_dialog import generate_and_open_payment_email
         if generate_and_open_payment_email(self,TechnicianPaymentService(self.auth),self.session,payment["technician_payment_id"]):self.refresh()
@@ -282,6 +309,9 @@ class TechnicianFinanceView(ttk.Frame):
         if self.job_sort_column: self._apply_job_sort()
         if selected and self.jobs_tree.exists(selected[0]):
             self.jobs_tree.selection_set(selected[0]); self.jobs_tree.see(selected[0])
+        selected_payment = self._selected_payment()
+        selected_payment_id = (selected_payment.get("technician_payment_id")
+                               if selected_payment else None)
         self.payments_tree.delete(*self.payments_tree.get_children()); self.payment_rows.clear()
         for payment in payments:
             pid = payment["technician_payment_id"]; iid = f"payment-{pid}"; self.payment_rows[iid] = payment
@@ -296,6 +326,14 @@ class TechnicianFinanceView(ttk.Frame):
                 self.payments_tree.insert(iid, "end", iid=f"{iid}-item-{index}", text=label,
                     values=("", "", "", item["entry_type"], format_cents(item["amount_applied_cents"]),
                             self._money(item["base_pay_cents"]), self._money(item["travel_pay_cents"]), format_cents(other)))
+        selected_iid = f"payment-{selected_payment_id}" if selected_payment_id is not None else None
+        if selected_iid and self.payments_tree.exists(selected_iid):
+            self.payments_tree.selection_set(selected_iid)
+            self.payments_tree.focus(selected_iid)
+            self.payments_tree.see(selected_iid)
+        else:
+            self.payments_tree.selection_remove(self.payments_tree.selection())
+        self._update_payment_email_action()
         if jobs:
             job_message = f"{len(jobs)} job(s)"
         elif self.job_search.get().strip():
