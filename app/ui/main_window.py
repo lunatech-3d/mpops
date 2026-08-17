@@ -13,6 +13,7 @@ from app.ui.administration_workspace import AdministrationWorkspace
 from app.ui.user_manager_window import open_user_manager
 from app.ui.technician_manager import TechnicianManager
 from app.ui.styles import PADDING
+from app.ui.window_utils import bind_maximize_shortcut, maximize_window
 from app.services.backup_service import BackupService
 from app.ui.backup_manager import BackupManager
 from app.date_utils import format_display_datetime
@@ -33,10 +34,12 @@ class MainWindow:
         # repeated login/logout cycles.
         for child in root.winfo_children():
             child.destroy()
-        # The Jobs grid needs enough room for all ten columns alongside the
-        # navigation rail.  Keep the existing column widths and give the
-        # expanding content area an appropriately sized initial window.
+        # Keep a sensible restored size for multi-window work, but make the
+        # authenticated shell use the full desktop by default. F11 toggles the
+        # normal window-manager maximized state without entering fullscreen.
         root.title("LunaTech 3D Ops"); root.geometry("1500x800"); root.minsize(1200, 650); root.deiconify()
+        bind_maximize_shortcut(root)
+        root.after_idle(lambda: maximize_window(root))
         self.secondary_windows = []
         header = ttk.Frame(root, padding=PADDING)
         header.pack(fill="x")
@@ -104,19 +107,23 @@ class MainWindow:
     def show_placeholder(self,name):
         self.clear(); frame=ttk.Frame(self.content,padding=PADDING*2,style="App.TFrame");frame.pack(fill="both",expand=True)
         ttk.Label(frame,text=name,style="Header.TLabel").pack(anchor="w");ttk.Label(frame,text="This module has not yet been implemented.",style="Status.TLabel").pack(anchor="w",pady=12)
+    def _register_large_window(self, window):
+        if window:
+            bind_maximize_shortcut(window)
+            window.after_idle(lambda: maximize_window(window))
+            self.secondary_windows.append(window)
+        return window
     def open_opentable_import(self):
-        window=open_opentable_import(
+        return self._register_large_window(open_opentable_import(
             self.root,
             self.auth,
             self.session,
             on_imported=self.show_jobs,
-        )
-        self.secondary_windows.append(window)
+        ))
     def open_on_demand_intake(self):
-        window = open_on_demand_intake(
+        return self._register_large_window(open_on_demand_intake(
             self.root, self.auth, self.session, on_imported=self.show_jobs,
-        )
-        self.secondary_windows.append(window)
+        ))
     def open_users(self):
         window=open_user_manager(self.root,self.auth,self.session)
         if window:self.secondary_windows.append(window)
