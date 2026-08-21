@@ -148,7 +148,7 @@ class PaymentBatchDetail(tk.Toplevel):
         super().__init__(parent); self.service, self.session = service, session
         self.batch_id, self.on_changed = batch_id, on_changed
         self.can_modify = session.role in {"admin", "operator"}; self.batch: dict[str, Any] = {}
-        self.title("Matterport Payment Batch"); self.geometry("1180x760"); self.minsize(1000, 650)
+        self.title("Matterport Payment Batch"); self.geometry("1220x760"); self.minsize(1080, 650)
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.vars = {field: tk.StringVar() for field in FIELDS if field != "notes"}
         self.status_var = tk.StringVar(value="Draft"); self.total_vars: dict[str, tk.StringVar] = {}
@@ -208,6 +208,20 @@ class PaymentBatchDetail(tk.Toplevel):
         headings = ("Document Number", "Document Date", "Account", "Job / Invoice",
                     "Technician", "Gross Amount", "Net Effect")
         self.items = ttk.Treeview(items_frame, columns=columns, show="headings", selectmode="browse")
+        match_summary = ttk.Frame(items_frame)
+        match_summary.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        self.match_count_vars = {key: tk.StringVar(value="0") for key in
+                                 ("invoice", "matched", "unmatched", "ambiguous",
+                                  "excluded", "amount_review")}
+        match_specs = (("Total Invoice Items", "invoice"), ("Matched", "matched"),
+                       ("Unmatched / Missing Jobs", "unmatched"),
+                       ("Ambiguous", "ambiguous"), ("Excluded", "excluded"),
+                       ("Amount Review", "amount_review"))
+        for column, (label, key) in enumerate(match_specs):
+            ttk.Label(match_summary, text=label + ":").grid(
+                row=0, column=column * 2, sticky="e", padx=(0 if column == 0 else 10, 3))
+            ttk.Label(match_summary, textvariable=self.match_count_vars[key],
+                      style="Section.TLabel").grid(row=0, column=column * 2 + 1, sticky="w")
         self.payment_item_menu = tk.Menu(self, tearoff=False)
         self.payment_item_menu.add_command(
             label="Copy Document Number",
@@ -224,12 +238,12 @@ class PaymentBatchDetail(tk.Toplevel):
         self.items.tag_configure("adjustment", foreground="#8a4b08")
         ybar = ttk.Scrollbar(items_frame, orient="vertical", command=self.items.yview); xbar = ttk.Scrollbar(items_frame, orient="horizontal", command=self.items.xview)
         self.items.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
-        self.items.grid(row=0, column=0, sticky="nsew"); ybar.grid(row=0, column=1, sticky="ns"); xbar.grid(row=1, column=0, sticky="ew")
+        self.items.grid(row=1, column=0, sticky="nsew"); ybar.grid(row=1, column=1, sticky="ns"); xbar.grid(row=2, column=0, sticky="ew")
         self.items.bind("<Button-3>", self.show_payment_item_menu, add="+")
         if self.tk.call("tk", "windowingsystem") == "aqua":
             self.items.bind("<Button-2>", self.show_payment_item_menu, add="+")
             self.items.bind("<Control-Button-1>", self.show_payment_item_menu, add="+")
-        items_frame.rowconfigure(0, weight=1); items_frame.columnconfigure(0, weight=1)
+        items_frame.rowconfigure(1, weight=1); items_frame.columnconfigure(0, weight=1)
         summaries = ttk.Frame(content); summaries.pack(fill="x", pady=(0, 6))
         distribution = ttk.LabelFrame(summaries, text="Distribution", padding=6)
         distribution.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
@@ -347,6 +361,8 @@ class PaymentBatchDetail(tk.Toplevel):
         self.save_button = ttk.Button(actions, text="Save", command=self.save)
         self.primary_button = ttk.Button(action_buttons, text="Import Payment",
                                          command=self.run_primary_action, style="Accent.TButton")
+        self.match_jobs_button = ttk.Button(action_buttons, text="Match Jobs",
+                                            command=self.match_jobs, state="disabled")
         self.more_button = ttk.Menubutton(action_buttons, text="More Actions")
         self.more_menu = tk.Menu(self.more_button, tearoff=False)
         self.more_menu.add_command(label="Save Changes", command=self.save)
@@ -355,6 +371,7 @@ class PaymentBatchDetail(tk.Toplevel):
         self.more_menu.add_separator()
         self.more_menu.add_command(label="Delete Draft", command=self.delete)
         self.more_button.configure(menu=self.more_menu)
+        self.match_jobs_button.pack(side="left", padx=(0, 6))
         self.more_button.pack(side="left", padx=(0, 6))
         ttk.Button(action_buttons, text="Close", command=self.close).pack(side="left", padx=(0, 6))
         self.primary_button.pack(side="left")
@@ -413,7 +430,29 @@ class PaymentBatchDetail(tk.Toplevel):
             self.batch_id and permissions["can_delete"] else "disabled")
         exception_count = int(self.total_vars.get("exception_count", tk.StringVar(value="0")).get() or 0)
         excluded_count = int(self.total_vars.get("excluded_count", tk.StringVar(value="0")).get() or 0)
+        match_counts = self._invoice_match_counts()
+        can_match = bool(self.batch_id and permissions["can_match"] and
+                         match_counts["invoice"] and match_counts["pending"])
+        self.match_jobs_button.configure(state="normal" if can_match else "disabled")
         self._update_primary_action(exception_count, excluded_count)
+
+    def _invoice_match_counts(self) -> dict[str, int]:
+        """Summarize matching state from the payment items already loaded for display."""
+        invoice_items = [row for row in self.item_rows if row.get("document_type") == "Invoice"]
+        counts = {
+            "invoice": len(invoice_items),
+            "matched": sum(row.get("match_status") == "Matched" for row in invoice_items),
+            "unmatched": sum(row.get("match_status") in {"Unmatched", "Missing Job"}
+                             for row in invoice_items),
+            "ambiguous": sum(row.get("match_status") == "Ambiguous" for row in invoice_items),
+            "excluded": sum(row.get("match_status") == "Excluded" for row in invoice_items),
+            "amount_review": sum(row.get("match_status") == "Amount Review"
+                                 for row in invoice_items),
+        }
+        counts["pending"] = counts["invoice"] - counts["matched"] - counts["excluded"]
+        for key, var in self.match_count_vars.items():
+            var.set(str(counts[key]))
+        return counts
 
     def refresh(self) -> None:
         if self.batch_id is None: return
