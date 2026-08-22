@@ -23,7 +23,6 @@ from app.ui.styles import PADDING
 from app.ui.scrollable_frame import ScrollableFrame
 from app.ui.matterport_email_import_dialog import MatterportEmailImportDialog
 from app.ui.tipalti_import_dialog import TipaltiImportDialog
-from app.ui.text_context_menu import TextContextMenu
 from app.services.jobs_service import JobsService
 from app.services.market_service import MarketService
 from app.services.technician_service import TechnicianService
@@ -157,7 +156,6 @@ class PaymentBatchDetail(tk.Toplevel):
         self.technician_breakdowns: dict[str, dict[str, Any]] = {}
         self.history_rows: list[dict[str, Any]] = []
         self.item_sort_column, self.item_sort_descending = "document_date", False
-        self.text_context_menu = TextContextMenu(self)
         self.context_payment_item_iid: str | None = None
         self.context_document_number: str | None = None
         # Keep workflow actions outside the scrolling form so they remain
@@ -380,10 +378,6 @@ class PaymentBatchDetail(tk.Toplevel):
         for var in self.vars.values():
             var.trace_add("write", lambda *_args: self._mark_dirty())
         self.notes.bind("<KeyRelease>", lambda _event: self._mark_dirty())
-        self.text_context_menu.bind(
-            *self.entries.values(),
-            self.notes,
-        )
         if batch_id is None: self._load_new()
         else: self.refresh()
 
