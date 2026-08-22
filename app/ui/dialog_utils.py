@@ -2,6 +2,8 @@
 
 import tkinter as tk
 
+from app.ui.window_utils import bind_maximize_shortcut, maximize_window, should_start_maximized
+
 
 def center_window(window: tk.Toplevel) -> None:
     window.update_idletasks()
@@ -15,13 +17,16 @@ def prepare_modal_dialog(
     dialog: tk.Toplevel,
     parent: tk.Misc | None = None,
 ) -> None:
-    """Make *dialog* visible and modal, including with a withdrawn parent.
+    """Make *dialog* visible and modal, maximizing large working forms.
 
     Windows can hide a toplevel that is transient to a withdrawn root.  Only
     establish that relationship when the parent is actually viewable, and do
     not acquire the grab until the window manager has displayed the dialog.
+    Large data-entry dialogs are maximized after visibility so macOS and
+    Windows both retain normal desktop chrome rather than entering fullscreen.
     """
     dialog.update_idletasks()
+    maximize_on_open = should_start_maximized(dialog)
     center_window(dialog)
     if parent is not None and parent.winfo_viewable():
         dialog.transient(parent)
@@ -42,6 +47,9 @@ def prepare_modal_dialog(
         pass
 
     dialog.wait_visibility()
+    if maximize_on_open:
+        maximize_window(dialog)
+        bind_maximize_shortcut(dialog)
     dialog.focus_force()
     dialog.grab_set()
 
