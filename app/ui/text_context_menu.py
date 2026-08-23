@@ -39,14 +39,27 @@ class TextContextMenu:
     def __init__(self, owner: tk.Misc):
         self.owner = owner
         self.widget: tk.Misc | None = None
-        self.menu = tk.Menu(owner, tearoff=False)
+        self._create_menus()
+
+    def _create_menus(self) -> None:
+        """Create the Tk menu commands (again, if a form cleared the root)."""
+        self.menu = tk.Menu(self.owner, tearoff=False)
         self.menu.add_command(label="Cut", command=lambda: self._event("<<Cut>>"))
         self.menu.add_command(label="Copy", command=self._copy)
         self.menu.add_command(label="Paste", command=lambda: self._event("<<Paste>>"))
         self.menu.add_separator()
         self.menu.add_command(label="Select All", command=self._select_all)
-        self.value_menu = tk.Menu(owner, tearoff=False)
+        self.value_menu = tk.Menu(self.owner, tearoff=False)
         self.value_menu.add_command(label="Copy Value", command=self._copy_value)
+
+    def _ensure_menus(self) -> None:
+        """Recreate menu widgets whose Tcl commands were destroyed externally."""
+        try:
+            menus_exist = self.menu.winfo_exists() and self.value_menu.winfo_exists()
+        except tk.TclError:
+            menus_exist = False
+        if not menus_exist:
+            self._create_menus()
 
     def install(self) -> None:
         """Install idempotent application-wide Windows and macOS bindings."""
@@ -94,6 +107,7 @@ class TextContextMenu:
             return False
 
     def _show(self, event: tk.Event) -> str | None:
+        self._ensure_menus()
         widget = event.widget
         widget_class = widget.winfo_class()
         if widget_class in _LABEL_WIDGET_CLASSES:

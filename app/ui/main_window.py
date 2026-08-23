@@ -13,6 +13,7 @@ from app.ui.administration_workspace import AdministrationWorkspace
 from app.ui.user_manager_window import open_user_manager
 from app.ui.technician_manager import TechnicianManager
 from app.ui.styles import PADDING
+from app.ui.text_context_menu import install_text_context_menu
 from app.services.backup_service import BackupService
 from app.ui.backup_manager import BackupManager
 from app.date_utils import format_display_datetime
@@ -33,6 +34,10 @@ class MainWindow:
         # repeated login/logout cycles.
         for child in root.winfo_children():
             child.destroy()
+        # Root-level form cleanup also destroys Tk Menu children.  Install the
+        # shared context-menu support whenever a new authenticated form shell
+        # is loaded; the installer is idempotent and repairs its menus on use.
+        install_text_context_menu(root)
         # The Jobs grid needs enough room for all ten columns alongside the
         # navigation rail.  Keep the existing column widths and give the
         # expanding content area an appropriately sized initial window.
