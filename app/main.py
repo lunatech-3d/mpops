@@ -1,8 +1,17 @@
 """Primary Matterport Ops desktop application entry point."""
 import logging
+from pathlib import Path
 import tkinter as tk
 import sqlite3
+import sys
 from tkinter import messagebox
+
+
+# Direct execution adds ``app/``, not the repository root, to sys.path. Add the
+# root so the package imports below work for both supported launch commands.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 from app.security.auth import AuthService
 from app.security.login import show_login
 from app.security.user_manager import UserManager

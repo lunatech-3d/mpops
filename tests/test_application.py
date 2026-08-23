@@ -1,6 +1,8 @@
 import importlib
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import date
@@ -19,6 +21,24 @@ from app.ui.main_window import MainWindow, _fit_logo
 
 
 class ConfigurationTests(unittest.TestCase):
+    def test_main_supports_direct_script_loading(self):
+        main_path = Path(__file__).resolve().parents[1] / "app" / "main.py"
+        command = (
+            "import runpy; "
+            f"runpy.run_path({str(main_path)!r}, run_name='direct_script_test')"
+        )
+
+        with tempfile.TemporaryDirectory() as working_directory:
+            result = subprocess.run(
+                [sys.executable, "-c", command],
+                cwd=working_directory,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_database_defaults_to_project_database_directory(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(get_settings().database_path, DEFAULT_DATABASE)

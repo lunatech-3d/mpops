@@ -11,6 +11,10 @@ python -m app.security.register_user --username admin --role admin
 python -m app.main
 ```
 
+The application can also be started directly from the repository root with
+`python app/main.py`. Both launch forms require the current directory to be the
+repository root.
+
 The login screen rejects invalid credentials and inactive accounts without disclosing account details. After login, the header shows the current username and role. Log Out clears the session and returns to login without restarting Python; Exit closes the application.
 
 ## Roles and administration
