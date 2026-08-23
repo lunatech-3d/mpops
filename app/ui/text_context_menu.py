@@ -12,6 +12,21 @@ _TEXT_WIDGET_CLASSES = {
 _LABEL_WIDGET_CLASSES = {"Label", "TLabel"}
 
 
+def _is_text_widget(widget: tk.Misc) -> bool:
+    """Return whether *widget* exposes one of Tk's text-editing interfaces.
+
+    ``winfo_class`` is the most reliable check for themed widgets because ttk
+    and application subclasses still report their underlying Tk class.  The
+    ``isinstance`` checks make the intent explicit and also support test or
+    wrapper widgets which preserve the Python widget type.
+    """
+    text_types = (tk.Entry, tk.Text, tk.Spinbox, ttk.Entry, ttk.Combobox)
+    ttk_spinbox = getattr(ttk, "Spinbox", None)
+    if ttk_spinbox is not None:
+        text_types += (ttk_spinbox,)
+    return isinstance(widget, text_types) or widget.winfo_class() in _TEXT_WIDGET_CLASSES
+
+
 class TextContextMenu:
     """Own the single clipboard menu used by every window in an application.
 
@@ -91,7 +106,7 @@ class TextContextMenu:
             self.widget = widget
             self._popup(self.value_menu, event)
             return "break"
-        if widget_class not in _TEXT_WIDGET_CLASSES:
+        if not _is_text_widget(widget):
             return None
 
         self.widget = widget
@@ -167,9 +182,13 @@ class TextContextMenu:
 
 def install_text_context_menu(root: tk.Misc) -> TextContextMenu:
     """Install and return MPOPS's application-wide clipboard menu."""
-    existing = getattr(root, "_mpops_text_context_menu", None)
+    # A caller may only have a frame or Toplevel.  Store the singleton on the
+    # interpreter's root so repeated installation cannot add duplicate
+    # ``bind_all`` callbacks.
+    owner = root._root()  # type: ignore[attr-defined]
+    existing = getattr(owner, "_mpops_text_context_menu", None)
     if existing is not None:
         return existing
-    context_menu = TextContextMenu(root)
+    context_menu = TextContextMenu(owner)
     context_menu.install()
     return context_menu
