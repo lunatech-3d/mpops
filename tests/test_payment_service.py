@@ -51,6 +51,25 @@ class PaymentServiceTests(unittest.TestCase):
             )
             return job_id
 
+    def create_on_demand_job(self, external_id, invoice=None):
+        with self.auth.connection() as connection:
+            job_id = int(connection.execute(
+                "INSERT INTO Jobs (external_job_id, created_by) VALUES (?, ?)",
+                (external_id, self.session.user_id),
+            ).lastrowid)
+            source_id = int(connection.execute(
+                "INSERT INTO JobSourceRecords (job_id, source_system, "
+                "external_record_number, record_description) "
+                "VALUES (?, 'Matterport', ?, 'On-Demand')",
+                (job_id, external_id),
+            ).lastrowid)
+            financial_id = int(connection.execute(
+                "INSERT INTO JobFinancials "
+                "(job_id, job_source_record_id, ap_invoice_number) VALUES (?, ?, ?)",
+                (job_id, source_id, invoice),
+            ).lastrowid)
+        return job_id, source_id, financial_id
+
     def test_fresh_batch_creation_retrieval_and_listing(self):
         batch_id = self.create_batch()
         batch = self.service.get_payment_batch(batch_id)
@@ -518,22 +537,127 @@ class PaymentServiceTests(unittest.TestCase):
         self.assertEqual(result["matched_count"], 1)
         self.assertEqual(self.service.list_payment_items(batch_id)[0]["job_id"], job_id)
 
-    def test_matching_does_not_fall_back_to_external_job_id(self):
+    def test_matching_falls_back_to_prefixed_on_demand_external_job_id_and_learns(self):
+        batch_id = self.create_batch(100)
+        job_id, _, financial_id = self.create_on_demand_job(
+            "u87furb8a8ppqadp0242eqz0b")
+        item_id = self.add_item(batch_id, "AP-u87furb8a8ppqadp0242eqz0b", 100)
+
+        result = self.service.match_payment_items(self.session, batch_id)
+
+        self.assertEqual(result["matched_count"], 1)
+        item = self.service.list_payment_items(batch_id)[0]
+        self.assertEqual((item["job_id"], item["match_status"], item["match_method"]),
+                         (job_id, "Matched", "On-Demand Job ID"))
+        with self.auth.connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT ap_invoice_number FROM JobFinancials WHERE job_financial_id=?",
+                (financial_id,)).fetchone()[0], "AP-u87furb8a8ppqadp0242eqz0b")
+            event = connection.execute(
+                "SELECT details_json FROM AuditLog "
+                "WHERE action='on_demand_ap_invoice_learned'").fetchone()
+        details = json.loads(event[0])
+        self.assertEqual(details["payment_item_id"], item_id)
+        self.assertTrue(details["automatic_match"])
+        self.assertEqual(details["match_method"], "On-Demand Job ID")
+
+    def test_primary_invoice_match_wins_over_on_demand_external_id_fallback(self):
+        batch_id = self.create_batch(100)
+        fallback_job, _, fallback_financial = self.create_on_demand_job("priority")
+        primary_job = self.create_job("AP-priority")
+        self.add_item(batch_id, "AP-priority", 100)
+
+        self.service.match_payment_items(self.session, batch_id)
+
+        item = self.service.list_payment_items(batch_id)[0]
+        self.assertEqual((item["job_id"], item["match_method"]),
+                         (primary_job, "AP Invoice Number"))
+        self.assertNotEqual(item["job_id"], fallback_job)
+        with self.auth.connection() as connection:
+            self.assertIsNone(connection.execute(
+                "SELECT ap_invoice_number FROM JobFinancials WHERE job_financial_id=?",
+                (fallback_financial,)).fetchone()[0])
+
+    def test_external_job_id_fallback_requires_on_demand_source(self):
         batch_id = self.create_batch(100)
         with self.auth.connection() as connection:
             job_id = connection.execute(
                 "INSERT INTO Jobs (external_job_id, created_by) VALUES (?, ?)",
-                ("AP-external-only", self.session.user_id),
+                ("ABC123", self.session.user_id),
             ).lastrowid
             connection.execute(
                 "INSERT INTO JobFinancials (job_id, ap_invoice_number) VALUES (?, ?)",
-                (job_id, "AP-different"),
+                (job_id, None),
             )
-        self.add_item(batch_id, "AP-external-only", 100)
+        self.add_item(batch_id, "AP-ABC123", 100)
 
         result = self.service.match_payment_items(self.session, batch_id)
 
         self.assertEqual(result["missing_job_count"], 1)
+
+    def test_external_job_id_fallback_requires_ap_prefix(self):
+        batch_id = self.create_batch(100)
+        self.create_on_demand_job("NO-PREFIX")
+        self.add_item(batch_id, "NO-PREFIX", 100)
+        self.assertEqual(
+            self.service.match_payment_items(self.session, batch_id)["missing_job_count"], 1)
+
+    def test_on_demand_fallback_is_case_insensitive(self):
+        batch_id = self.create_batch(100)
+        job_id, _, _ = self.create_on_demand_job("CaseSensitiveID")
+        self.add_item(batch_id, "ap-casesensitiveid", 100)
+        self.service.match_payment_items(self.session, batch_id)
+        item = self.service.list_payment_items(batch_id)[0]
+        self.assertEqual((item["job_id"], item["match_method"]),
+                         (job_id, "On-Demand Job ID"))
+
+    def test_on_demand_fallback_does_not_overwrite_invoice_conflict(self):
+        batch_id = self.create_batch(100)
+        _, _, financial_id = self.create_on_demand_job("CONFLICT", "AP-established")
+        self.add_item(batch_id, "AP-CONFLICT", 100)
+
+        result = self.service.match_payment_items(self.session, batch_id)
+
+        self.assertEqual(result["ambiguous_count"], 1)
+        item = self.service.list_payment_items(batch_id)[0]
+        self.assertEqual((item["job_id"], item["match_status"], item["match_method"]),
+                         (None, "Ambiguous", "On-Demand Job ID"))
+        self.assertIn("conflict", item["match_notes"])
+        with self.auth.connection() as connection:
+            self.assertEqual(connection.execute(
+                "SELECT ap_invoice_number FROM JobFinancials WHERE job_financial_id=?",
+                (financial_id,)).fetchone()[0], "AP-established")
+
+    def test_on_demand_fallback_rejects_ambiguous_source_financial_relationship(self):
+        batch_id = self.create_batch(100)
+        job_id, _, _ = self.create_on_demand_job("AMBIGUOUS")
+        with self.auth.connection() as connection:
+            second_source = connection.execute(
+                "INSERT INTO JobSourceRecords (job_id, source_system, "
+                "external_record_number, record_description) "
+                "VALUES (?, 'Matterport', 'duplicate', 'on-demand')", (job_id,)).lastrowid
+            connection.execute(
+                "INSERT INTO JobFinancials (job_id, job_source_record_id) VALUES (?, ?)",
+                (job_id, second_source))
+        self.add_item(batch_id, "AP-AMBIGUOUS", 100)
+
+        result = self.service.match_payment_items(self.session, batch_id)
+
+        self.assertEqual(result["ambiguous_count"], 1)
+        self.assertEqual(self.service.list_payment_items(batch_id)[0]["match_status"],
+                         "Ambiguous")
+
+    def test_learned_on_demand_invoice_uses_primary_match_on_later_run(self):
+        first_batch = self.create_batch(100)
+        job_id, _, _ = self.create_on_demand_job("LEARN-THEN-PRIMARY")
+        self.add_item(first_batch, "AP-LEARN-THEN-PRIMARY", 100)
+        self.service.match_payment_items(self.session, first_batch)
+
+        self.service.match_payment_items(self.session, first_batch)
+
+        item = self.service.list_payment_items(first_batch)[0]
+        self.assertEqual((item["job_id"], item["match_method"]),
+                         (job_id, "AP Invoice Number"))
 
     def test_matching_allowed_statuses_and_rejected_statuses(self):
         for status in ("Draft", "Imported", "Needs Review"):

@@ -839,6 +839,49 @@ class PaymentService:
                 for group, statuses in EXCEPTION_GROUPS.items()
                 if any(row["match_status"] in statuses for row in rows)}
 
+    @staticmethod
+    def _learn_on_demand_ap_invoice(connection: sqlite3.Connection, job_id: int,
+                                    incoming: str, *, allow_conflict: bool = False
+                                    ) -> dict[str, Any] | None:
+        """Find the unique On-Demand financial row and safely learn its invoice.
+
+        ``None`` means that the job is not On-Demand.  Malformed relationships and
+        invoice conflicts are deliberately errors so callers cannot guess which row
+        to update or silently replace an established invoice number.
+        """
+        sources = connection.execute(
+            """SELECT s.job_source_record_id, f.job_financial_id,
+                      f.ap_invoice_number
+               FROM JobSourceRecords s
+               LEFT JOIN JobFinancials f
+                 ON f.job_source_record_id=s.job_source_record_id
+               WHERE s.job_id=? AND s.record_description=? COLLATE NOCASE
+               ORDER BY s.job_source_record_id, f.job_financial_id""",
+            (job_id, ON_DEMAND_PIPELINE)).fetchall()
+        if not sources:
+            return None
+        if len(sources) != 1 or sources[0]["job_financial_id"] is None:
+            raise ValueError(
+                "The On-Demand JobFinancials record could not be identified uniquely")
+
+        financial = sources[0]
+        previous = (financial["ap_invoice_number"] or "").strip() or None
+        if (previous and previous.casefold() != incoming.casefold() and
+                not allow_conflict):
+            raise ValueError(
+                "AP Invoice Number conflict: the selected On-Demand job has "
+                f"'{previous}', while this payment has '{incoming}'. "
+                "Explicit confirmation is required to replace it.")
+
+        learned = not previous or previous.casefold() != incoming.casefold()
+        if learned:
+            connection.execute(
+                "UPDATE JobFinancials SET ap_invoice_number=?, updated_at=? "
+                "WHERE job_financial_id=?",
+                (incoming, utc_now_iso(), financial["job_financial_id"]))
+        return {"job_financial_id": financial["job_financial_id"],
+                "previous_ap_invoice_number": previous, "learned": learned}
+
     def get_exception_summary(self, payment_batch_id: int) -> dict[str, int]:
         groups = self.list_payment_exceptions(payment_batch_id)
         return {name: len(groups.get(name, ())) for name in EXCEPTION_GROUPS}
@@ -946,37 +989,11 @@ class PaymentService:
             batch = self._require_batch(connection, item["payment_batch_id"])
             self._require_batch_mutation(batch, "match")
             self._require_job(connection, job_id)
-            source = connection.execute(
-                """SELECT s.job_source_record_id, f.job_financial_id,
-                          f.ap_invoice_number
-                   FROM JobSourceRecords s
-                   LEFT JOIN JobFinancials f
-                     ON f.job_source_record_id=s.job_source_record_id
-                   WHERE s.job_id=? AND s.record_description=? COLLATE NOCASE
-                   ORDER BY s.job_source_record_id""",
-                (job_id, ON_DEMAND_PIPELINE)).fetchall()
-            learned_invoice = False
-            previous_invoice = None
-            if source:
-                if len(source) != 1 or source[0]["job_financial_id"] is None:
-                    raise ValueError(
-                        "The On-Demand JobFinancials record could not be identified uniquely")
-                financial = source[0]
-                previous_invoice = (financial["ap_invoice_number"] or "").strip() or None
-                incoming = item["document_number"]
-                if (previous_invoice and
-                        previous_invoice.casefold() != incoming.casefold() and
-                        not resolve_invoice_conflict):
-                    raise ValueError(
-                        "AP Invoice Number conflict: the selected On-Demand job has "
-                        f"'{previous_invoice}', while this payment has '{incoming}'. "
-                        "Explicit confirmation is required to replace it.")
-                if not previous_invoice or previous_invoice.casefold() != incoming.casefold():
-                    connection.execute(
-                        "UPDATE JobFinancials SET ap_invoice_number=?, updated_at=? "
-                        "WHERE job_financial_id=?",
-                        (incoming, utc_now_iso(), financial["job_financial_id"]))
-                    learned_invoice = True
+            invoice = self._learn_on_demand_ap_invoice(
+                connection, job_id, item["document_number"],
+                allow_conflict=resolve_invoice_conflict)
+            learned_invoice = bool(invoice and invoice["learned"])
+            previous_invoice = (invoice or {}).get("previous_ap_invoice_number")
             connection.execute(
                 "UPDATE MatterportPaymentItems SET job_id=?, match_status='Matched', "
                 "match_method='Manual exception resolution', match_notes=?, updated_at=? "
@@ -984,13 +1001,13 @@ class PaymentService:
             self._audit_resolution(connection, "payment_item_job_assigned", session, item,
                                    "Matched", notes, job_id=job_id,
                                    document_number=item["document_number"],
-                                   on_demand=bool(source), invoice_learned=learned_invoice,
+                                   on_demand=invoice is not None, invoice_learned=learned_invoice,
                                    previous_ap_invoice_number=previous_invoice)
             if learned_invoice:
                 record_event(connection, "on_demand_ap_invoice_learned",
                              actor_user_id=session.user_id,
                              details={"payment_item_id": payment_item_id, "job_id": job_id,
-                                      "job_financial_id": source[0]["job_financial_id"],
+                                      "job_financial_id": invoice["job_financial_id"],
                                       "ap_invoice_number": item["document_number"],
                                       "previous_ap_invoice_number": previous_invoice,
                                       "manual_match": True})
@@ -1131,14 +1148,71 @@ class PaymentService:
                     action = "payment_item_matched"
                 elif not jobs:
                     job = None
-                    connection.execute(
-                        "UPDATE MatterportPaymentItems SET job_id = NULL, "
-                        "match_status = 'Missing Job', match_method = NULL, match_notes = NULL, "
-                        "updated_at = ? "
-                        "WHERE payment_item_id = ?", (utc_now_iso(), item["payment_item_id"])
-                    )
-                    missing += 1
-                    action = "payment_item_unmatched"
+                    fallback_error = None
+                    candidate_id = (lookup_value[3:] if
+                                    lookup_value[:3].casefold() == "ap-" else None)
+                    candidates = []
+                    if candidate_id:
+                        candidates = connection.execute(
+                            "SELECT job_id FROM Jobs "
+                            "WHERE external_job_id = ? COLLATE NOCASE ORDER BY job_id",
+                            (candidate_id,)).fetchall()
+                        LOGGER.info(
+                            "On-Demand payment fallback | Document Number: %r | "
+                            "External Job ID: %r | Candidate Count: %d",
+                            lookup_value, candidate_id, len(candidates))
+                    if len(candidates) == 1:
+                        candidate = candidates[0]
+                        try:
+                            invoice = self._learn_on_demand_ap_invoice(
+                                connection, candidate["job_id"], lookup_value)
+                        except ValueError as error:
+                            invoice = None
+                            fallback_error = str(error)
+                        if invoice is not None:
+                            job = candidate
+                            connection.execute(
+                                "UPDATE MatterportPaymentItems SET job_id=?, "
+                                "match_status='Matched', match_method='On-Demand Job ID', "
+                                "match_notes=NULL, updated_at=? WHERE payment_item_id=?",
+                                (job["job_id"], utc_now_iso(), item["payment_item_id"]))
+                            matched += 1
+                            action = "payment_item_matched"
+                            if invoice["learned"]:
+                                record_event(
+                                    connection, "on_demand_ap_invoice_learned",
+                                    actor_user_id=session.user_id,
+                                    details={
+                                        "payment_item_id": item["payment_item_id"],
+                                        "job_id": job["job_id"],
+                                        "job_financial_id": invoice["job_financial_id"],
+                                        "document_number": lookup_value,
+                                        "ap_invoice_number": lookup_value,
+                                        "previous_ap_invoice_number": invoice[
+                                            "previous_ap_invoice_number"],
+                                        "automatic_match": True, "manual_match": False,
+                                        "match_method": "On-Demand Job ID",
+                                    })
+                    elif len(candidates) > 1:
+                        fallback_error = "Multiple Jobs share this external job ID"
+
+                    if job is None and fallback_error:
+                        connection.execute(
+                            "UPDATE MatterportPaymentItems SET job_id=NULL, "
+                            "match_status='Ambiguous', match_method='On-Demand Job ID', "
+                            "match_notes=?, updated_at=? WHERE payment_item_id=?",
+                            (fallback_error, utc_now_iso(), item["payment_item_id"]))
+                        ambiguous += 1
+                        action = "payment_item_match_ambiguous"
+                    elif job is None:
+                        connection.execute(
+                            "UPDATE MatterportPaymentItems SET job_id = NULL, "
+                            "match_status = 'Missing Job', match_method = NULL, "
+                            "match_notes = NULL, updated_at = ? "
+                            "WHERE payment_item_id = ?",
+                            (utc_now_iso(), item["payment_item_id"]))
+                        missing += 1
+                        action = "payment_item_unmatched"
                 else:
                     job = None
                     connection.execute(
