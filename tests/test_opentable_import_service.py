@@ -1,14 +1,17 @@
 import csv
+import importlib.util
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
 from app.config import PROJECT_ROOT, Settings
+from app.security.audit import record_event
 from app.security.auth import AuthService
 from app.security.user_manager import UserManager
 from app.services.jobs_service import JobsService
 from app.services.opentable_import_service import OpenTableImportService
+from app.ui.opentable_import_window import protected_fields_display, preview_summary
 
 
 COLUMNS = [
@@ -64,6 +67,12 @@ class OpenTableImportServiceTests(unittest.TestCase):
             password_iterations=100_000,
         )
         self.auth = AuthService(settings)
+        # The current production schema includes this field, while the minimal base
+        # schema used by these focused importer tests predates it.
+        with self.auth.connection() as connection:
+            market_columns = {row[1] for row in connection.execute("PRAGMA table_info(Markets)")}
+            if "state" not in market_columns:
+                connection.execute("ALTER TABLE Markets ADD COLUMN state TEXT")
         users = UserManager(self.auth)
         users.create_user("Admin", "correct-horse-123", "admin")
         self.session = self.auth.authenticate("Admin", "correct-horse-123")
@@ -242,6 +251,107 @@ class OpenTableImportServiceTests(unittest.TestCase):
             self.assertEqual(
                 connection.execute("SELECT COUNT(*) FROM JobSourceRecords").fetchone()[0], 2
             )
+
+    def test_local_normalized_address_corrections_survive_changed_source_reimport(self):
+        original = source_row("1001", "JOB-1", "Parent Record")
+        self.write_rows([original])
+        self.service.import_csv(self.session, str(self.csv_path))
+        jobs = JobsService(self.auth)
+        job_id = jobs.get_job_by_external_id("JOB-1")["job_id"]
+        jobs.update_job(self.session, job_id, {
+            "address_1": "999 Corrected Ave",
+            "address_2": "Suite B",
+            "city": "Canton",
+            "state": "OH",
+            "postal_code": "99999",
+        })
+
+        changed = dict(original)
+        changed["Capture Address"] = "500 Source Rd, Raleigh, NC, 27601, USA"
+        self.write_rows([changed])
+        preview = self.service.preview(str(self.csv_path))
+
+        self.assertEqual(preview["items"][0]["changed_job_fields"], ["capture_address_raw"])
+        self.assertEqual(preview["items"][0]["protected_job_fields"], [
+            "address_1", "address_2", "city", "postal_code", "state",
+        ])
+        self.assertEqual(
+            protected_fields_display(preview["items"][0]),
+            "Address 1, Address 2, City, ZIP, State",
+        )
+        summary = preview_summary(preview)
+        self.assertEqual((summary["protected_jobs"], summary["protected_fields"]), (1, 5))
+
+        result = self.service.import_csv(self.session, str(self.csv_path))
+
+        self.assertEqual(result["updated"], 1)
+        loaded = jobs.get_job(job_id)
+        self.assertEqual(
+            tuple(loaded[field] for field in (
+                "address_1", "address_2", "city", "state", "postal_code"
+            )),
+            ("999 Corrected Ave", "Suite B", "Canton", "OH", "99999"),
+        )
+        self.assertEqual(
+            loaded["capture_address_raw"], "500 Source Rd, Raleigh, NC, 27601, USA"
+        )
+        self.assertEqual(loaded["protected_fields"], [
+            "address_1", "address_2", "city", "postal_code", "state",
+        ])
+
+    def test_migration_backfills_audited_pre_protection_address_correction(self):
+        self.write_rows([source_row("1001", "JOB-1", "Parent Record")])
+        self.service.import_csv(self.session, str(self.csv_path))
+        with self.auth.connection() as connection:
+            job_id = connection.execute(
+                "SELECT job_id FROM Jobs WHERE external_job_id = 'JOB-1'"
+            ).fetchone()[0]
+            connection.execute("UPDATE Jobs SET city = 'Canton' WHERE job_id = ?", (job_id,))
+            record_event(
+                connection,
+                "job_updated",
+                actor_user_id=self.session.user_id,
+                details={
+                    "job_id": job_id,
+                    "external_job_id": "JOB-1",
+                    "fields_changed": ["city"],
+                    "before": {"city": "Plymouth"},
+                    "after": {"city": "Canton"},
+                },
+            )
+
+        migration_path = (
+            PROJECT_ROOT / "database" / "migrations" / "028_backfill_job_field_overrides.py"
+        )
+        spec = importlib.util.spec_from_file_location("backfill_job_overrides", migration_path)
+        migration = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        spec.loader.exec_module(migration)
+        with self.auth.connection() as connection:
+            migration.migrate(connection)
+            migration.migrate(connection)
+            override = connection.execute(
+                "SELECT field_name, source_system, reason FROM JobFieldOverrides "
+                "WHERE job_id = ?",
+                (job_id,),
+            ).fetchone()
+            override_count = connection.execute(
+                "SELECT count(*) FROM JobFieldOverrides WHERE job_id = ?", (job_id,)
+            ).fetchone()[0]
+            backfill_events = connection.execute(
+                "SELECT count(*) FROM AuditLog "
+                "WHERE action = 'job_field_overrides_backfilled'"
+            ).fetchone()[0]
+
+        self.assertEqual(tuple(override[:2]), ("city", "OpenTable"))
+        self.assertIn("pre-protection", override["reason"])
+        self.assertEqual((override_count, backfill_events), (1, 1))
+        self.service.import_csv(self.session, str(self.csv_path))
+        with self.auth.connection() as connection:
+            city = connection.execute(
+                "SELECT city FROM Jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()[0]
+        self.assertEqual(city, "Canton")
 
     def test_reimport_reprocesses_unchanged_source_with_refined_address_parser(self):
         raw = (

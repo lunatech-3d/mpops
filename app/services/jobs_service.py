@@ -498,6 +498,14 @@ class JobsService:
                 "WHERE job_id = ? ORDER BY job_financial_id",
                 (job_id,),
             )]
+            override_rows = connection.execute(
+                "SELECT field_name, source_system FROM JobFieldOverrides "
+                "WHERE job_id = ? ORDER BY field_name COLLATE NOCASE, "
+                "source_system COLLATE NOCASE",
+                (job_id,),
+            ).fetchall()
+            job["protected_fields"] = sorted({row["field_name"] for row in override_rows})
+            job["field_overrides"] = [dict(row) for row in override_rows]
             return job
 
     def get_job_by_external_id(self, external_job_id: str) -> dict[str, Any] | None:

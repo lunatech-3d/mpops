@@ -488,7 +488,8 @@ CREATE INDEX idx_Jobs_location
 Records explicit field-level local ownership without duplicating the current value from
 `Jobs`. An absent row means the named importer/parser may continue maintaining that
 field; a present row means the normalized value in `Jobs` wins until the override is
-explicitly cleared. Existing imported Jobs receive no rows during migration.
+explicitly cleared. Migration 026 did not guess ownership for existing imported Jobs;
+migration 028 later backfills only corrections supported by the audit history.
 
 ```sql
 CREATE TABLE JobFieldOverrides (
@@ -509,6 +510,12 @@ The initial protectable set is `address_1`, `address_2`, `city`, `state`,
 `postal_code`, `county`, and `country`. The service owns that allow-list so additional
 import-managed fields can use this table later. Creating and clearing overrides writes
 append-only `AuditLog` events. The corrected value remains solely in `Jobs`.
+
+Migration `028_backfill_job_field_overrides.py` recovers normalized address corrections
+made through the normal Job service before field protection existed. It uses the append-only
+`job_updated` audit history and creates an override only when the latest audited value is
+still the current `Jobs` value. It does not guess whether unaudited differences came from an
+operator or an older parser.
 
 ---
 

@@ -13,11 +13,22 @@ from app.ui.styles import PADDING
 
 JOB_FORM_FIELDS = (
     "external_job_id", "market_id", "client_name_source", "project_name_source", "job_status",
-    "scheduled_start_at", "capture_address_raw", "city", "state", "postal_code",
-    "requested_capture_size", "onsite_contact_name", "onsite_contact_email",
-    "onsite_contact_phone", "internal_notes",
+    "scheduled_start_at", "capture_address_raw", "address_1", "address_2", "city", "state",
+    "postal_code", "county", "country", "requested_capture_size", "onsite_contact_name",
+    "onsite_contact_email", "onsite_contact_phone", "internal_notes",
 )
 PRIMARY_TECHNICIAN_FIELD = "primary_technician_id"
+JOB_READONLY_FIELDS = frozenset({"capture_address_raw"})
+
+ADDRESS_FIELD_LABELS = {
+    "address_1": "Address 1",
+    "address_2": "Address 2",
+    "city": "City",
+    "state": "State",
+    "postal_code": "ZIP / Postal Code",
+    "county": "County",
+    "country": "Country",
+}
 
 STATUS_VALUES = (
     "Requested", "Scheduling", "Scheduled", "Assigned", "In Progress",
@@ -101,6 +112,8 @@ def changed_fields(original: dict, submitted: dict) -> dict:
     """Return only editable values that differ from the loaded Job."""
     changes = {}
     for name in JOB_FORM_FIELDS:
+        if name in JOB_READONLY_FIELDS:
+            continue
         old = original.get(name)
         if old in (None, ""):
             old = None
@@ -235,11 +248,44 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *
 
     address = section("Capture Address", 2)
     address.columnconfigure(1, weight=3)
-    labeled_entry(address, 0, "Capture Address", variables["capture_address_raw"])
-    address.grid_slaves(row=0, column=1)[0].grid_configure(columnspan=5)
-    labeled_entry(address, 1, "City", variables["city"])
-    labeled_entry(address, 1, "State", variables["state"], column=2, width=7)
-    labeled_entry(address, 1, "ZIP / Postal Code", variables["postal_code"], column=4, width=12)
+    address.columnconfigure(3, weight=2)
+    source_address = labeled_entry(
+        address, 0, "Imported Source Address", variables["capture_address_raw"],
+        state="readonly",
+    )
+    source_address.grid_configure(columnspan=5)
+    ttk.Label(
+        address,
+        text=(
+            "Read-only source evidence. Correct the operational address below; locally changed "
+            "fields are preserved during later imports."
+        ),
+        style="Status.TLabel",
+        wraplength=760,
+    ).grid(row=1, column=1, columnspan=5, sticky="w", padx=(0, 12), pady=(0, 5))
+    labeled_entry(address, 2, "Address 1", variables["address_1"])
+    address.grid_slaves(row=2, column=1)[0].grid_configure(columnspan=5)
+    labeled_entry(address, 3, "Address 2", variables["address_2"])
+    address.grid_slaves(row=3, column=1)[0].grid_configure(columnspan=5)
+    labeled_entry(address, 4, "City", variables["city"])
+    labeled_entry(address, 4, "State", variables["state"], column=2, width=7)
+    labeled_entry(
+        address, 4, "ZIP / Postal Code", variables["postal_code"], column=4, width=12
+    )
+    labeled_entry(address, 5, "County", variables["county"])
+    labeled_entry(address, 5, "Country", variables["country"], column=2, width=12)
+    protected_fields = [
+        ADDRESS_FIELD_LABELS[field]
+        for field in ADDRESS_FIELD_LABELS
+        if field in set((job or {}).get("protected_fields") or ())
+    ]
+    if protected_fields:
+        ttk.Label(
+            address,
+            text="Protected from source imports: " + ", ".join(protected_fields),
+            style="Status.TLabel",
+            wraplength=760,
+        ).grid(row=6, column=1, columnspan=5, sticky="w", padx=(0, 12), pady=(4, 0))
 
     contact = section("On-Site Contact", 3)
     contact.columnconfigure(1, weight=1)

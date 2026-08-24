@@ -8,9 +8,26 @@ from app.date_utils import format_display_datetime
 from app.security.user_manager import AuthorizationError
 from app.services.opentable_import_service import OpenTableImportService
 from app.ui.styles import PADDING
+from app.ui.treeview_utils import natural_sort_key, ordered_tree_items
 
 
 EXPECTED_ERRORS = (ValueError, OSError, AuthorizationError, sqlite3.Error)
+
+PROTECTED_FIELD_LABELS = {
+    "address_1": "Address 1",
+    "address_2": "Address 2",
+    "city": "City",
+    "state": "State",
+    "postal_code": "ZIP",
+    "county": "County",
+    "country": "Country",
+}
+
+
+def protected_fields_display(item):
+    """Return human-readable locally protected fields that differ from this import."""
+    fields = item.get("protected_job_fields") or ()
+    return ", ".join(PROTECTED_FIELD_LABELS.get(field, field) for field in fields)
 
 
 def preview_summary(preview):
@@ -24,6 +41,8 @@ def preview_summary(preview):
         "skipped": int(counts.get("skipped", 0)),
         "source_rows": sum(int(item.get("source_row_count", 0)) for item in items),
         "changed_source_rows": sum(int(item.get("changed_source_rows", 0)) for item in items),
+        "protected_jobs": sum(bool(item.get("protected_job_fields")) for item in items),
+        "protected_fields": sum(len(item.get("protected_job_fields") or ()) for item in items),
         "missing_parent": sum(int(item.get("parent_record_count", 0)) == 0 for item in items),
         "multiple_parents": sum(int(item.get("parent_record_count", 0)) > 1 for item in items),
     }
@@ -34,11 +53,12 @@ class OpenTableImportWindow(tk.Toplevel):
 
     COLUMNS = (
         "action", "external_job_id", "client_name", "project_name", "job_status",
-        "scheduled_start_at", "source_row_count", "changed_source_rows", "parent_status",
+        "scheduled_start_at", "source_row_count", "changed_source_rows", "protected_fields",
+        "parent_status",
     )
     HEADINGS = (
         "Action", "Job #", "Client", "Project", "Status", "Scheduled",
-        "Source Rows", "Changed Rows", "Parent Record",
+        "Source Rows", "Changed Rows", "Protected Local Values", "Parent Record",
     )
 
     def __init__(self, parent, auth, session, on_imported=None, service=None):
@@ -48,6 +68,9 @@ class OpenTableImportWindow(tk.Toplevel):
         self.on_imported = on_imported
         self.service = service or OpenTableImportService(auth)
         self.preview_data = None
+        self.preview_rows = {}
+        self.sort_column = None
+        self.sort_descending = False
 
         self.title("Matterport Job Intake Center")
         self.geometry("1120x700")
@@ -88,10 +111,10 @@ class OpenTableImportWindow(tk.Toplevel):
         table = ttk.Frame(body)
         table.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=self.COLUMNS, show="headings")
-        widths = (80, 105, 150, 170, 105, 135, 85, 90, 110)
-        anchors = ("w", "w", "w", "w", "w", "w", "e", "e", "w")
+        widths = (80, 105, 140, 160, 100, 130, 80, 85, 190, 105)
+        anchors = ("w", "w", "w", "w", "w", "w", "e", "e", "w", "w")
         for name, heading, width, anchor in zip(self.COLUMNS, self.HEADINGS, widths, anchors):
-            self.tree.heading(name, text=heading)
+            self.tree.heading(name, text=heading, command=lambda column=name: self.sort_by(column))
             self.tree.column(name, width=width, minwidth=65, anchor=anchor)
         ybar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         xbar = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
@@ -143,6 +166,7 @@ class OpenTableImportWindow(tk.Toplevel):
 
         self.preview_data = preview
         self.tree.delete(*self.tree.get_children())
+        self.preview_rows.clear()
         for index, item in enumerate(preview.get("items", [])):
             parent_count = int(item.get("parent_record_count", 0))
             parent_status = "OK" if parent_count == 1 else (
@@ -157,9 +181,12 @@ class OpenTableImportWindow(tk.Toplevel):
                 format_display_datetime(item.get("scheduled_start_at")),
                 item.get("source_row_count", 0),
                 item.get("changed_source_rows", 0),
+                protected_fields_display(item),
                 parent_status,
             )
-            self.tree.insert("", "end", iid=f"preview-{index}", values=values)
+            iid = f"preview-{index}"
+            self.preview_rows[iid] = item
+            self.tree.insert("", "end", iid=iid, values=values)
 
         summary = preview_summary(preview)
         warning_parts = []
@@ -172,9 +199,43 @@ class OpenTableImportWindow(tk.Toplevel):
             f'{summary["jobs"]} Matterport jobs: {summary["created"]} create, '
             f'{summary["updated"]} update, {summary["skipped"]} skip; '
             f'{summary["source_rows"]} source rows, {summary["changed_source_rows"]} changed; '
+            f'{summary["protected_fields"]} protected local value(s) on '
+            f'{summary["protected_jobs"]} job(s); '
             f'{warnings}.'
         )
         self.import_button.configure(state="normal" if preview.get("items") else "disabled")
+
+    def sort_by(self, column):
+        """Sort the preview by a heading while keeping blank values last."""
+        if self.sort_column == column:
+            self.sort_descending = not self.sort_descending
+        else:
+            self.sort_column = column
+            self.sort_descending = False
+
+        numeric_columns = {"source_row_count", "changed_source_rows"}
+
+        def value_for(iid):
+            item = self.preview_rows[iid]
+            if column in numeric_columns:
+                value = int(item.get(column, 0))
+                return value, value
+            if column == "scheduled_start_at":
+                value = item.get(column)
+                return value, str(value or "")
+            value = self.tree.set(iid, column)
+            return value, natural_sort_key(value)
+
+        ordered = ordered_tree_items(
+            self.tree.get_children(""), value_for, self.sort_descending
+        )
+        for index, iid in enumerate(ordered):
+            self.tree.move(iid, "", index)
+        for name, heading in zip(self.COLUMNS, self.HEADINGS):
+            indicator = ""
+            if name == self.sort_column:
+                indicator = " ▼" if self.sort_descending else " ▲"
+            self.tree.heading(name, text=heading + indicator)
 
     def run_import(self):
         if self.preview_data is None:

@@ -8,6 +8,7 @@ import sqlite3
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.address_utils import format_service_address
 from app.date_utils import format_display_datetime
 from app.security.user_manager import AuthorizationError
 from app.services.jobs_service import JobsService
@@ -39,13 +40,7 @@ def _technician(job):
 
 
 def _address(job):
-    if job.get("capture_address_raw"):
-        return str(job["capture_address_raw"])
-    return ", ".join(
-        str(value).strip()
-        for value in (job.get("address_1"), job.get("city"), job.get("state"), job.get("postal_code"))
-        if value
-    )
+    return format_service_address(job)
 
 
 def _money(value):

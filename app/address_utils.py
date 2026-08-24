@@ -47,8 +47,12 @@ def format_service_address(job: Mapping[str, Any]) -> str:
     state = _address_component(job.get("state"))
     postal_code = _address_component(job.get("postal_code"))
 
-    if all((address_1, city, state, postal_code)):
-        locality = " ".join((state, postal_code))
+    # Once an operator has corrected the normalized street address, it is the
+    # operational source of truth even when the imported source omitted a ZIP code.
+    # Falling back to the raw value merely because one component is absent would
+    # make a protected correction appear to have been ignored.
+    if address_1:
+        locality = " ".join(part for part in (state, postal_code) if part)
         return ", ".join(part for part in (address_1, address_2, city, locality) if part)
 
     raw = _raw_address(job.get("capture_address_raw"))

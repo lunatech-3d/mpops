@@ -6,6 +6,7 @@ import tkinter as tk
 from datetime import datetime
 from tkinter import messagebox, simpledialog, ttk
 
+from app.address_utils import format_service_address
 from app.date_utils import format_display_datetime
 from app.security.user_manager import AuthorizationError
 from app.services.jobs_service import JobsService
@@ -33,10 +34,7 @@ def technician_name(job):
 
 def job_address(job):
     """Return the most useful complete address available for details screens."""
-    if job.get("capture_address_raw"):
-        return str(job["capture_address_raw"])
-    parts = [job.get("address_1"), job.get("city"), job.get("state"), job.get("postal_code")]
-    return ", ".join(str(value).strip() for value in parts if value)
+    return format_service_address(job)
 
 
 def job_location_parts(job):

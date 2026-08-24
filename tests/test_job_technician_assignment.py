@@ -3,11 +3,12 @@ import unittest
 import importlib.util
 from pathlib import Path
 
+from app.address_utils import format_service_address
 from app.config import Settings
 from app.security.auth import AuthService
 from app.security.user_manager import UserManager
 from app.services.jobs_service import JobsService
-from app.ui.job_form import job_form_data, technicians_by_first_name
+from app.ui.job_form import changed_fields, job_form_data, technicians_by_first_name
 
 
 class JobTechnicianAssignmentTests(unittest.TestCase):
@@ -97,9 +98,48 @@ class JobTechnicianAssignmentTests(unittest.TestCase):
         payload = job_form_data({
             "external_job_id": "JOB-FORM",
             "primary_technician_id": self.active_id,
+            "capture_address_raw": "Old imported value",
+            "address_1": "12 Corrected St",
+            "address_2": "Suite 3",
+            "city": "Plymouth",
+            "state": "MI",
+            "postal_code": "48170",
+            "county": "Wayne",
+            "country": "USA",
         })
 
         self.assertEqual(payload["primary_technician_id"], self.active_id)
+        self.assertEqual(payload["address_1"], "12 Corrected St")
+        self.assertEqual(payload["address_2"], "Suite 3")
+        self.assertEqual(payload["county"], "Wayne")
+        self.assertEqual(payload["country"], "USA")
+
+    def test_structured_job_address_wins_even_when_zip_is_missing(self):
+        self.assertEqual(
+            format_service_address({
+                "capture_address_raw": "Incorrect Source Address, Wrong City, MI",
+                "address_1": "12 Corrected St",
+                "address_2": "Suite 3",
+                "city": "Plymouth",
+                "state": "MI",
+                "postal_code": None,
+            }),
+            "12 Corrected St, Suite 3, Plymouth, MI",
+        )
+
+    def test_changed_fields_never_writes_the_read_only_source_address(self):
+        original = {
+            "capture_address_raw": "Imported Source Address",
+            "address_1": "12 Main St",
+        }
+        submitted = {
+            "capture_address_raw": "Attempted Source Change",
+            "address_1": "12 Corrected St",
+        }
+
+        self.assertEqual(changed_fields(original, submitted), {
+            "address_1": "12 Corrected St",
+        })
 
     def test_job_form_technicians_are_sorted_by_first_name_without_changing_ids(self):
         technicians = [

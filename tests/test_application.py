@@ -264,7 +264,8 @@ class ApplicationServiceTests(unittest.TestCase):
                           "TechnicianPaymentRuns", "TechnicianPayments", "TechnicianPaymentEarnings",
                           "TechnicianCompensationRules", "JobFinancials", "AppSettings", "BackupHistory",
                           "MarketRevenueShareRules", "CompanyRevenueAllocations",
-                          "TechnicianPaymentItems", "MatterportAdjustmentAllocations"})
+                          "TechnicianPaymentItems", "MatterportAdjustmentAllocations",
+                          "JobFieldOverrides", "TechnicianPaymentEmailDrafts"})
         with self.auth.connection() as connection:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(Users)")}
             self.assertEqual(columns, {"id", "username", "password_hash", "display_name", "role",
@@ -333,7 +334,10 @@ class MigrationTests(unittest.TestCase):
                                            "022_job_lifecycle.py",
                                            "023_direct_technician_payments.py",
                                            "024_centralized_technician_payments.py",
-                                           "025_matterport_remittance_adjustments.py"})
+                                           "025_matterport_remittance_adjustments.py",
+                                           "026_job_field_overrides.py",
+                                           "027_payment_email_drafts.sql",
+                                           "028_backfill_job_field_overrides.py"})
 
     def test_job_financial_migration_has_pre_drop_column_fallback(self):
         import importlib.util
