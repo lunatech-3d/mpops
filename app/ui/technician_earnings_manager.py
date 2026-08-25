@@ -4,6 +4,7 @@ from datetime import date, datetime
 from tkinter import messagebox, ttk
 
 from app.services.compensation_service import CompensationService
+from app.services.zero_earning_service import ZeroEarningService
 from app.ui.payment_helpers import format_cents
 from app.ui.styles import PADDING
 
@@ -27,6 +28,10 @@ class TechnicianEarningsController:
 
     def void(self, earning_id, reason):
         return self.service.void_technician_earning(self.session, earning_id, reason)
+
+    def settle_zero_earnings(self, earning_ids):
+        return ZeroEarningService(self.service.auth).settle_zero_earnings(
+            self.session, list(earning_ids))
 
     def grouped_totals(self, rows):
         result = {}
@@ -127,14 +132,20 @@ class TechnicianEarningsManager(ttk.Frame):
         sx.grid(row=1, column=0, sticky="ew")
         area.rowconfigure(0, weight=1)
         area.columnconfigure(0, weight=1)
+        self.tree.bind("<<TreeviewSelect>>", self._update_actions)
 
         bar = ttk.Frame(self)
         bar.pack(fill="x")
         self.payment_button = ttk.Button(
             bar, text="Record Technician Payment", command=self.record_payment)
         self.payment_button.pack(side="left")
+        self.zero_button = ttk.Button(
+            bar, text="Mark $0 Earnings Resolved", command=self.resolve_zero_earnings,
+            state="disabled")
+        self.zero_button.pack(side="left", padx=6)
         if not self.controller.can_modify:
             self.payment_button.configure(state="disabled")
+            self.zero_button.configure(state="disabled")
         self.refresh()
 
     @staticmethod
@@ -149,6 +160,26 @@ class TechnicianEarningsManager(ttk.Frame):
             except ValueError:
                 pass
         return None
+
+    def _selected_rows(self):
+        ids = {int(earning_id) for earning_id in self.tree.selection()}
+        return [row for row in self.rows if row["technician_earning_id"] in ids]
+
+    def _update_actions(self, _event=None):
+        if not self.controller.can_modify:
+            self.payment_button.configure(state="disabled")
+            self.zero_button.configure(state="disabled")
+            return
+        selected = self._selected_rows()
+        positive_ready = bool(selected) and len({row["tech_id"] for row in selected}) == 1 and all(
+            row["payment_state"] in {"Ready to Pay", "Partially Paid"}
+            and row["balance_due_cents"] > 0 for row in selected)
+        zero_ready = bool(selected) and all(
+            row["payment_state"] == "Ready to Pay"
+            and int(row["net_earning_cents"] or 0) == 0
+            and int(row["balance_due_cents"] or 0) == 0 for row in selected)
+        self.payment_button.configure(state="normal" if positive_ready else "disabled")
+        self.zero_button.configure(state="normal" if zero_ready else "disabled")
 
     def _sort_value(self, row, column):
         value = row.get(column)
@@ -197,6 +228,7 @@ class TechnicianEarningsManager(ttk.Frame):
         for column in self.COLUMNS:
             label = self.HEADINGS[column] + (indicator if column == self.sort_column else "")
             self.tree.heading(column, text=label)
+        self._update_actions()
 
     def sort_by(self, column):
         selected_ids = self.tree.selection()
@@ -239,6 +271,45 @@ class TechnicianEarningsManager(ttk.Frame):
         else:
             self.ledger_warning.set("")
 
+    def resolve_zero_earnings(self):
+        selected = self._selected_rows()
+        if not selected:
+            messagebox.showinfo(
+                "Resolve $0 Earnings", "Select one or more $0.00 Ready to Pay earnings first.",
+                parent=self)
+            return
+        if any(row["payment_state"] != "Ready to Pay"
+               or int(row["net_earning_cents"] or 0) != 0
+               or int(row["balance_due_cents"] or 0) != 0 for row in selected):
+            messagebox.showerror(
+                "Resolve $0 Earnings",
+                "Only Ready to Pay earnings with a $0.00 net earning may be resolved this way.",
+                parent=self)
+            return
+        count = len(selected)
+        technicians = sorted({row["technician_name"] for row in selected})
+        technician_text = ", ".join(technicians)
+        if not messagebox.askyesno(
+                "Resolve $0 Earnings",
+                f"Mark {count} selected $0.00 earning{'s' if count != 1 else ''} as resolved?\n\n"
+                f"Technician: {technician_text}\n\n"
+                "No payment will be created and no external funds will be issued. "
+                "The action will be retained in the audit history.",
+                parent=self):
+            return
+        try:
+            result = self.controller.settle_zero_earnings(
+                [row["technician_earning_id"] for row in selected])
+        except Exception as exc:
+            messagebox.showerror("Resolve $0 Earnings", str(exc), parent=self)
+            return
+        self.refresh()
+        messagebox.showinfo(
+            "Resolve $0 Earnings",
+            f"Resolved {result['settled_count']} zero-dollar earning"
+            f"{'s' if result['settled_count'] != 1 else ''}. No payment was issued.",
+            parent=self)
+
     def record_payment(self):
         ids = [int(earning_id) for earning_id in self.tree.selection()]
         if not ids:
@@ -251,7 +322,7 @@ class TechnicianEarningsManager(ttk.Frame):
             return
         if any(row["payment_state"] not in {"Ready to Pay", "Partially Paid"}
                or row["balance_due_cents"] <= 0 for row in selected):
-            messagebox.showerror("Record Technician Payment","Only Ready to Pay or Partially Paid earnings with a remaining balance may be recorded.",parent=self)
+            messagebox.showerror("Record Technician Payment","Only Ready to Pay or Partially Paid earnings with a remaining balance may be recorded. Use Mark $0 Earnings Resolved for legitimate zero-dollar earnings.",parent=self)
             return
         from app.ui.technician_payment_form import TechnicianPaymentForm
         dialog=tk.Toplevel(self);dialog.title("Record Technician Payment");dialog.geometry("1100x720")
