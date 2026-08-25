@@ -1,4 +1,4 @@
-"""Compact Matterport payment-batch display with visible business Job numbers.
+"""Compact Matterport payment-batch display with visible Job and Market data.
 
 This module customizes only the payment-item grid. Reconciliation continues to use the
 signed/effective payment amounts maintained by PaymentService.
@@ -6,8 +6,13 @@ signed/effective payment amounts maintained by PaymentService.
 
 from __future__ import annotations
 
+import sqlite3
+from tkinter import messagebox
+
 from app.date_utils import format_display_date
+from app.security.user_manager import AuthorizationError
 from app.services.jobs_service import JobsService
+from app.ui.job_form import changed_fields, show_job_form
 from app.ui.payment_batch_manager import (
     PaymentBatchDetail as BasePaymentBatchDetail,
     PaymentBatchManager as BasePaymentBatchManager,
@@ -19,6 +24,9 @@ from app.ui.payment_helpers import (
 )
 
 
+EXPECTED_JOB_ERRORS = (ValueError, LookupError, AuthorizationError, sqlite3.Error)
+
+
 class PaymentBatchDetail(BasePaymentBatchDetail):
     """Payment batch detail with a compact, operations-focused item grid."""
 
@@ -26,7 +34,7 @@ class PaymentBatchDetail(BasePaymentBatchDetail):
         "document_number",
         "job_number",
         "document_date",
-        "account_name",
+        "market",
         "customer",
         "technician",
         "amount_received_cents",
@@ -35,7 +43,7 @@ class PaymentBatchDetail(BasePaymentBatchDetail):
         "AP Number",
         "Job #",
         "Document Date",
-        "Account",
+        "Market",
         "Customer / Project",
         "Technician",
         "Gross Amount",
@@ -44,17 +52,18 @@ class PaymentBatchDetail(BasePaymentBatchDetail):
         "document_number": 125,
         "job_number": 110,
         "document_date": 82,
-        "account_name": 95,
-        "customer": 225,
+        "market": 125,
+        "customer": 215,
         "technician": 130,
         "amount_received_cents": 88,
     }
 
     def __init__(self, *args, **kwargs):
         self._compact_columns_ready = False
-        self._job_number_cache: dict[int, str] = {}
+        self._job_cache: dict[int, dict] = {}
         super().__init__(*args, **kwargs)
         self._configure_compact_item_columns()
+        self.items.bind("<Double-1>", self.open_job_from_item, add="+")
         self._compact_columns_ready = True
         self._render_items()
 
@@ -74,17 +83,42 @@ class PaymentBatchDetail(BasePaymentBatchDetail):
                 anchor="e" if key == "amount_received_cents" else "w",
             )
 
-    def _job_number(self, item: dict) -> str:
+    def _job(self, item: dict) -> dict | None:
         job_id = item.get("job_id")
         if not job_id:
-            return "—"
+            return None
         job_id = int(job_id)
-        if job_id not in self._job_number_cache:
+        if job_id not in self._job_cache:
             job = JobsService(self.service.auth).get_job(job_id)
-            self._job_number_cache[job_id] = (
-                str((job or {}).get("external_job_id") or "").strip() or "—"
-            )
-        return self._job_number_cache[job_id]
+            self._job_cache[job_id] = job or {}
+        return self._job_cache[job_id] or None
+
+    def _job_number(self, item: dict) -> str:
+        job = self._job(item)
+        return str((job or {}).get("external_job_id") or "").strip() or "—"
+
+    def _market(self, item: dict) -> str:
+        job = self._job(item)
+        if not job:
+            return "—"
+        market_name = str(job.get("market_name") or "").strip()
+        market_state = str(job.get("market_state") or "").strip()
+        if market_name and market_state:
+            return f"{market_state} - {market_name}"
+        if market_name:
+            return market_name
+        if market_state:
+            return market_state
+        return "UNASSIGNED"
+
+    def _display_rows(self) -> list[dict]:
+        rows = []
+        for item in self.item_rows:
+            display_row = dict(item)
+            display_row["job_number"] = self._job_number(item)
+            display_row["market"] = self._market(item)
+            rows.append(display_row)
+        return rows
 
     def _render_items(self) -> None:
         # Base __init__ invokes refresh before the compact columns are configured.
@@ -93,15 +127,11 @@ class PaymentBatchDetail(BasePaymentBatchDetail):
 
         selected = self.items.selection()
         selected_id = selected[0] if selected else None
-        rows = []
-        for item in self.item_rows:
-            display_row = dict(item)
-            display_row["job_number"] = self._job_number(item)
-            rows.append(display_row)
+        rows = self._display_rows()
 
-        if self.item_sort_column == "job_number":
+        if self.item_sort_column in {"job_number", "market"}:
             rows.sort(
-                key=lambda row: str(row.get("job_number") or "").casefold(),
+                key=lambda row: str(row.get(self.item_sort_column) or "").casefold(),
                 reverse=self.item_sort_descending,
             )
         else:
@@ -152,7 +182,7 @@ class PaymentBatchDetail(BasePaymentBatchDetail):
                     item.get("document_number") or "",
                     item.get("job_number") or "—",
                     format_display_date(item.get("document_date")),
-                    item.get("account_name") or "Account allocation required",
+                    item.get("market") or "UNASSIGNED",
                     target,
                     technician,
                     gross,
@@ -163,6 +193,91 @@ class PaymentBatchDetail(BasePaymentBatchDetail):
         if selected_id and self.items.exists(selected_id):
             self.items.selection_set(selected_id)
             self.items.see(selected_id)
+
+    def open_job_from_item(self, event=None) -> str:
+        """Open the matched Job editor from a payment-item double click."""
+        iid = self.items.identify_row(event.y) if event is not None else ""
+        if not iid:
+            selected = self.items.selection()
+            iid = selected[0] if selected else ""
+        if not iid:
+            return "break"
+
+        item = next(
+            (row for row in self.item_rows if f"item-{row['payment_item_id']}" == iid),
+            None,
+        )
+        if not item or not item.get("job_id"):
+            messagebox.showinfo(
+                "Open Job",
+                "This payment item is not currently matched to a Job.",
+                parent=self,
+            )
+            return "break"
+
+        job_id = int(item["job_id"])
+        service = JobsService(self.service.auth)
+        try:
+            original = service.get_job(job_id)
+            if original is None:
+                raise LookupError("Job not found")
+            markets = service.list_market_options()
+            technicians = service.list_active_technician_options()
+            assignment = service.get_current_primary_assignment(job_id)
+        except EXPECTED_JOB_ERRORS as exc:
+            messagebox.showerror("Open Job", str(exc), parent=self)
+            return "break"
+
+        if assignment and assignment.get("status") != "Active":
+            technicians = [*technicians, assignment]
+
+        can_modify = self.session.role in {"admin", "operator"}
+        if not can_modify:
+            messagebox.showinfo(
+                "Open Job",
+                "Your account does not have permission to edit Jobs.",
+                parent=self,
+            )
+            return "break"
+
+        submitted = show_job_form(
+            self,
+            original,
+            markets,
+            technicians,
+            lifecycle_permissions={
+                "cancel": False,
+                "archive": False,
+                "delete_visible": False,
+                "delete": False,
+            },
+        )
+        if submitted is None:
+            return "break"
+        if submitted.get("__lifecycle_action"):
+            return "break"
+
+        changes = changed_fields(original, submitted)
+        primary_technician_id = submitted.get("primary_technician_id")
+        if not changes and primary_technician_id == original.get("primary_technician_id"):
+            return "break"
+
+        try:
+            service.update_job(
+                self.session,
+                job_id,
+                changes,
+                primary_technician_id,
+            )
+        except EXPECTED_JOB_ERRORS as exc:
+            messagebox.showerror("Update Job", str(exc), parent=self)
+            return "break"
+
+        # Job # and Market are cached for display speed. Clear the edited record and
+        # redraw immediately so the operator can see that the correction took effect.
+        self._job_cache.pop(job_id, None)
+        self.refresh()
+        return "break"
 
 
 class PaymentBatchManager(BasePaymentBatchManager):
