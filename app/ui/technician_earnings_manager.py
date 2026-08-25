@@ -19,7 +19,17 @@ class TechnicianEarningsController:
         return self.session.role in {"admin", "operator"}
 
     def load(self, **filters):
-        return self.service.list_earnings_for_review(**{**self.prefilter, **filters})
+        requested_status = filters.get("status")
+        query_filters = {**self.prefilter, **filters, "status": "All"}
+        rows = list(self.service.list_earnings_for_review(**query_filters))
+        for row in rows:
+            if (row.get("earning_status") == "Paid"
+                    and int(row.get("net_earning_cents") or 0) == 0
+                    and int(row.get("valid_paid_cents") or 0) == 0):
+                row["payment_state"] = "Paid"
+        if requested_status not in (None, "", "All"):
+            rows = [row for row in rows if row.get("payment_state") == requested_status]
+        return rows
 
     def batch_completeness(self):
         batch_id = self.prefilter["payment_batch_id"]
