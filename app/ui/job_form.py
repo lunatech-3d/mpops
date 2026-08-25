@@ -14,8 +14,8 @@ from app.ui.styles import PADDING
 JOB_FORM_FIELDS = (
     "external_job_id", "market_id", "client_name_source", "project_name_source", "job_status",
     "scheduled_start_at", "capture_address_raw", "address_1", "address_2", "city", "state",
-    "postal_code", "county", "country", "requested_capture_size", "onsite_contact_name",
-    "onsite_contact_email", "onsite_contact_phone", "internal_notes",
+    "postal_code", "county", "country", "requested_capture_size", "expected_job_revenue",
+    "onsite_contact_name", "onsite_contact_email", "onsite_contact_phone", "internal_notes",
 )
 PRIMARY_TECHNICIAN_FIELD = "primary_technician_id"
 JOB_READONLY_FIELDS = frozenset({"capture_address_raw"})
@@ -69,7 +69,7 @@ def job_form_data(values: dict) -> dict:
     if not result["external_job_id"]:
         raise ValueError("External Job ID is required.")
     for name in JOB_FORM_FIELDS:
-        if name == "requested_capture_size":
+        if name in {"requested_capture_size", "expected_job_revenue"}:
             result[name] = result[name] or None
         elif name != "external_job_id":
             result[name] = result[name] or None
@@ -118,7 +118,7 @@ def changed_fields(original: dict, submitted: dict) -> dict:
         if old in (None, ""):
             old = None
         new = submitted.get(name)
-        if name == "requested_capture_size" and new is not None:
+        if name in {"requested_capture_size", "expected_job_revenue"} and new is not None:
             try:
                 new = float(new)
             except (TypeError, ValueError):
@@ -214,6 +214,10 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *
     market_entry.grid(row=2, column=1, sticky="ew", padx=(0, 12), pady=3)
     labeled_entry(
         summary, 2, "Requested Capture Size", variables["requested_capture_size"],
+        column=2, width=18,
+    )
+    labeled_entry(
+        summary, 3, "Job Amount / Expected Revenue ($)", variables["expected_job_revenue"],
         column=2, width=18,
     )
 
