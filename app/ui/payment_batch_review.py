@@ -5,6 +5,7 @@ from __future__ import annotations
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from app.services.compensation_service import CompensationService
 from app.ui.payment_batch_compact import (
     PaymentBatchDetail as CompactPaymentBatchDetail,
     PaymentBatchManager as CompactPaymentBatchManager,
@@ -63,6 +64,30 @@ class PaymentBatchDetail(CompactPaymentBatchDetail):
             )
         ]
 
+    def _ensure_post_match_status(self) -> bool:
+        """Move a fully matched legacy Draft batch into the Imported workflow state.
+
+        Earlier versions advanced Draft -> Imported only inside match_jobs(). Batches that
+        were already completely matched before that transition logic ran could therefore
+        remain stuck in Draft forever. Earnings review/finalization are safe places to
+        repair that stale lifecycle state because we can verify the payment items directly.
+        """
+        if not self.batch_id or self.status_var.get() != "Draft":
+            return False
+        counts = self._invoice_match_counts()
+        if not counts["invoice"] or counts["pending"] != 0:
+            return False
+        if not self.can_modify:
+            return False
+        self.service.update_payment_batch(
+            self.session,
+            self.batch_id,
+            {"batch_status": "Imported"},
+        )
+        self.refresh()
+        self.on_changed(self.batch_id)
+        return True
+
     def review_earnings(self) -> None:
         posted = [
             row for row in getattr(self, "posted_earnings", [])
@@ -70,6 +95,20 @@ class PaymentBatchDetail(CompactPaymentBatchDetail):
         ]
         if posted:
             return super().review_earnings()
+
+        try:
+            self._ensure_post_match_status()
+        except Exception as exc:
+            messagebox.showerror("Review Earnings", str(exc), parent=self)
+            return
+
+        # Re-read the calculation after any automatic lifecycle repair so the dialog
+        # always reflects the status that reconciliation will validate.
+        if self.batch_id:
+            self.compensation_preview = CompensationService(
+                self.service.auth
+            ).preview_technician_earnings(self.batch_id)
+            self.reconciliation = self.service.validate_batch_reconciliation(self.batch_id)
 
         preview = self.compensation_preview or {}
         if not preview:
@@ -180,6 +219,15 @@ class PaymentBatchDetail(CompactPaymentBatchDetail):
             state="normal" if validation_ready and preview_ready and self.can_modify else "disabled",
             style="Accent.TButton",
         ).pack(side="right", padx=(0, 8))
+
+    def finalize_payment(self) -> None:
+        """Repair stale Draft status before invoking the normal finalization workflow."""
+        try:
+            self._ensure_post_match_status()
+        except Exception as exc:
+            messagebox.showerror("Finalize Payment", str(exc), parent=self)
+            return
+        return super().finalize_payment()
 
 
 class PaymentBatchManager(CompactPaymentBatchManager):
