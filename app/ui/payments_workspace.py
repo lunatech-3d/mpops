@@ -9,7 +9,7 @@ from app.services.technician_payment_service import (
     TechnicianPaymentService,
 )
 from app.services.technician_service import TechnicianService
-from app.ui.payment_batch_compact import PaymentBatchManager
+from app.ui.payment_batch_review import PaymentBatchManager
 from app.ui.payment_helpers import parse_currency
 from app.ui.technician_payment_form import TechnicianPaymentForm
 from app.ui.technician_earnings_manager import TechnicianEarningsManager
