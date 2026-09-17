@@ -240,7 +240,7 @@ class JobsManager(ttk.Frame):
         self.add_button = ttk.Button(actions, text="Add Job", command=self.add)
         self.add_button.pack(side="left", padx=(0, 6))
         if open_opentable:
-            ttk.Button(actions,text="Job Intake Center / OpenTable Import",command=open_opentable).pack(side="left",padx=(0,6))
+            ttk.Button(actions,text="AirTable Import",command=open_opentable).pack(side="left",padx=(0,6))
         if open_on_demand:
             ttk.Button(actions,text="On-Demand Intake",command=open_on_demand).pack(side="left",padx=(0,6))
         self.edit_button = ttk.Button(actions, text="Edit Job", command=self.edit)
