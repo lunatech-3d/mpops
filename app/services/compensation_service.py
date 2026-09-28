@@ -9,6 +9,7 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
+from app.address_utils import format_service_address
 from app.date_utils import utc_now_iso
 from app.security.audit import record_event
 from app.security.auth import AuthService, Session
@@ -685,7 +686,7 @@ class CompensationService:
             clauses.append(f"({state_expression}) IN ('Ready to Pay','Partially Paid')")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         sql = """SELECT e.*,COALESCE(t.preferred_name,t.first_name)||' '||t.last_name technician_name,
-          j.external_job_id,COALESCE(j.capture_address_raw,j.address_1,'') job_address,
+          j.external_job_id,j.capture_address_raw,j.address_1,j.address_2,j.city,j.state,j.postal_code,
           substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10) job_date,
           m.market_name,i.document_number,b.payment_date,b.payment_batch_id matterport_payment_batch_id,
           a.lunatech_east_amount_cents,a.lunatech_amount_cents,a.allocation_status,
@@ -712,7 +713,12 @@ class CompensationService:
             GROUP BY pe.technician_earning_id) pa
             ON pa.technician_earning_id=e.technician_earning_id"""
         with self.auth.connection() as connection:
-            return [dict(r) for r in connection.execute(sql+where+" ORDER BY e.technician_earning_id",params)]
+            rows = [dict(r) for r in connection.execute(
+                sql+where+" ORDER BY e.technician_earning_id", params
+            )]
+        for row in rows:
+            row["job_address"] = format_service_address(row)
+        return rows
 
     def get_payment_batch_ledger_completeness(self, payment_batch_id: int) -> dict[str, Any]:
         """Compare calculated preview entries with the immutable posted ledger.

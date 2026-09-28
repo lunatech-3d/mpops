@@ -20,6 +20,19 @@ class TechnicianFinanceServiceTests(CompensationServiceTests):
         self.assertEqual(summary["balance_due_cents"], 0)
         self.assertEqual(summary["pending_cents"], 71)
 
+    def test_finance_and_earning_review_use_corrected_address(self):
+        with self.auth.connection() as connection:
+            connection.execute(
+                "UPDATE Jobs SET capture_address_raw = ?, address_1 = ?, city = ?, "
+                "state = ?, postal_code = ? WHERE job_id = ?",
+                ("Old Source St, Wrong City, MI", "12 Corrected St", "Plymouth",
+                 "MI", "48170", self.job),
+            )
+        expected = "12 Corrected St, Plymouth, MI 48170"
+        self.assertEqual(self.finance.list_jobs(self.tech)[0]["job_address"], expected)
+        self.service.generate_technician_earnings(self.session, self.batch)
+        self.assertEqual(self.service.list_earnings_for_review()[0]["job_address"], expected)
+
     def test_approved_earning_is_due_then_payment_history_names_job(self):
         earning_id = self.service.generate_technician_earnings(
             self.session, self.batch)["earning_ids"][0]

@@ -763,7 +763,8 @@ class TechnicianPaymentService:
         with self.auth.connection() as c:
             rows=c.execute("""SELECT COALESCE(t.preferred_name,t.first_name)||' '||t.last_name Technician,
               p.payment_date "Payment date",p.payment_method "Payment method",p.payment_reference "Payment reference",
-              j.job_id "Job ID",j.external_job_id "External Job ID",COALESCE(j.capture_address_raw,j.address_1,'') "Job address",
+              j.job_id "Job ID",j.external_job_id "External Job ID",
+              j.capture_address_raw,j.address_1,j.address_2,j.city,j.state,j.postal_code,
               substr(COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at),1,10) "Job date",
               e.revenue_basis_cents "Gross revenue",e.compensation_rule_value "Technician rate",
               e.calculated_amount_cents "Technician earning",e.adjustment_amount_cents Adjustment,
@@ -772,4 +773,11 @@ class TechnicianPaymentService:
               JOIN TechnicianJobEarnings e ON e.technician_earning_id=pe.technician_earning_id LEFT JOIN Jobs j ON j.job_id=e.job_id
               LEFT JOIN MatterportPaymentBatches b ON b.payment_batch_id=e.payment_batch_id WHERE p.technician_payment_id=? ORDER BY e.technician_earning_id""",(payment_id,)).fetchall()
         output=io.StringIO(); fields=["Technician","Payment date","Payment method","Payment reference","Job ID","External Job ID","Job address","Job date","Gross revenue","Technician rate","Technician earning","Adjustment","Net amount","Matterport payment batch","Matterport payment date"]
-        writer=csv.DictWriter(output,fieldnames=fields);writer.writeheader();writer.writerows(dict(r) for r in rows);return output.getvalue()
+        writer=csv.DictWriter(output,fieldnames=fields);writer.writeheader()
+        for row in rows:
+            detail = dict(row)
+            detail["Job address"] = format_service_address(detail)
+            for field in ("capture_address_raw", "address_1", "address_2", "city", "state", "postal_code"):
+                detail.pop(field)
+            writer.writerow(detail)
+        return output.getvalue()

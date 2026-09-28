@@ -392,6 +392,28 @@ class PaymentServiceTests(unittest.TestCase):
             self.service.assign_payment_item_job(viewer, item_id, exact_job)
         self.assertFalse(hasattr(self.service, "resolve_duplicate_payment"))
 
+    def test_payment_views_show_corrected_address_instead_of_source_text(self):
+        batch_id = self.create_batch(100)
+        item_id = self.add_item(batch_id, "ADDR-1", 100)
+        job_id = self.create_job("ADDR-1")
+        with self.auth.connection() as connection:
+            connection.execute(
+                "UPDATE Jobs SET capture_address_raw = ?, address_1 = ?, city = ?, "
+                "state = ?, postal_code = ? WHERE job_id = ?",
+                ("Old Source St, Wrong City, MI", "12 Corrected St", "Plymouth",
+                 "MI", "48170", job_id),
+            )
+            connection.execute(
+                "UPDATE MatterportPaymentItems SET job_id = ?, match_status = 'Matched' "
+                "WHERE payment_item_id = ?", (job_id, item_id),
+            )
+        expected = "12 Corrected St, Plymouth, MI 48170"
+        self.assertEqual(self.service.list_payment_items(batch_id)[0]["address"], expected)
+        self.assertEqual(self.service.list_exception_candidates(item_id)[0]["property_address"],
+                         expected)
+        self.assertEqual(self.service.search_jobs_for_payment_exception("ADDR-1")[0]
+                         ["property_address"], expected)
+
     def test_active_primary_technician_lookup(self):
         job_id = self.create_job("TECH-JOB")
         with self.auth.connection() as connection:

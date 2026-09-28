@@ -417,11 +417,17 @@ The original imported text must be preserved even after normalization. For examp
 `client_name_source`, `project_name_source`, and `capture_address_raw` retain what the
 source system supplied.
 
-Normalized fields remain importer-owned until an operator changes them through the
-normal Job service. Such an edit creates a `JobFieldOverrides` row for that field and
-source system. Later imports continue updating raw evidence and all other unprotected
-fields, but omit that protected field. `capture_address_raw` is source evidence and is
-not protected merely because a normalized address component was corrected.
+An operator edit through the normal Job service creates a `JobFieldOverrides` row for
+each changed normalized address field. Later imports update the source evidence and
+other import fields without replacing those protected values. The importer also treats
+existing nonblank address components without an override as potentially corrected
+legacy data: it holds conflicting parsed values for review rather than replacing them.
+When a source address has an unambiguous street, city, and state, an import may fill
+missing address components even if the source row has not changed. It never clears an
+existing component because the parser returned null. The intake preview shows safe
+fills, held conflicts, protected differences, and parsing warnings. Operators can
+correct held values in the Job editor. `capture_address_raw` remains source evidence
+and may change with a newer export.
 
 ## Keys and constraints
 

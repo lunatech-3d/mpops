@@ -12,6 +12,7 @@ import sqlite3
 from datetime import date, datetime
 from typing import Any
 
+from app.address_utils import format_service_address
 from app.date_utils import utc_now_iso
 from app.security.audit import record_event
 from app.security.auth import AuthService, Session
@@ -19,6 +20,18 @@ from app.security.user_manager import AuthorizationError
 
 
 LOGGER = logging.getLogger(__name__)
+_JOB_ADDRESS_FIELDS = ("capture_address_raw", "address_1", "address_2", "city", "state", "postal_code")
+_JOB_ADDRESS_SELECT = ", ".join(
+    f"j.{field} AS _job_{field}" for field in _JOB_ADDRESS_FIELDS
+)
+
+
+def _job_address_from_row(row: dict[str, Any]) -> str:
+    return format_service_address({
+        field: row.pop(f"_job_{field}") for field in _JOB_ADDRESS_FIELDS
+    })
+
+
 ON_DEMAND_PIPELINE = "On-Demand"
 _AP_INVOICE_LOOKUP_SQL = """
     SELECT job_id, MIN(ap_invoice_number) AS ap_invoice_number
@@ -772,7 +785,7 @@ class PaymentService:
         self._positive_id(payment_batch_id, "payment_batch_id")
         with self.auth.connection() as connection:
             self._require_batch(connection, payment_batch_id)
-            return [dict(row) for row in connection.execute(
+            rows = [dict(row) for row in connection.execute(
                 f"""WITH eligible_primary AS (
                      SELECT a.job_id, COUNT(*) AS candidate_count,
                             CASE WHEN COUNT(*) = 1 THEN MIN(a.tech_id) END AS tech_id,
@@ -787,7 +800,7 @@ class PaymentService:
                      GROUP BY a.job_id
                    )
                    SELECT i.*, b.payment_date, j.client_name_source AS customer,
-                          COALESCE(j.capture_address_raw,j.address_1,'') AS address,
+                          {_JOB_ADDRESS_SELECT},
                           COALESCE(j.completed_at,j.actual_start_at,j.scheduled_start_at) AS job_date,
                           ep.tech_id, COALESCE(ep.candidate_count, 0) AS technician_candidate_count,
                           CASE COALESCE(ep.candidate_count, 0)
@@ -801,6 +814,9 @@ class PaymentService:
                    LEFT JOIN eligible_primary ep ON ep.job_id=i.job_id
                    WHERE i.payment_batch_id=? ORDER BY i.payment_item_id""", (payment_batch_id,)
             )]
+        for row in rows:
+            row["address"] = _job_address_from_row(row)
+        return rows
 
     @staticmethod
     def _resolution_notes(notes: Any) -> str | None:
@@ -893,9 +909,9 @@ class PaymentService:
             item = self._require_item(connection, payment_item_id)
             needle = item["document_number"] or ""
             rows = connection.execute(
-                """SELECT j.job_id, j.external_job_id AS job_number,
+                f"""SELECT j.job_id, j.external_job_id AS job_number,
                           j.client_name_source AS customer,
-                          COALESCE(j.capture_address_raw, j.address_1) AS property_address,
+                          {_JOB_ADDRESS_SELECT},
                           j.scheduled_start_at AS scheduled_date,
                           COALESCE(j.completed_at, j.actual_start_at, j.scheduled_start_at) AS capture_date,
                           j.job_status, t.first_name, t.last_name,
@@ -917,6 +933,7 @@ class PaymentService:
         result = []
         for row in rows:
             candidate = dict(row)
+            candidate["property_address"] = _job_address_from_row(candidate)
             candidate["technician"] = " ".join(filter(None, (candidate.pop("first_name"),
                                                                  candidate.pop("last_name"))))
             candidate["confidence"] = (100 if str(candidate["job_number"]).casefold() == needle.casefold()
@@ -934,10 +951,10 @@ class PaymentService:
         pattern = f"%{needle}%"
         with self.auth.connection() as connection:
             rows = connection.execute(
-                """SELECT j.job_id, j.external_job_id AS job_number,
+                f"""SELECT j.job_id, j.external_job_id AS job_number,
                           COALESCE(p.client_name, j.client_name_source) AS customer,
                           COALESCE(p.project_name, j.project_name_source) AS project_name,
-                          COALESCE(j.capture_address_raw, j.address_1) AS property_address,
+                          {_JOB_ADDRESS_SELECT},
                           COALESCE(j.completed_at, j.actual_start_at,
                                    j.scheduled_start_at) AS capture_date,
                           j.scheduled_start_at AS scheduled_date,
@@ -971,6 +988,7 @@ class PaymentService:
         results = []
         for row in rows:
             result = dict(row)
+            result["property_address"] = _job_address_from_row(result)
             result["technician"] = " ".join(filter(None, (
                 result.pop("first_name"), result.pop("last_name"))))
             results.append(result)
