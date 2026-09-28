@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import date
 
+from app.address_utils import format_service_address
 from app.security.auth import AuthService
 from app.services.compensation_service import CompensationService
 from app.services.revenue_rule_service import RuleConfigurationError, RuleDataIntegrityError
@@ -176,7 +177,7 @@ class TechnicianFinanceService:
                            "AND due.earning_status='Approved')")
         sql = """SELECT j.job_id,j.external_job_id,j.project_name_source,j.client_name_source,
           j.job_status,j.scheduled_start_at,j.actual_start_at,j.completed_at,j.cancelled_at,j.market_id,
-          COALESCE(j.capture_address_raw,j.address_1,'') job_address
+          j.capture_address_raw,j.address_1,j.address_2,j.city,j.state,j.postal_code
           FROM (SELECT DISTINCT job_id,tech_id FROM JobAssignments
                 WHERE assignment_status NOT IN ('Declined','Unassigned','Reassigned')) a
           JOIN Jobs j ON j.job_id=a.job_id
@@ -186,6 +187,7 @@ class TechnicianFinanceService:
             jobs = [dict(row) for row in connection.execute(sql, params)]
             calculator = CompensationService(self.auth)
             for job in jobs:
+                job["job_address"] = format_service_address(job)
                 earnings = connection.execute("""SELECT technician_earning_id,
                   net_earning_cents,earning_status,calculation_details_json
                   FROM TechnicianJobEarnings WHERE job_id=? AND tech_id=?

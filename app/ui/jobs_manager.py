@@ -38,10 +38,12 @@ def job_address(job):
 
 
 def job_location_parts(job):
-    """Return street, city, and state, using the raw address as a fallback."""
+    """Return operational components, using the source only without a street."""
     street = str(job.get("address_1") or "").strip()
     city = str(job.get("city") or "").strip()
     state = str(job.get("state") or "").strip().upper()
+    if street:
+        return street, city, state
     raw = str(job.get("capture_address_raw") or "").strip()
 
     parts = [part.strip() for part in raw.split(",") if part.strip()]

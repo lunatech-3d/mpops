@@ -88,6 +88,24 @@ class TechnicianPaymentWorkflowTests(CompensationServiceTests):
         output=self.payments.export_payment_detail_csv(pid)
         self.assertIn("External Job ID",output);self.assertNotIn("SSN",output);self.assertNotIn("bank",output.lower())
 
+    def test_payment_csv_prefers_corrected_job_address(self):
+        with self.auth.connection() as connection:
+            connection.execute(
+                "UPDATE Jobs SET capture_address_raw = ?, address_1 = ?, city = ?, "
+                "state = ?, postal_code = ? WHERE job_id = ?",
+                ("Old Source St, Wrong City, MI", "12 Corrected St", "Plymouth",
+                 "MI", "48170", self.job),
+            )
+        payment = self.payments.create_direct_payment(
+            self.session, technician_id=self.tech, payment_date="2026-08-07",
+            category="Special travel payment", amount_cents=4000,
+            description="Weekend travel", status="Paid", job_id=self.job,
+            financial_component="Travel", payment_method="Check", reference="CHK-7",
+        )
+        output = self.payments.export_payment_detail_csv(payment["technician_payment_id"])
+        self.assertIn("12 Corrected St, Plymouth, MI 48170", output)
+        self.assertNotIn("Old Source St", output)
+
     def test_fifo_uses_remaining_balances_and_partially_allocates_last(self):
         ids=[]
         for cents in (10000,15000,20000):

@@ -11,7 +11,10 @@ from app.security.auth import AuthService
 from app.security.user_manager import UserManager
 from app.services.jobs_service import JobsService
 from app.services.opentable_import_service import OpenTableImportService
-from app.ui.opentable_import_window import protected_fields_display, preview_summary
+from app.ui.opentable_import_window import (
+    address_review_details, address_review_display, protected_fields_display,
+    preview_summary,
+)
 
 
 COLUMNS = [
@@ -135,6 +138,23 @@ class OpenTableImportServiceTests(unittest.TestCase):
                 "Studio 54 Dental, 25 Oak Ave Unit 4, Austin, TX",
                 ("25 Oak Ave Unit 4", "Austin", "TX", None, None),
             ),
+            (
+                "20759 Hall Road, Macomb, MI, Macomb County, USA, 48044",
+                ("20759 Hall Road", "Macomb", "MI", "48044", "USA"),
+            ),
+            (
+                "25 Barclay Cir, Rochester Hills, Michigan 48307-4508",
+                ("25 Barclay Cir", "Rochester Hills", "MI", "48307-4508", None),
+            ),
+            (
+                "2125 South Telegraph Road, Bloomfield Township, MI, "
+                "Oakland County, USA, 48302",
+                ("2125 South Telegraph Road", "Bloomfield Township", "MI", "48302", "USA"),
+            ),
+            (
+                "123 Main St, Raleigh, North Carolina 27601",
+                ("123 Main St", "Raleigh", "NC", "27601", None),
+            ),
         ]
 
         for raw, expected in cases:
@@ -144,6 +164,22 @@ class OpenTableImportServiceTests(unittest.TestCase):
                     "address_1", "city", "state", "postal_code", "country"
                 ))
                 self.assertEqual(actual, expected)
+
+        county = self.service._parse_address(
+            "20759 Hall Road, Macomb, MI, Macomb County, USA, 48044"
+        )
+        self.assertEqual(county["county"], "Macomb County")
+
+    def test_ambiguous_michigan_address_is_held_for_review(self):
+        parsed = self.service._parse_address(
+            "44000 GARFIELD RD CLINTON TOWNSHIP MI"
+        )
+        self.assertEqual(parsed["address_1"], "44000 GARFIELD RD CLINTON TOWNSHIP")
+        self.assertIsNone(parsed["city"])
+        self.assertEqual(parsed["state"], "MI")
+        self.assertIn("city", self.service._address_warnings(
+            {"capture_address_raw": "44000 GARFIELD RD CLINTON TOWNSHIP MI", **parsed}
+        )[0])
 
     def test_partial_address_does_not_guess_street_as_city_and_preserves_raw(self):
         raw = "Studio 54 Dental, 100 Main St Suite 200"
@@ -299,6 +335,70 @@ class OpenTableImportServiceTests(unittest.TestCase):
             "address_1", "address_2", "city", "postal_code", "state",
         ])
 
+    def test_reimport_fills_missing_michigan_columns_without_replacing_local_values(self):
+        raw = "20759 Hall Road, Macomb, MI, Macomb County, USA, 48044"
+        row = source_row("1001", "JOB-MI", "Parent Record")
+        row["Capture Address"] = raw
+        self.write_rows([row])
+        self.service.import_csv(self.session, str(self.csv_path))
+        # An older local database may have been imported by the previous parser.
+        with self.auth.connection() as connection:
+            connection.execute(
+                "UPDATE Jobs SET city = NULL, state = NULL, county = NULL, country = NULL "
+                "WHERE external_job_id = 'JOB-MI'"
+            )
+
+        preview = self.service.preview(str(self.csv_path))
+        self.assertEqual(preview["items"][0]["changed_source_rows"], 0)
+        self.assertEqual(set(preview["items"][0]["address_changes"]),
+                         {"city", "state", "county", "country"})
+        self.assertEqual(preview_summary(preview)["address_fill_jobs"], 1)
+        self.assertIn("Fill: City", address_review_display(preview["items"][0]))
+        self.service.import_csv(self.session, str(self.csv_path))
+        with self.auth.connection() as connection:
+            job = connection.execute(
+                "SELECT address_1,city,state,postal_code,county,country FROM Jobs "
+                "WHERE external_job_id = 'JOB-MI'"
+            ).fetchone()
+        self.assertEqual(tuple(job), (
+            "20759 Hall Road", "Macomb", "MI", "48044", "Macomb County", "USA"
+        ))
+
+    def test_untracked_legacy_corrections_are_held_on_changed_source(self):
+        row = source_row("1001", "JOB-LEGACY", "Parent Record")
+        self.write_rows([row])
+        self.service.import_csv(self.session, str(self.csv_path))
+        with self.auth.connection() as connection:
+            connection.execute(
+                "UPDATE Jobs SET address_1 = '12 Corrected St', city = 'Canton', "
+                "state = 'OH', postal_code = '99999' WHERE external_job_id = 'JOB-LEGACY'"
+            )
+        changed = dict(row)
+        changed["Capture Address"] = "500 Source Rd, Raleigh, NC, 27601, USA"
+        self.write_rows([changed])
+
+        preview = self.service.preview(str(self.csv_path))
+        self.assertEqual(set(preview["items"][0]["held_address_fields"]),
+                         {"address_1", "city", "state", "postal_code"})
+        self.assertEqual(preview_summary(preview)["address_review_jobs"], 1)
+        self.service.import_csv(self.session, str(self.csv_path))
+        with self.auth.connection() as connection:
+            job = connection.execute(
+                "SELECT capture_address_raw,address_1,city,state,postal_code "
+                "FROM Jobs WHERE external_job_id = 'JOB-LEGACY'"
+            ).fetchone()
+        self.assertEqual(tuple(job), (
+            changed["Capture Address"], "12 Corrected St", "Canton", "OH", "99999"
+        ))
+
+    def test_malformed_csv_row_with_extra_columns_is_rejected(self):
+        self.write_rows([source_row("1001", "JOB-1", "Parent Record")])
+        lines = self.csv_path.read_text(encoding="utf-8-sig").splitlines()
+        lines[1] += ",extra-cell"
+        self.csv_path.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+        with self.assertRaisesRegex(ValueError, "extra CSV columns"):
+            self.service.preview(str(self.csv_path))
+
     def test_migration_backfills_audited_pre_protection_address_correction(self):
         self.write_rows([source_row("1001", "JOB-1", "Parent Record")])
         self.service.import_csv(self.session, str(self.csv_path))
@@ -353,7 +453,7 @@ class OpenTableImportServiceTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(city, "Canton")
 
-    def test_reimport_reprocesses_unchanged_source_with_refined_address_parser(self):
+    def test_reimport_fills_missing_address_fields_but_holds_nonblank_conflicts(self):
         raw = (
             "Dental Care at Village Commons, 6400 Weddington Rd Ste J, "
             "Wesley Chapel, NC"
@@ -375,10 +475,11 @@ class OpenTableImportServiceTests(unittest.TestCase):
 
         self.assertEqual(preview["counts"], {"updated": 1})
         self.assertEqual(preview["items"][0]["changed_source_rows"], 0)
-        self.assertEqual(
-            preview["items"][0]["changed_job_fields"],
-            ["address_1", "city", "state"],
-        )
+        self.assertEqual(preview["items"][0]["changed_job_fields"], ["state"])
+        self.assertEqual(preview["items"][0]["held_address_fields"],
+                         ["address_1", "city"])
+        self.assertIn("Held for review", address_review_details(preview["items"][0]))
+        self.assertIn("Review:", address_review_display(preview["items"][0]))
 
         result = self.service.import_csv(self.session, str(self.csv_path))
 
@@ -389,9 +490,10 @@ class OpenTableImportServiceTests(unittest.TestCase):
             job = connection.execute(
                 "SELECT address_1, city, state FROM Jobs WHERE external_job_id = 'JOB-1'"
             ).fetchone()
-        self.assertEqual(tuple(job), ("6400 Weddington Rd Ste J", "Wesley Chapel", "NC"))
+        self.assertEqual(tuple(job),
+                         ("Dental Care at Village Commons", "6400 Weddington Rd Ste J", "NC"))
 
-    def test_reimport_clears_address_value_previously_inferred_in_error(self):
+    def test_reimport_does_not_clear_legacy_nonblank_address(self):
         raw = "Studio 54 Dental, 100 Main St Suite 200"
         row = source_row("1001", "JOB-1", "Parent Record")
         row["Capture Address"] = raw
@@ -403,11 +505,12 @@ class OpenTableImportServiceTests(unittest.TestCase):
         preview = self.service.preview(str(self.csv_path))
         result = self.service.import_csv(self.session, str(self.csv_path))
 
-        self.assertEqual(preview["counts"], {"updated": 1})
-        self.assertEqual(result["updated"], 1)
+        self.assertEqual(preview["counts"], {"skipped": 1})
+        self.assertEqual(preview["items"][0]["held_address_fields"], ["city"])
+        self.assertEqual(result["skipped"], 1)
         with self.auth.connection() as connection:
             city = connection.execute("SELECT city FROM Jobs").fetchone()[0]
-        self.assertIsNone(city)
+        self.assertEqual(city, "100 Main St Suite 200")
 
     def test_blank_invoice_number_is_stored_as_null(self):
         self.write_rows([source_row("1001", "JOB-1", "Parent Record", invoice="   ")])

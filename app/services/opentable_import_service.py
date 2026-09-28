@@ -43,15 +43,36 @@ _US_STATE_ABBREVIATIONS = frozenset({
     "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA",
     "WI", "WV", "WY",
 })
+_US_STATE_NAMES = {
+    "alabama": "AL", "alaska": "AK", "arizona": "AZ", "arkansas": "AR",
+    "california": "CA", "colorado": "CO", "connecticut": "CT", "delaware": "DE",
+    "district of columbia": "DC", "florida": "FL", "georgia": "GA", "hawaii": "HI",
+    "idaho": "ID", "illinois": "IL", "indiana": "IN", "iowa": "IA",
+    "kansas": "KS", "kentucky": "KY", "louisiana": "LA", "maine": "ME",
+    "maryland": "MD", "massachusetts": "MA", "michigan": "MI", "minnesota": "MN",
+    "mississippi": "MS", "missouri": "MO", "montana": "MT", "nebraska": "NE",
+    "nevada": "NV", "new hampshire": "NH", "new jersey": "NJ", "new mexico": "NM",
+    "new york": "NY", "north carolina": "NC", "north dakota": "ND", "ohio": "OH",
+    "oklahoma": "OK", "oregon": "OR", "pennsylvania": "PA", "rhode island": "RI",
+    "south carolina": "SC", "south dakota": "SD", "tennessee": "TN", "texas": "TX",
+    "utah": "UT", "vermont": "VT", "virginia": "VA", "washington": "WA",
+    "west virginia": "WV", "wisconsin": "WI", "wyoming": "WY",
+}
 _COUNTRY_NAMES = frozenset({
     "us", "usa", "united states", "united states of america",
 })
 _ZIP_SUFFIX = re.compile(r"(?:^|\s)(\d{5}(?:-\d{4})?)$")
-_STATE_SUFFIX = re.compile(r"(?:^|\s)([A-Za-z]{2})$")
+_STATE_SUFFIX = re.compile(
+    r"(?:^|\s)(" + "|".join(re.escape(name) for name in sorted(
+        _US_STATE_NAMES, key=len, reverse=True
+    )) + r"|[A-Za-z]{2})$", re.IGNORECASE,
+)
+_COUNTY_SEGMENT = re.compile(r"^[A-Za-z][A-Za-z .'-]* County$", re.IGNORECASE)
 _STREET_PREFIX = re.compile(r"^\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?\s+\S")
 _ADDRESS_FIELDS = frozenset({
     "address_1", "address_2", "city", "state", "postal_code", "county", "country",
 })
+_ADDRESS_REVIEW_FIELDS = ("address_1", "address_2", "city", "state", "postal_code", "county", "country")
 
 
 class OpenTableImportService:
@@ -172,29 +193,40 @@ class OpenTableImportService:
         if not parts:
             return result
 
-        if parts[-1].casefold() in _COUNTRY_NAMES:
-            result["country"] = "USA"
-            parts.pop()
-
-        if parts:
-            zip_match = _ZIP_SUFFIX.search(parts[-1])
-            if zip_match:
+        # Airtable addresses use both "MI, 48170, USA" and
+        # "MI, Wayne County, USA, 48170". Peel off the trailing metadata in
+        # either order before looking for the state and city.
+        while parts:
+            last = parts[-1]
+            if last.casefold() in _COUNTRY_NAMES:
+                result["country"] = "USA"
+                parts.pop()
+            elif result["postal_code"] is None and (zip_match := _ZIP_SUFFIX.search(last)):
                 result["postal_code"] = zip_match.group(1)
-                parts[-1] = parts[-1][:zip_match.start()].strip()
+                parts[-1] = last[:zip_match.start()].strip()
                 if not parts[-1]:
                     parts.pop()
+            elif (result["county"] is None and len(parts) >= 3
+                  and _COUNTY_SEGMENT.fullmatch(last)):
+                result["county"] = parts.pop()
+            else:
+                break
 
         if parts:
             state_match = _STATE_SUFFIX.search(parts[-1])
-            if state_match and state_match.group(1).upper() in _US_STATE_ABBREVIATIONS:
-                result["state"] = state_match.group(1).upper()
+            state_token = state_match.group(1) if state_match else None
+            state_code = (_US_STATE_NAMES.get(state_token.casefold())
+                          or state_token.upper()) if state_token else None
+            if state_code in _US_STATE_ABBREVIATIONS:
+                result["state"] = state_code
                 parts[-1] = parts[-1][:state_match.start()].strip()
                 if not parts[-1]:
                     parts.pop()
 
         # A locality is only safe to infer when it immediately precedes a recognized
         # state suffix. In particular, never use a numeric street as a positional city.
-        if result["state"] and parts and not _STREET_PREFIX.match(parts[-1]):
+        if (result["state"] and parts and not _STREET_PREFIX.match(parts[-1])
+                and not _COUNTY_SEGMENT.fullmatch(parts[-1])):
             result["city"] = parts.pop()
 
         # Work back from the locality so a business/facility prefix is ignored. Suite
@@ -203,6 +235,16 @@ class OpenTableImportService:
         if street:
             result["address_1"] = street
         return result
+
+    @staticmethod
+    def _address_warnings(job_data: dict[str, Any]) -> list[str]:
+        if not job_data.get("capture_address_raw"):
+            return []
+        missing = [name for name in ("address_1", "city", "state") if not job_data.get(name)]
+        warnings = (["Could not confidently parse " + ", ".join(missing)] if missing else [])
+        if not job_data.get("postal_code"):
+            warnings.append("No ZIP found in the source address")
+        return warnings
 
     @staticmethod
     def _is_parent(row: dict[str, str]) -> bool:
@@ -266,25 +308,39 @@ class OpenTableImportService:
         }
 
     @staticmethod
-    def _job_changes(
+    def _job_changes_with_review(
         job_data: dict[str, Any], existing: Any,
         protected_fields: set[str] | frozenset[str] = frozenset(),
-    ) -> dict[str, Any]:
-        """Return import-owned values that differ from an existing job.
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Update certain imported values; hold uncertain address changes for review.
 
-        Parsed address fields intentionally include null values. This lets a newer
-        parser remove a value that an older parser incorrectly inferred while the
-        other optional import fields retain the importer's historical, non-destructive
-        null behavior.
+        A complete street/city/state parse may fill blanks, even on an unchanged
+        source row. Existing nonblank components may be unaudited local fixes, so
+        conflicting imported values are held for an operator to review.
         """
-        return {
-            field: value
-            for field, value in job_data.items()
-            if field != "external_job_id"
-            and field not in protected_fields
-            and (value is not None or field in _ADDRESS_FIELDS)
-            and existing[field] != value
-        }
+        changes = {}
+        held = []
+        confident = all(job_data.get(field) for field in ("address_1", "city", "state"))
+        for field, value in job_data.items():
+            if field == "external_job_id" or field in protected_fields or existing[field] == value:
+                continue
+            if field not in _ADDRESS_FIELDS:
+                if value is not None:
+                    changes[field] = value
+            elif not confident or value is None:
+                held.append(field)
+            elif existing[field] in (None, ""):
+                changes[field] = value
+            else:
+                held.append(field)
+        return changes, sorted(held)
+
+    @classmethod
+    def _job_changes(
+        cls, job_data: dict[str, Any], existing: Any,
+        protected_fields: set[str] | frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
+        return cls._job_changes_with_review(job_data, existing, protected_fields)[0]
 
     @classmethod
     def read_csv(cls, file_path: str) -> list[dict[str, Any]]:
@@ -298,6 +354,10 @@ class OpenTableImportService:
                 raise ValueError("OpenTable export is missing columns: " + ", ".join(missing))
             grouped: dict[str, list[dict[str, str]]] = defaultdict(list)
             for source_row_number, row in enumerate(reader, start=2):
+                if None in row:
+                    raise ValueError(
+                        f"Row {source_row_number} has extra CSV columns; check address quoting"
+                    )
                 external_job_id = cls._text(row.get("Job ID"))
                 record_number = cls._text(row.get("Record Number"))
                 if not external_job_id:
@@ -358,11 +418,14 @@ class OpenTableImportService:
 
             protected_fields = (overrides[int(existing_job["job_id"])]
                                 if existing_job else set())
-            job_changes = (self._job_changes(group["job"], existing_job, protected_fields)
-                           if existing_job else {})
-            protected_changes = (self._job_changes(group["job"], existing_job)
-                                 if existing_job else {})
-            protected_changes = sorted(set(protected_changes) & protected_fields)
+            job_changes, held_address = (self._job_changes_with_review(
+                group["job"], existing_job, protected_fields
+            ) if existing_job else ({}, []))
+            protected_changes = (sorted(
+                field for field in protected_fields & _ADDRESS_FIELDS
+                if existing_job[field] != group["job"][field]
+            ) if existing_job else [])
+            address_changes = sorted(set(job_changes) & _ADDRESS_FIELDS)
             protected_status = (str(existing_job["job_status"]).casefold()
                                 if existing_job is not None else "")
             if protected_status in {"cancelled", "archived"}:
@@ -388,6 +451,14 @@ class OpenTableImportService:
                 "changed_source_rows": changed,
                 "changed_job_fields": sorted(job_changes),
                 "protected_job_fields": protected_changes,
+                "address_changes": address_changes,
+                "held_address_fields": held_address,
+                "address_warnings": self._address_warnings(group["job"]),
+                "parsed_address": {field: group["job"].get(field)
+                                   for field in _ADDRESS_REVIEW_FIELDS},
+                "current_address": ({field: existing_job[field]
+                                     for field in _ADDRESS_REVIEW_FIELDS}
+                                    if existing_job else None),
                 "parent_record_count": group["parent_record_count"],
                 "existing_job_status": existing_job["job_status"] if existing_job else None,
             })

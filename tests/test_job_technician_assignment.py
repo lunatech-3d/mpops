@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 from app.address_utils import format_service_address
+from app.ui.jobs_manager import job_location_parts
 from app.config import Settings
 from app.security.auth import AuthService
 from app.security.user_manager import UserManager
@@ -126,6 +127,12 @@ class JobTechnicianAssignmentTests(unittest.TestCase):
             }),
             "12 Corrected St, Suite 3, Plymouth, MI",
         )
+
+    def test_job_grid_does_not_fill_missing_corrected_fields_from_old_source(self):
+        self.assertEqual(job_location_parts({
+            "capture_address_raw": "12 Main St, Wrong City, OH",
+            "address_1": "12 Corrected St", "city": None, "state": None,
+        }), ("12 Corrected St", "", ""))
 
     def test_changed_fields_never_writes_the_read_only_source_address(self):
         original = {

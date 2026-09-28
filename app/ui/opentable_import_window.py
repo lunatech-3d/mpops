@@ -30,6 +30,41 @@ def protected_fields_display(item):
     return ", ".join(PROTECTED_FIELD_LABELS.get(field, field) for field in fields)
 
 
+def address_review_display(item):
+    """Show which address changes are safe and which need an operator."""
+    held = item.get("held_address_fields") or ()
+    if held:
+        return "Review: " + ", ".join(PROTECTED_FIELD_LABELS.get(f, f) for f in held)
+    if item.get("address_warnings"):
+        return "Check source address"
+    filled = item.get("address_changes") or ()
+    if filled:
+        return "Fill: " + ", ".join(PROTECTED_FIELD_LABELS.get(f, f) for f in filled)
+    return "OK"
+
+
+def address_review_details(item):
+    """Describe the parsed and existing values before the import is confirmed."""
+    lines = [f"Job: {item.get('external_job_id') or '—'}",
+             f"Source address: {item.get('capture_address') or '—'}"]
+    lines.extend(item.get("address_warnings") or ())
+    current = item.get("current_address")
+    parsed = item.get("parsed_address") or {}
+    changed = set(item.get("address_changes") or ())
+    held = set(item.get("held_address_fields") or ())
+    protected = set(item.get("protected_job_fields") or ())
+    lines.append("")
+    for field, label in PROTECTED_FIELD_LABELS.items():
+        status = ("Protected local value" if field in protected else
+                  "Held for review" if field in held else
+                  "Will fill" if field in changed else
+                  "New job" if current is None else "Unchanged")
+        old = "—" if current is None else (current.get(field) or "—")
+        new = parsed.get(field) or "—"
+        lines.append(f"{label}: current {old} | source parse {new} | {status}")
+    return "\n".join(lines)
+
+
 def preview_summary(preview):
     """Return compact Matterport intake preview totals for display and testing."""
     counts = preview.get("counts", {})
@@ -43,6 +78,9 @@ def preview_summary(preview):
         "changed_source_rows": sum(int(item.get("changed_source_rows", 0)) for item in items),
         "protected_jobs": sum(bool(item.get("protected_job_fields")) for item in items),
         "protected_fields": sum(len(item.get("protected_job_fields") or ()) for item in items),
+        "address_review_jobs": sum(bool(item.get("held_address_fields") or
+                                        item.get("address_warnings")) for item in items),
+        "address_fill_jobs": sum(bool(item.get("address_changes")) for item in items),
         "missing_parent": sum(int(item.get("parent_record_count", 0)) == 0 for item in items),
         "multiple_parents": sum(int(item.get("parent_record_count", 0)) > 1 for item in items),
     }
@@ -53,12 +91,13 @@ class OpenTableImportWindow(tk.Toplevel):
 
     COLUMNS = (
         "action", "external_job_id", "client_name", "project_name", "job_status",
-        "scheduled_start_at", "source_row_count", "changed_source_rows", "protected_fields",
-        "parent_status",
+        "scheduled_start_at", "source_row_count", "changed_source_rows", "address_review",
+        "protected_fields", "parent_status",
     )
     HEADINGS = (
         "Action", "Job #", "Client", "Project", "Status", "Scheduled",
-        "Source Rows", "Changed Rows", "Protected Local Values", "Parent Record",
+        "Source Rows", "Changed Rows", "Address Check", "Protected Local Values",
+        "Parent Record",
     )
 
     def __init__(self, parent, auth, session, on_imported=None, service=None):
@@ -111,8 +150,8 @@ class OpenTableImportWindow(tk.Toplevel):
         table = ttk.Frame(body)
         table.pack(fill="both", expand=True)
         self.tree = ttk.Treeview(table, columns=self.COLUMNS, show="headings")
-        widths = (80, 105, 140, 160, 100, 130, 80, 85, 190, 105)
-        anchors = ("w", "w", "w", "w", "w", "w", "e", "e", "w", "w")
+        widths = (80, 105, 140, 160, 100, 130, 80, 85, 190, 190, 105)
+        anchors = ("w", "w", "w", "w", "w", "w", "e", "e", "w", "w", "w")
         for name, heading, width, anchor in zip(self.COLUMNS, self.HEADINGS, widths, anchors):
             self.tree.heading(name, text=heading, command=lambda column=name: self.sort_by(column))
             self.tree.column(name, width=width, minwidth=65, anchor=anchor)
@@ -120,6 +159,7 @@ class OpenTableImportWindow(tk.Toplevel):
         xbar = ttk.Scrollbar(table, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscrollcommand=ybar.set, xscrollcommand=xbar.set)
         self.tree.grid(row=0, column=0, sticky="nsew")
+        self.tree.bind("<Double-1>", self.show_address_review)
         ybar.grid(row=0, column=1, sticky="ns")
         xbar.grid(row=1, column=0, sticky="ew")
         table.rowconfigure(0, weight=1)
@@ -127,6 +167,9 @@ class OpenTableImportWindow(tk.Toplevel):
 
         actions = ttk.Frame(body)
         actions.pack(fill="x", pady=(10, 0))
+        ttk.Button(actions, text="Review Selected Address", command=self.show_address_review).pack(
+            side="left"
+        )
         self.import_button = ttk.Button(
             actions,
             text="Import Matterport Jobs",
@@ -181,6 +224,7 @@ class OpenTableImportWindow(tk.Toplevel):
                 format_display_datetime(item.get("scheduled_start_at")),
                 item.get("source_row_count", 0),
                 item.get("changed_source_rows", 0),
+                address_review_display(item),
                 protected_fields_display(item),
                 parent_status,
             )
@@ -201,9 +245,20 @@ class OpenTableImportWindow(tk.Toplevel):
             f'{summary["source_rows"]} source rows, {summary["changed_source_rows"]} changed; '
             f'{summary["protected_fields"]} protected local value(s) on '
             f'{summary["protected_jobs"]} job(s); '
+            f'{summary["address_fill_jobs"]} job(s) with safe address fills; '
+            f'{summary["address_review_jobs"]} address(es) needing review; '
             f'{warnings}.'
         )
         self.import_button.configure(state="normal" if preview.get("items") else "disabled")
+
+    def show_address_review(self, _event=None):
+        selected = self.tree.selection()
+        if not selected:
+            messagebox.showinfo("Address Review", "Select a job in the preview first.", parent=self)
+            return
+        messagebox.showinfo(
+            "Address Review", address_review_details(self.preview_rows[selected[0]]), parent=self
+        )
 
     def sort_by(self, column):
         """Sort the preview by a heading while keeping blank values last."""
@@ -243,15 +298,20 @@ class OpenTableImportWindow(tk.Toplevel):
         counts = self.preview_data.get("counts", {})
         proposed = int(counts.get("created", 0)) + int(counts.get("updated", 0))
         if proposed == 0:
+            review_jobs = preview_summary(self.preview_data)["address_review_jobs"]
             messagebox.showinfo(
                 "Matterport Job Intake Center",
-                "All Matterport jobs in this file are already imported and unchanged.",
+                "No safe Job updates are pending. "
+                + (f"{review_jobs} address(es) still need review in the Jobs editor."
+                   if review_jobs else "All source rows are unchanged."),
                 parent=self,
             )
             return
         if not messagebox.askyesno(
             "Confirm Matterport Job Intake",
-            f"Import {proposed} new or changed Matterport job(s)?",
+            f"Import {proposed} new or changed Matterport job(s)?\n\n"
+            f"{preview_summary(self.preview_data)['address_review_jobs']} address(es) "
+            "have source warnings or conflicting values held for review.",
             parent=self,
         ):
             return
