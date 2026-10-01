@@ -9,12 +9,12 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from app.address_utils import normalize_us_postal_code, split_us_postal_code_suffix
 from app.date_utils import format_display_datetime, utc_now_iso
 from app.security.audit import record_event
 from app.services.assignment_service import AssignmentService
 from app.services.compensation_service import CompensationService
 from app.services.jobs_service import JobsService
+from app.services.opentable_import_service import OpenTableImportService
 from app.services.technician_service import TechnicianService
 
 
@@ -33,34 +33,11 @@ def _label(text: str, name: str, next_names: str = "") -> str | None:
 
 
 def parse_address(raw: str | None) -> dict[str, str | None]:
-    """Conservatively split common comma-delimited US addresses, retaining raw."""
-    result = {"address_1": None, "address_2": None, "city": None, "state": None,
-              "postal_code": None, "country": None}
-    parts = [part.strip() for part in str(raw or "").split(",") if part.strip()]
-    country = None
-    address_parts = parts
-    if parts and parts[-1].casefold() in {
-        "us", "usa", "united states", "united states of america",
-    }:
-        country = parts[-1]
-        address_parts = parts[:-1]
-
-    if len(address_parts) >= 4:
-        postal_code = normalize_us_postal_code(address_parts[-1])
-        state = address_parts[-2]
-        if postal_code and re.fullmatch(r"[A-Za-z]{2}", state):
-            result.update(address_1=", ".join(address_parts[:-3]),
-                          city=address_parts[-3], state=state.upper(),
-                          postal_code=postal_code, country=country)
-            return result
-
-    if len(address_parts) >= 3:
-        postal_code, state = split_us_postal_code_suffix(address_parts[-1])
-        if postal_code and re.fullmatch(r"[A-Za-z]{2}", state):
-            result.update(address_1=", ".join(address_parts[:-2]),
-                          city=address_parts[-2], state=state.upper(),
-                          postal_code=postal_code, country=country or "US")
-    return result
+    """Parse a US address through the shared AirTable/job address parser."""
+    parsed = OpenTableImportService.parse_address(raw)
+    return {field: parsed[field] for field in (
+        "address_1", "address_2", "city", "state", "postal_code", "country",
+    )}
 
 
 def _duration_minutes(value: str | None) -> int | None:

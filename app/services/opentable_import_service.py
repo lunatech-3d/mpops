@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from app.address_utils import split_us_postal_code_suffix
+from app.address_utils import normalize_us_postal_code, split_us_postal_code_suffix
 from app.date_utils import utc_now_iso
 from app.security.audit import record_event
 from app.security.auth import AuthService, Session
@@ -70,6 +70,16 @@ _STATE_SUFFIX = re.compile(
 )
 _COUNTY_SEGMENT = re.compile(r"^[A-Za-z][A-Za-z .'-]* County$", re.IGNORECASE)
 _STREET_PREFIX = re.compile(r"^\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?\s+\S")
+_STREET_SUFFIXES = frozenset("""
+    alley aly avenue ave boulevard blvd circle cir court ct cove cv crescent cres
+    drive dr expressway expy freeway fwy highway hwy lane ln parkway pkwy place pl
+    plaza plz road rd route rte square sq street st terrace ter trail trl turnpike
+    tpke walk way
+""".split())
+_UNIT_DESIGNATORS = frozenset({
+    "apartment", "apt", "building", "bldg", "floor", "fl", "room", "rm",
+    "suite", "ste", "unit",
+})
 _ADDRESS_FIELDS = frozenset({
     "address_1", "address_2", "city", "state", "postal_code", "county", "country",
 })
@@ -191,6 +201,61 @@ class OpenTableImportService:
         return [part for part in normalized if part]
 
     @classmethod
+    def _without_duplicate_locality_suffix(cls, parts: list[str]) -> list[str]:
+        """Drop a repeated trailing ``city, ZIP`` from a complete address.
+
+        Some source rows append search/location columns after an already complete
+        address, for example ``street, city, state ZIP, city, ZIP``. Only remove
+        the suffix when both the city and ZIP repeat around a recognized state.
+        """
+        if len(parts) < 5:
+            return parts
+        trailing_zip = normalize_us_postal_code(parts[-1])
+        trailing_city = parts[-2].casefold()
+        if not trailing_zip or not trailing_city or _STREET_PREFIX.match(parts[-2]):
+            return parts
+
+        for city_index, value in enumerate(parts[:-2]):
+            if value.casefold() != trailing_city:
+                continue
+            found_state = False
+            earlier_zips = set()
+            for state_segment in parts[city_index + 1:-2]:
+                embedded_zip, state_text = split_us_postal_code_suffix(state_segment)
+                if embedded_zip:
+                    earlier_zips.add(embedded_zip)
+                state_match = _STATE_SUFFIX.fullmatch(state_text)
+                state_token = state_match.group(1) if state_match else None
+                state_code = (_US_STATE_NAMES.get(state_token.casefold())
+                              or state_token.upper()) if state_token else None
+                found_state = found_state or state_code in _US_STATE_ABBREVIATIONS
+            if found_state and trailing_zip in earlier_zips:
+                return parts[:-2]
+        return parts
+
+    @staticmethod
+    def _split_embedded_city(component: str) -> tuple[str, str] | None:
+        """Split ``street suffix city`` when the city delimiter is missing."""
+        if not _STREET_PREFIX.match(component):
+            return None
+        tokens = component.split()
+        for suffix_index in range(len(tokens) - 2, 0, -1):
+            suffix = tokens[suffix_index].rstrip(".").casefold()
+            if suffix not in _STREET_SUFFIXES:
+                continue
+            city_tokens = tokens[suffix_index + 1:]
+            city_start = city_tokens[0].lstrip("#").rstrip(".").casefold()
+            if city_start in _UNIT_DESIGNATORS:
+                continue
+            if len(city_tokens) == 1 and city_start in _STREET_SUFFIXES:
+                continue
+            if not all(re.fullmatch(r"[A-Za-z][A-Za-z.'-]*", token)
+                       for token in city_tokens):
+                continue
+            return " ".join(tokens[:suffix_index + 1]), " ".join(city_tokens)
+        return None
+
+    @classmethod
     def _parse_address_version(
         cls, raw: str | None, *, split_whitespace_columns: bool,
     ) -> dict[str, str | None]:
@@ -207,11 +272,14 @@ class OpenTableImportService:
         if not raw or not str(raw).strip():
             return result
 
+        raw_text = str(raw).strip()
         parts = cls._address_parts(
-            str(raw).strip(), split_whitespace_columns=split_whitespace_columns
+            raw_text, split_whitespace_columns=split_whitespace_columns
         )
         if not parts:
             return result
+        if split_whitespace_columns:
+            parts = cls._without_duplicate_locality_suffix(parts)
 
         # Airtable addresses use both "MI, 48170, USA" and
         # "MI, Wayne County, USA, 48170". Peel off the trailing metadata in
@@ -251,6 +319,11 @@ class OpenTableImportService:
                 if not parts[-1]:
                     parts.pop()
 
+        if split_whitespace_columns and "," in raw_text and result["state"] and parts:
+            street_and_city = cls._split_embedded_city(parts[-1])
+            if street_and_city:
+                parts[-1:] = street_and_city
+
         # A locality is only safe to infer when it immediately precedes a recognized
         # state suffix. In particular, never use a numeric street as a positional city.
         if (result["state"] and parts and not _STREET_PREFIX.match(parts[-1])
@@ -268,6 +341,11 @@ class OpenTableImportService:
     def _parse_address(cls, raw: str | None) -> dict[str, str | None]:
         """Parse comma-delimited and column-spaced US source addresses."""
         return cls._parse_address_version(raw, split_whitespace_columns=True)
+
+    @classmethod
+    def parse_address(cls, raw: str | None) -> dict[str, str | None]:
+        """Public, non-writing entry point shared by every address intake path."""
+        return cls._parse_address(raw)
 
     @classmethod
     def parse_address_for_review(

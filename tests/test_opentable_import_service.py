@@ -131,6 +131,18 @@ class OpenTableImportServiceTests(unittest.TestCase):
                 ("7221 Waverly Walk Ave", "Charlotte", "NC", "28277-8030", None),
             ),
             (
+                "444 S Broad St  Brevard, NC 28712",
+                ("444 S Broad St", "Brevard", "NC", "28712", None),
+            ),
+            (
+                "1015 Barbara Jean Lane, Wingate, NC 28174 ,  Wingate ,   28174",
+                ("1015 Barbara Jean Lane", "Wingate", "NC", "28174", None),
+            ),
+            (
+                "105 Chestnut Cir Lake Lure, NC 28746",
+                ("105 Chestnut Cir", "Lake Lure", "NC", "28746", None),
+            ),
+            (
                 "1965 Michigan Ave, Alma, MI, 48801, US",
                 ("1965 Michigan Ave", "Alma", "MI", "48801", "USA"),
             ),
