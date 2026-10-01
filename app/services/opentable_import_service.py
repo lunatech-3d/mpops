@@ -261,6 +261,15 @@ class OpenTableImportService:
         return cls._parse_address_version(raw, split_whitespace_columns=True)
 
     @classmethod
+    def parse_address_for_review(
+        cls, raw: str | None,
+    ) -> tuple[dict[str, str | None], list[str]]:
+        """Return a non-writing address parse and any confidence warnings."""
+        parsed = cls._parse_address(raw)
+        warnings = cls._address_warnings({"capture_address_raw": raw, **parsed})
+        return parsed, warnings
+
+    @classmethod
     def _legacy_parse_address(cls, raw: str | None) -> dict[str, str | None]:
         """Reproduce the prior parser so its stored artifacts can be repaired."""
         return cls._parse_address_version(raw, split_whitespace_columns=False)

@@ -6,6 +6,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from app.date_utils import display_date_to_iso
+from app.services.opentable_import_service import OpenTableImportService
 from app.ui.dialog_utils import close_modal, prepare_modal_dialog
 from app.ui.scrollable_frame import ScrollableFrame
 from app.ui.styles import PADDING
@@ -128,6 +129,23 @@ def changed_fields(original: dict, submitted: dict) -> dict:
     return changes
 
 
+def reparse_address_changes(
+    source_address: str | None, current_values: dict,
+) -> tuple[dict[str, str], list[str]]:
+    """Return confident nonblank reparsed components without clearing local data."""
+    parsed, warnings = OpenTableImportService.parse_address_for_review(source_address)
+    if not all(parsed.get(field) for field in ("address_1", "city", "state")):
+        return {}, warnings
+
+    changes = {}
+    for field in ADDRESS_FIELD_LABELS:
+        value = parsed.get(field)
+        current = str(current_values.get(field) or "").strip() or None
+        if value not in (None, "") and value != current:
+            changes[field] = value
+    return changes, warnings
+
+
 def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *,
                   lifecycle_permissions: dict | None = None) -> dict | None:
     """Show a compact modal Job editor and return submitted values."""
@@ -178,6 +196,51 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *
     technician_var = tk.StringVar(
         value=technician_id_to_display.get((job or {}).get(PRIMARY_TECHNICIAN_FIELD), "")
     )
+
+    def reparse_address():
+        source = variables["capture_address_raw"].get().strip()
+        if not source:
+            messagebox.showinfo(
+                "Reparse Imported Address",
+                "This Job does not have an imported source address to reparse.",
+                parent=dialog,
+            )
+            return
+
+        current = {
+            field: variables[field].get()
+            for field in ADDRESS_FIELD_LABELS
+        }
+        changes, warnings = reparse_address_changes(source, current)
+        if not changes:
+            message = (
+                "The imported source address could not be parsed confidently. "
+                "No operational address fields were changed."
+                if warnings else
+                "The operational address already matches the reparsed source address."
+            )
+            if warnings:
+                message += "\n\n" + "\n".join(f"- {warning}" for warning in warnings)
+            messagebox.showinfo("Reparse Imported Address", message, parent=dialog)
+            return
+
+        lines = ["The parser proposes these changes:", ""]
+        for field, value in changes.items():
+            old = current.get(field) or "—"
+            lines.append(f"{ADDRESS_FIELD_LABELS[field]}: {old} -> {value}")
+        if warnings:
+            lines.extend(("", "Warnings:"))
+            lines.extend(f"- {warning}" for warning in warnings)
+        lines.extend((
+            "",
+            "Load these values into the form? Nothing is saved until you click Save.",
+        ))
+        if not messagebox.askyesno(
+            "Reparse Imported Address", "\n".join(lines), parent=dialog
+        ):
+            return
+        for field, value in changes.items():
+            variables[field].set(value)
 
     def section(title, row):
         frame = ttk.LabelFrame(content, text=title, padding=(10, 6))
@@ -258,15 +321,27 @@ def show_job_form(parent, job: dict | None = None, markets=(), technicians=(), *
         state="readonly",
     )
     source_address.grid_configure(columnspan=5)
+    address_tools = ttk.Frame(address)
+    address_tools.grid(
+        row=1, column=1, columnspan=5, sticky="ew", padx=(0, 12), pady=(0, 5)
+    )
+    address_tools.columnconfigure(0, weight=1)
     ttk.Label(
-        address,
+        address_tools,
         text=(
             "Read-only source evidence. Correct the operational address below; locally changed "
             "fields are preserved during later imports."
         ),
         style="Status.TLabel",
-        wraplength=760,
-    ).grid(row=1, column=1, columnspan=5, sticky="w", padx=(0, 12), pady=(0, 5))
+        wraplength=620,
+    ).grid(row=0, column=0, sticky="w")
+    if job is not None:
+        ttk.Button(
+            address_tools,
+            text="Reparse Address",
+            command=reparse_address,
+            state="normal" if variables["capture_address_raw"].get().strip() else "disabled",
+        ).grid(row=0, column=1, sticky="e", padx=(10, 0))
     labeled_entry(address, 2, "Address 1", variables["address_1"])
     address.grid_slaves(row=2, column=1)[0].grid_configure(columnspan=5)
     labeled_entry(address, 3, "Address 2", variables["address_2"])

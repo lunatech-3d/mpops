@@ -9,7 +9,10 @@ from app.config import Settings
 from app.security.auth import AuthService
 from app.security.user_manager import UserManager
 from app.services.jobs_service import JobsService
-from app.ui.job_form import changed_fields, job_form_data, technicians_by_first_name
+from app.ui.job_form import (
+    changed_fields, job_form_data, reparse_address_changes,
+    technicians_by_first_name,
+)
 
 
 class JobTechnicianAssignmentTests(unittest.TestCase):
@@ -147,6 +150,49 @@ class JobTechnicianAssignmentTests(unittest.TestCase):
         self.assertEqual(changed_fields(original, submitted), {
             "address_1": "12 Corrected St",
         })
+
+    def test_reparse_address_repairs_whitespace_delimited_source(self):
+        source = "13205 E 14 Mile Rd        Sterling Heights    MI    48312"
+        changes, warnings = reparse_address_changes(source, {
+            "address_1": "13205 E 14 Mile Rd Sterling Heights",
+            "city": None,
+            "state": "MI",
+            "postal_code": "48312",
+        })
+
+        self.assertEqual(changes, {
+            "address_1": "13205 E 14 Mile Rd",
+            "city": "Sterling Heights",
+        })
+        self.assertEqual(warnings, [])
+
+    def test_reparse_address_never_clears_component_missing_from_source(self):
+        changes, warnings = reparse_address_changes(
+            "40053 8 Mile Road, Township of Northville, MI, USA",
+            {
+                "address_1": "40053 8 Mile Road",
+                "city": "Northville",
+                "state": "MI",
+                "postal_code": "48167",
+                "country": None,
+            },
+        )
+
+        self.assertEqual(changes, {
+            "city": "Township of Northville",
+            "country": "USA",
+        })
+        self.assertNotIn("postal_code", changes)
+        self.assertEqual(warnings, ["No ZIP found in the source address"])
+
+    def test_reparse_address_does_not_apply_an_ambiguous_parse(self):
+        changes, warnings = reparse_address_changes(
+            "44000 GARFIELD RD CLINTON TOWNSHIP MI",
+            {"address_1": None, "city": None, "state": None},
+        )
+
+        self.assertEqual(changes, {})
+        self.assertTrue(any("city" in warning for warning in warnings))
 
     def test_job_form_technicians_are_sorted_by_first_name_without_changing_ids(self):
         technicians = [
