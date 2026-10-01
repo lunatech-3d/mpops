@@ -9,6 +9,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from app.address_utils import normalize_us_postal_code, split_us_postal_code_suffix
 from app.date_utils import format_display_datetime, utc_now_iso
 from app.security.audit import record_event
 from app.services.assignment_service import AssignmentService
@@ -36,17 +37,29 @@ def parse_address(raw: str | None) -> dict[str, str | None]:
     result = {"address_1": None, "address_2": None, "city": None, "state": None,
               "postal_code": None, "country": None}
     parts = [part.strip() for part in str(raw or "").split(",") if part.strip()]
-    if len(parts) >= 4 and re.fullmatch(r"[A-Za-z]{2}", parts[-3]) and re.fullmatch(r"\d{5}(?:-\d{4})?", parts[-2]):
-        result.update(address_1=", ".join(parts[:-3]), city=parts[-4] if len(parts) > 4 else parts[1],
-                      state=parts[-3].upper(), postal_code=parts[-2], country=parts[-1])
-        # With the usual street, city, state, ZIP, country shape.
-        if len(parts) == 5:
-            result["address_1"], result["city"] = parts[0], parts[1]
-    elif len(parts) >= 3:
-        state_zip = re.fullmatch(r"([A-Za-z]{2})\s+(\d{5}(?:-\d{4})?)", parts[-1])
-        if state_zip:
-            result.update(address_1=", ".join(parts[:-2]), city=parts[-2],
-                          state=state_zip.group(1).upper(), postal_code=state_zip.group(2), country="US")
+    country = None
+    address_parts = parts
+    if parts and parts[-1].casefold() in {
+        "us", "usa", "united states", "united states of america",
+    }:
+        country = parts[-1]
+        address_parts = parts[:-1]
+
+    if len(address_parts) >= 4:
+        postal_code = normalize_us_postal_code(address_parts[-1])
+        state = address_parts[-2]
+        if postal_code and re.fullmatch(r"[A-Za-z]{2}", state):
+            result.update(address_1=", ".join(address_parts[:-3]),
+                          city=address_parts[-3], state=state.upper(),
+                          postal_code=postal_code, country=country)
+            return result
+
+    if len(address_parts) >= 3:
+        postal_code, state = split_us_postal_code_suffix(address_parts[-1])
+        if postal_code and re.fullmatch(r"[A-Za-z]{2}", state):
+            result.update(address_1=", ".join(address_parts[:-2]),
+                          city=address_parts[-2], state=state.upper(),
+                          postal_code=postal_code, country=country or "US")
     return result
 
 

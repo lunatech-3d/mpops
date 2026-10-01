@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from app.address_utils import split_us_postal_code_suffix
 from app.date_utils import utc_now_iso
 from app.security.audit import record_event
 from app.security.auth import AuthService, Session
@@ -61,7 +62,7 @@ _US_STATE_NAMES = {
 _COUNTRY_NAMES = frozenset({
     "us", "usa", "united states", "united states of america",
 })
-_ZIP_SUFFIX = re.compile(r"(?:^|\s)(\d{5}(?:-\d{4})?)$")
+_LEGACY_ZIP_SUFFIX = re.compile(r"(?:^|\s)(\d{5}(?:-\d{4})?)$")
 _STATE_SUFFIX = re.compile(
     r"(?:^|\s)(" + "|".join(re.escape(name) for name in sorted(
         _US_STATE_NAMES, key=len, reverse=True
@@ -220,9 +221,17 @@ class OpenTableImportService:
             if last.casefold() in _COUNTRY_NAMES:
                 result["country"] = "USA"
                 parts.pop()
-            elif result["postal_code"] is None and (zip_match := _ZIP_SUFFIX.search(last)):
-                result["postal_code"] = zip_match.group(1)
-                parts[-1] = last[:zip_match.start()].strip()
+                continue
+
+            if split_whitespace_columns:
+                postal_code, remainder = split_us_postal_code_suffix(last)
+            else:
+                zip_match = _LEGACY_ZIP_SUFFIX.search(last)
+                postal_code = zip_match.group(1) if zip_match else None
+                remainder = last[:zip_match.start()].strip() if zip_match else last
+            if result["postal_code"] is None and postal_code:
+                result["postal_code"] = postal_code
+                parts[-1] = remainder
                 if not parts[-1]:
                     parts.pop()
             elif (result["county"] is None and len(parts) >= 3

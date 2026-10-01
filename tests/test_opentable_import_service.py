@@ -127,6 +127,10 @@ class OpenTableImportServiceTests(unittest.TestCase):
                 ("123 Main St", "Grand Rapids", "MI", "49503-1234", None),
             ),
             (
+                "7221 Waverly Walk Ave, Charlotte, NC, 28277 8030",
+                ("7221 Waverly Walk Ave", "Charlotte", "NC", "28277-8030", None),
+            ),
+            (
                 "1965 Michigan Ave, Alma, MI, 48801, US",
                 ("1965 Michigan Ave", "Alma", "MI", "48801", "USA"),
             ),

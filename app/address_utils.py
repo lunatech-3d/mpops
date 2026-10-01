@@ -11,6 +11,9 @@ _EMPTY_ADDRESS_VALUES = {"", "none", "null"}
 _OPERATIONAL_METADATA = re.compile(
     r"^(?:capture|property|service)\s*type\s*:", re.IGNORECASE
 )
+_US_POSTAL_CODE_SUFFIX = re.compile(
+    r"(?<!\d)(\d{5})(?:[-\s]?(\d{4}))?$"
+)
 
 
 def _address_component(value: Any) -> str:
@@ -28,6 +31,29 @@ def _raw_address(value: Any) -> str:
 def _is_operational_metadata(value: str) -> bool:
     """Identify labeled job metadata that was imported into an address field."""
     return bool(_OPERATIONAL_METADATA.match(value))
+
+
+def split_us_postal_code_suffix(value: Any) -> tuple[str | None, str]:
+    """Return a normalized US ZIP code and the text before it.
+
+    ZIP+4 source values may use a hyphen, whitespace, or no separator. All
+    accepted nine-digit forms are normalized to the conventional ``12345-6789``
+    representation so every address intake path stores the same value.
+    """
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    match = _US_POSTAL_CODE_SUFFIX.search(text)
+    if not match:
+        return None, text
+    postal_code = match.group(1)
+    if match.group(2):
+        postal_code += "-" + match.group(2)
+    return postal_code, text[:match.start()].strip()
+
+
+def normalize_us_postal_code(value: Any) -> str | None:
+    """Normalize a value containing only a five- or nine-digit US ZIP code."""
+    postal_code, remainder = split_us_postal_code_suffix(value)
+    return postal_code if postal_code and not remainder else None
 
 
 def format_service_address(job: Mapping[str, Any]) -> str:

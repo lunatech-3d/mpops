@@ -166,6 +166,18 @@ class JobTechnicianAssignmentTests(unittest.TestCase):
         })
         self.assertEqual(warnings, [])
 
+    def test_reparse_address_normalizes_space_delimited_zip_plus_four(self):
+        source = "7221 Waverly Walk Ave, Charlotte, NC, 28277 8030"
+        changes, warnings = reparse_address_changes(source, {
+            "address_1": "7221 Waverly Walk Ave",
+            "city": "Charlotte",
+            "state": "NC",
+            "postal_code": "28277",
+        })
+
+        self.assertEqual(changes, {"postal_code": "28277-8030"})
+        self.assertEqual(warnings, [])
+
     def test_reparse_address_never_clears_component_missing_from_source(self):
         changes, warnings = reparse_address_changes(
             "40053 8 Mile Road, Township of Northville, MI, USA",
