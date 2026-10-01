@@ -155,6 +155,22 @@ class OpenTableImportServiceTests(unittest.TestCase):
                 "123 Main St, Raleigh, North Carolina 27601",
                 ("123 Main St", "Raleigh", "NC", "27601", None),
             ),
+            (
+                "40053 8 Mile Road, Township of Northville, MI, USA",
+                ("40053 8 Mile Road", "Township of Northville", "MI", None, "USA"),
+            ),
+            (
+                "13205 E 14 Mile Rd        Sterling Heights    MI    48312",
+                ("13205 E 14 Mile Rd", "Sterling Heights", "MI", "48312", None),
+            ),
+            (
+                "13205 E 14 Mile Rd\tSterling Heights\tMI\t48312",
+                ("13205 E 14 Mile Rd", "Sterling Heights", "MI", "48312", None),
+            ),
+            (
+                "1209 North Wisner Street, Jackson, MI, Jackson County, USA, 49202",
+                ("1209 North Wisner Street", "Jackson", "MI", "49202", "USA"),
+            ),
         ]
 
         for raw, expected in cases:
@@ -169,6 +185,10 @@ class OpenTableImportServiceTests(unittest.TestCase):
             "20759 Hall Road, Macomb, MI, Macomb County, USA, 48044"
         )
         self.assertEqual(county["county"], "Macomb County")
+        jackson = self.service._parse_address(
+            "1209 North Wisner Street, Jackson, MI, Jackson County, USA, 49202"
+        )
+        self.assertEqual(jackson["county"], "Jackson County")
 
     def test_ambiguous_michigan_address_is_held_for_review(self):
         parsed = self.service._parse_address(
@@ -492,6 +512,51 @@ class OpenTableImportServiceTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(tuple(job),
                          ("Dental Care at Village Commons", "6400 Weddington Rd Ste J", "NC"))
+
+    def test_reimport_repairs_unprotected_whitespace_parser_artifact(self):
+        raw = "13205 E 14 Mile Rd        Sterling Heights    MI    48312"
+        row = source_row("1001", "JOB-WHITESPACE", "Parent Record")
+        row["Capture Address"] = raw
+        self.write_rows([row])
+        self.service.import_csv(self.session, str(self.csv_path))
+
+        # Reproduce the values written by the former parser, which collapsed the
+        # column spacing before it tried to identify the city.
+        legacy = self.service._legacy_parse_address(raw)
+        with self.auth.connection() as connection:
+            connection.execute(
+                "UPDATE Jobs SET address_1 = ?, city = ? "
+                "WHERE external_job_id = 'JOB-WHITESPACE'",
+                (legacy["address_1"], legacy["city"]),
+            )
+
+        preview = self.service.preview(str(self.csv_path))
+
+        self.assertEqual(preview["counts"], {"updated": 1})
+        self.assertEqual(preview["items"][0]["changed_source_rows"], 0)
+        self.assertEqual(
+            preview["items"][0]["address_changes"], ["address_1", "city"]
+        )
+        self.assertEqual(preview["items"][0]["address_repairs"], ["address_1"])
+        self.assertEqual(preview["items"][0]["held_address_fields"], [])
+        self.assertEqual(
+            address_review_display(preview["items"][0]),
+            "Repair: Address 1; Fill: City",
+        )
+        self.assertIn(
+            "Will repair former parser value",
+            address_review_details(preview["items"][0]),
+        )
+
+        self.service.import_csv(self.session, str(self.csv_path))
+        with self.auth.connection() as connection:
+            job = connection.execute(
+                "SELECT capture_address_raw,address_1,city,state,postal_code "
+                "FROM Jobs WHERE external_job_id = 'JOB-WHITESPACE'"
+            ).fetchone()
+        self.assertEqual(tuple(job), (
+            raw, "13205 E 14 Mile Rd", "Sterling Heights", "MI", "48312"
+        ))
 
     def test_reimport_does_not_clear_legacy_nonblank_address(self):
         raw = "Studio 54 Dental, 100 Main St Suite 200"

@@ -37,9 +37,20 @@ def address_review_display(item):
         return "Review: " + ", ".join(PROTECTED_FIELD_LABELS.get(f, f) for f in held)
     if item.get("address_warnings"):
         return "Check source address"
-    filled = item.get("address_changes") or ()
+    repaired = set(item.get("address_repairs") or ())
+    filled = [field for field in (item.get("address_changes") or ())
+              if field not in repaired]
+    changes = []
+    if repaired:
+        changes.append("Repair: " + ", ".join(
+            PROTECTED_FIELD_LABELS.get(f, f) for f in sorted(repaired)
+        ))
     if filled:
-        return "Fill: " + ", ".join(PROTECTED_FIELD_LABELS.get(f, f) for f in filled)
+        changes.append("Fill: " + ", ".join(
+            PROTECTED_FIELD_LABELS.get(f, f) for f in filled
+        ))
+    if changes:
+        return "; ".join(changes)
     return "OK"
 
 
@@ -51,12 +62,14 @@ def address_review_details(item):
     current = item.get("current_address")
     parsed = item.get("parsed_address") or {}
     changed = set(item.get("address_changes") or ())
+    repaired = set(item.get("address_repairs") or ())
     held = set(item.get("held_address_fields") or ())
     protected = set(item.get("protected_job_fields") or ())
     lines.append("")
     for field, label in PROTECTED_FIELD_LABELS.items():
         status = ("Protected local value" if field in protected else
                   "Held for review" if field in held else
+                  "Will repair former parser value" if field in repaired else
                   "Will fill" if field in changed else
                   "New job" if current is None else "Unchanged")
         old = "—" if current is None else (current.get(field) or "—")
@@ -81,6 +94,7 @@ def preview_summary(preview):
         "address_review_jobs": sum(bool(item.get("held_address_fields") or
                                         item.get("address_warnings")) for item in items),
         "address_fill_jobs": sum(bool(item.get("address_changes")) for item in items),
+        "address_repair_jobs": sum(bool(item.get("address_repairs")) for item in items),
         "missing_parent": sum(int(item.get("parent_record_count", 0)) == 0 for item in items),
         "multiple_parents": sum(int(item.get("parent_record_count", 0)) > 1 for item in items),
     }
@@ -245,7 +259,7 @@ class OpenTableImportWindow(tk.Toplevel):
             f'{summary["source_rows"]} source rows, {summary["changed_source_rows"]} changed; '
             f'{summary["protected_fields"]} protected local value(s) on '
             f'{summary["protected_jobs"]} job(s); '
-            f'{summary["address_fill_jobs"]} job(s) with safe address fills; '
+            f'{summary["address_fill_jobs"]} job(s) with safe address updates; '
             f'{summary["address_review_jobs"]} address(es) needing review; '
             f'{warnings}.'
         )

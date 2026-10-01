@@ -174,7 +174,25 @@ class OpenTableImportService:
         return json.dumps(source, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
     @staticmethod
-    def _parse_address(raw: str | None) -> dict[str, str | None]:
+    def _address_parts(raw: str, *, split_whitespace_columns: bool) -> list[str]:
+        """Return address segments without erasing column-like whitespace.
+
+        Some Airtable exports contain an address laid out with tabs or runs of
+        spaces instead of commas. Only treat that whitespace as a delimiter when
+        the entire address has no commas; within a comma-delimited address it may
+        be intentional spacing in a facility or street name.
+        """
+        if split_whitespace_columns and "," not in raw:
+            parts = re.split(r"(?:\t+| {2,}|\r?\n+)", raw)
+        else:
+            parts = raw.split(",")
+        normalized = [re.sub(r"\s+", " ", part).strip() for part in parts]
+        return [part for part in normalized if part]
+
+    @classmethod
+    def _parse_address_version(
+        cls, raw: str | None, *, split_whitespace_columns: bool,
+    ) -> dict[str, str | None]:
         """Conservatively parse a US address using its right-hand suffix."""
         result = {
             "address_1": None,
@@ -188,8 +206,9 @@ class OpenTableImportService:
         if not raw or not str(raw).strip():
             return result
 
-        parts = [re.sub(r"\s+", " ", part).strip() for part in str(raw).split(",")]
-        parts = [part for part in parts if part]
+        parts = cls._address_parts(
+            str(raw).strip(), split_whitespace_columns=split_whitespace_columns
+        )
         if not parts:
             return result
 
@@ -235,6 +254,16 @@ class OpenTableImportService:
         if street:
             result["address_1"] = street
         return result
+
+    @classmethod
+    def _parse_address(cls, raw: str | None) -> dict[str, str | None]:
+        """Parse comma-delimited and column-spaced US source addresses."""
+        return cls._parse_address_version(raw, split_whitespace_columns=True)
+
+    @classmethod
+    def _legacy_parse_address(cls, raw: str | None) -> dict[str, str | None]:
+        """Reproduce the prior parser so its stored artifacts can be repaired."""
+        return cls._parse_address_version(raw, split_whitespace_columns=False)
 
     @staticmethod
     def _address_warnings(job_data: dict[str, Any]) -> list[str]:
@@ -307,11 +336,11 @@ class OpenTableImportService:
             "cancellation_reason": cancellation_reason,
         }
 
-    @staticmethod
+    @classmethod
     def _job_changes_with_review(
-        job_data: dict[str, Any], existing: Any,
+        cls, job_data: dict[str, Any], existing: Any,
         protected_fields: set[str] | frozenset[str] = frozenset(),
-    ) -> tuple[dict[str, Any], list[str]]:
+    ) -> tuple[dict[str, Any], list[str], list[str]]:
         """Update certain imported values; hold uncertain address changes for review.
 
         A complete street/city/state parse may fill blanks, even on an unchanged
@@ -320,7 +349,9 @@ class OpenTableImportService:
         """
         changes = {}
         held = []
+        repairs = []
         confident = all(job_data.get(field) for field in ("address_1", "city", "state"))
+        legacy_address = cls._legacy_parse_address(existing["capture_address_raw"])
         for field, value in job_data.items():
             if field == "external_job_id" or field in protected_fields or existing[field] == value:
                 continue
@@ -331,9 +362,15 @@ class OpenTableImportService:
                 held.append(field)
             elif existing[field] in (None, ""):
                 changes[field] = value
+            elif existing[field] == legacy_address.get(field):
+                # This exact value was produced by the former parser from the
+                # stored raw source. It is safe to replace unless an operator edit
+                # created a field-level override, which was handled above.
+                changes[field] = value
+                repairs.append(field)
             else:
                 held.append(field)
-        return changes, sorted(held)
+        return changes, sorted(held), sorted(repairs)
 
     @classmethod
     def _job_changes(
@@ -418,9 +455,9 @@ class OpenTableImportService:
 
             protected_fields = (overrides[int(existing_job["job_id"])]
                                 if existing_job else set())
-            job_changes, held_address = (self._job_changes_with_review(
+            job_changes, held_address, repaired_address = (self._job_changes_with_review(
                 group["job"], existing_job, protected_fields
-            ) if existing_job else ({}, []))
+            ) if existing_job else ({}, [], []))
             protected_changes = (sorted(
                 field for field in protected_fields & _ADDRESS_FIELDS
                 if existing_job[field] != group["job"][field]
@@ -452,6 +489,7 @@ class OpenTableImportService:
                 "changed_job_fields": sorted(job_changes),
                 "protected_job_fields": protected_changes,
                 "address_changes": address_changes,
+                "address_repairs": repaired_address,
                 "held_address_fields": held_address,
                 "address_warnings": self._address_warnings(group["job"]),
                 "parsed_address": {field: group["job"].get(field)

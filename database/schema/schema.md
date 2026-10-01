@@ -429,6 +429,12 @@ fills, held conflicts, protected differences, and parsing warnings. Operators ca
 correct held values in the Job editor. `capture_address_raw` remains source evidence
 and may change with a newer export.
 
+Address parsing accepts ordinary comma-delimited values and Airtable values laid out
+with tabs or runs of multiple spaces. When parser behavior improves, the importer may
+replace an unprotected component only when its current value exactly matches what the
+former parser produced from the stored raw source. This repairs identifiable parser
+artifacts without treating arbitrary existing values as importer-owned data.
+
 ## Keys and constraints
 
 * Primary key: `job_id`
